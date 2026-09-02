@@ -39,6 +39,7 @@ import numpy as np
 from quchip.backend import Backend, SolverResult
 from quchip.chip.chip import Chip
 from quchip.engine.ir import ResolvedFrame
+from quchip.engine.reference import time_shift
 from quchip.observables import OutputField, is_output_field
 from quchip.results.results import ObservableTrace, OutputFieldTrace
 from quchip.utils.constants import TWO_PI
@@ -498,11 +499,12 @@ def _build_output_traces(
             + 2.0 * xp.real(xp.conj(direct) * lowering)
             + number
         )
+        outbound_shift = time_shift(channel.reference.outbound)
         traces[key] = OutputFieldTrace(
             exposure=observable.exposure,
             times=times,
-            amplitude=_delay_trace(field, times, channel.reference_delay, xp),
-            photon_flux=_delay_trace(boundary_flux, times, channel.reference_delay, xp),
+            amplitude=_delay_trace(field, times, outbound_shift, xp),
+            photon_flux=_delay_trace(boundary_flux, times, outbound_shift, xp),
             raw_amplitude=field,
             raw_photon_flux=boundary_flux,
         )

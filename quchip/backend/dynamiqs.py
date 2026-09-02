@@ -593,20 +593,12 @@ class DynamiqsBackend(Backend):
         output_indices = jnp.asarray(problem.output_indices)
         output_rows = couplings[output_indices]
         responses = scattering[output_indices, problem.input_index][None, :] + amplitudes @ output_rows.T
-        delays = jnp.asarray(problem.reference_delays)
-        phases = jnp.exp(
-            1j
-            * 2.0
-            * jnp.pi
-            * frequencies[:, None]
-            * (delays[problem.input_index] + delays[output_indices])[None, :]
-        )
         residuals = jnp.linalg.norm(
             systems @ amplitudes[..., None] - input_vector[None, :, None],
             axis=(-2, -1),
         )
         return LinearResponseSolverResult(
-            responses=phases * responses,
+            responses=responses,
             residuals=residuals,
             condition_numbers=jnp.linalg.cond(systems),
         )

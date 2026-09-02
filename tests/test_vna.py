@@ -137,12 +137,9 @@ def test_vna_reference_delay_is_reciprocal() -> None:
         resonator = Resonator(freq=6.0, levels=5, label="r")
         network = PortNetwork(label="line")
         port = network.port("chip_port", target=resonator, rate=0.04)
-        network.expose(
-            "readout",
-            input=port.input,
-            output=port.output,
-            delay=delay,
-        )
+        cable = network.delay("cable", duration=delay)
+        network.link(port, cable)
+        network.expose("readout", at=cable.side(2))
         chip = Chip([resonator], port_network=network)
         return complex(VNA(chip, input="readout", outputs=["readout"]).sweep([6.01]).s11[0])
 
@@ -320,7 +317,15 @@ def test_eight_resonator_cascade_matches_exact_series_product() -> None:
         section = network.phase_shift(f"section{index}", phase=phase)
         network.cascade(previous, section, following)
         previous = following
-    network.expose("readout", input=ports[0], output=ports[-1], delay=0.08)
+    input_line = network.delay("input_line", duration=0.08)
+    output_line = network.delay("output_line", duration=0.08)
+    network.connect(input_line.output_terminal("2"), ports[0].input)
+    network.connect(ports[-1].output, output_line.input_terminal("1"))
+    network.expose(
+        "readout",
+        input=input_line.input_terminal("1"),
+        output=output_line.output_terminal("2"),
+    )
     frequencies = np.asarray([6.42, 6.69, 7.12])
 
     result = VNA(

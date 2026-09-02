@@ -13,6 +13,7 @@ from quchip.engine.input_output import (
     resolve_stationary_engine,
 )
 from quchip.engine.linear_response import try_build_linear_response_problem
+from quchip.engine.reference import cw_transfer
 from quchip.engine.ir import CanonicalOperator, EngineResult, SteadyStateProblem
 from quchip.engine.steady_state import solve_steadystate_problem
 from quchip.results.input_output import (
@@ -21,7 +22,6 @@ from quchip.results.input_output import (
     SParameterResult,
 )
 from quchip.sweep import Sweep, ZippedSweep, _axis_metadata, _iter_axis_points
-from quchip.utils.constants import TWO_PI
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar
 from quchip.utils.labeling import resolve_label
 
@@ -115,11 +115,14 @@ class VNA:
             if linear_problem is not None:
                 solved = self.chip.backend.linear_response(linear_problem)
                 xp = self.chip.backend.array_module
+                transfer = (
+                    linear_problem.inbound_transfer[:, linear_problem.input_index][:, None]
+                    * linear_problem.outbound_transfer[:, list(linear_problem.output_indices)]
+                )
+                decorated = transfer * solved.responses
                 linear_responses = {
                     (port.label, self.input.label): (
-                        solved.responses[:, index]
-                        if freq_is_axis
-                        else solved.responses[0, index]
+                        decorated[:, index] if freq_is_axis else decorated[0, index]
                     )
                     for index, port in enumerate(self.outputs)
                 }
@@ -416,17 +419,12 @@ class VNA:
                 if channel.collapse.frame_frequency is None
                 else channel.collapse.frame_frequency
             )
-            phase = xp.exp(
-                1j
-                * TWO_PI
-                * xp.asarray(frequency)
-                * xp.asarray(channel.reference_delay)
-            )
+            outbound = cw_transfer(channel.reference.outbound, frequency, xp)
             operators[channel.key] = operators[channel.key].scaled(
-                phase,
+                outbound,
                 tag=f"reference_plane:{channel.key}",
             )
-            incoming[channel.key] = phase * incoming[channel.key]
+            incoming[channel.key] = outbound * incoming[channel.key]
         return driven_engine, state, operators, incoming
 
     def _tone_values(self, params: dict[str, Any]) -> tuple[tuple[str, Any, Any], ...]:
@@ -504,8 +502,8 @@ def _stationary_output_backgrounds(
     incident = [xp.asarray(0.0 + 0.0j) for _ in external]
     for label, frequency, amplitude in tones:
         index = exposure_index[label]
-        incident[index] = incident[index] + xp.asarray(amplitude) * xp.exp(
-            1j * TWO_PI * xp.asarray(frequency) * xp.asarray(external[index].reference_delay)
+        incident[index] = incident[index] + xp.asarray(amplitude) * cw_transfer(
+            external[index].reference.inbound, frequency, xp
         )
     return {
         channel.key: sum(
@@ -552,18 +550,11 @@ def _small_signal_response(
         tuple((label, port_operators[label]) for label in output_labels),
         (0.0,),
     )
-    input_phase = xp.exp(
-        1j * TWO_PI * xp.asarray(frequency) * xp.asarray(external[input_index].reference_delay)
-    )
+    input_phase = cw_transfer(external[input_index].reference.inbound, frequency, xp)
     result: dict[str, Any] = {}
     for label in output_labels:
         output_index = exposure_index[label]
-        output_phase = xp.exp(
-            1j
-            * TWO_PI
-            * xp.asarray(frequency)
-            * xp.asarray(external[output_index].reference_delay)
-        )
+        output_phase = cw_transfer(external[output_index].reference.outbound, frequency, xp)
         boundary = xp.asarray(engine.slh.S[output_index, input_index]) + response[label][0]
         result[label] = input_phase * output_phase * boundary
     return result

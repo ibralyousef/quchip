@@ -897,20 +897,12 @@ class QuTiPBackend(Backend):
         responses = scattering[np.asarray(problem.output_indices), problem.input_index][None, :] + (
             amplitudes @ output_rows.T
         )
-        delays = np.asarray(problem.reference_delays)
-        phases = np.exp(
-            1j
-            * 2.0
-            * np.pi
-            * frequencies[:, None]
-            * (delays[problem.input_index] + delays[np.asarray(problem.output_indices)])[None, :]
-        )
         residuals = np.linalg.norm(
             systems @ amplitudes[..., None] - input_vector[None, :, None],
             axis=(-2, -1),
         )
         return LinearResponseSolverResult(
-            responses=phases * responses,
+            responses=responses,
             residuals=residuals,
             condition_numbers=np.linalg.cond(systems),
         )

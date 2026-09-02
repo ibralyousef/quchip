@@ -12,7 +12,7 @@ from typing import Any
 
 from quchip.chip.partition import connected_components
 from quchip.engine.ir import CanonicalOperator, EngineResult, StaticTerm
-from quchip.utils.constants import TWO_PI
+from quchip.engine.reference import cw_transfer
 from quchip.utils.jax_utils import maybe_concrete_scalar
 
 
@@ -113,9 +113,8 @@ def add_port_inputs(
     incident = [xp.asarray(0.0 + 0.0j) for _ in external]
     for port_label, frequency, amplitude in tones:
         input_index = exposure_index[port_label]
-        delay = external[input_index].reference_delay
-        incident[input_index] = incident[input_index] + xp.asarray(amplitude) * xp.exp(
-            1j * TWO_PI * xp.asarray(frequency) * xp.asarray(delay)
+        incident[input_index] = incident[input_index] + xp.asarray(amplitude) * cw_transfer(
+            external[input_index].reference.inbound, frequency, xp
         )
 
     terms = list(engine.applied_hamiltonian.static_terms)

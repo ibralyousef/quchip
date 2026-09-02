@@ -92,13 +92,14 @@ coupler = measurement_network.port(
     target=r,
     external_quality_factor=15_000,
 )
-cable = measurement_network.phase_shift("cable", phase=0.12)
-measurement_network.cascade(coupler, cable)
+phase = measurement_network.phase_shift("phase", phase=0.12)
+cable = measurement_network.delay("cable", duration=3.2)
+measurement_network.cascade(coupler, phase)
+measurement_network.connect(phase.output, cable.input_terminal("1"))
 vna_plane = measurement_network.expose(
     "vna_plane",
     input=coupler,
-    output=cable,
-    delay=3.2,
+    output=cable.output_terminal("2"),
 )
 
 measurement_chip = Chip([r], port_network=measurement_network)
@@ -130,8 +131,10 @@ two-sided attenuator uses power transmission `eta`; each direction has
 amplitude transmission `sqrt(eta)` and couples to one of two hidden vacuum
 channels with amplitude `sqrt(1-eta)`, so the resolved scattering matrix
 remains unitary. A reflected amplitude crossing the attenuator in both
-directions acquires a net factor `eta`. An exposure `delay` moves the reciprocal
-external reference plane; it does not become a Markov-network component.
+directions acquires a net factor `eta`. `network.delay(...)` adds a two-sided
+reference section, placed with `link` or `connect` like any other component.
+The compiler peels adjacent sections from each exposure leg before forming the
+Markovian `S`, `L`, and `H`.
 
 ## One-tone response
 
@@ -165,10 +168,11 @@ operator forms that cannot be classified as passive and linear.
 solver.
 
 The direct background remains the resolved network `S`, while `L` supplies the
-mode coupling and damping. Exposure delays transform both ends between the chip
-boundary and the declared reference planes. `SParameterResult` contains the
-scattering data and diagnostics; use `chip.steadystate()` when the stationary
-density matrix is itself the requested result.
+mode coupling and damping. Reference sections transform each exposure leg
+between the chip boundary and its declared reference plane, with a continuous-
+wave factor `exp(+i 2π f τ)` per leg. `SParameterResult` contains the scattering
+data and diagnostics; use `chip.steadystate()` when the stationary density
+matrix is itself the requested result.
 
 ## Finite fields and transient outputs
 
@@ -202,7 +206,7 @@ The field follows `b_out = S b_in + L`. `field.quadrature(phase=theta)` uses
 another solve. `field.photon_flux` is the normally ordered
 `<b_out^dagger b_out>`. Values are reported at the exposure reference plane;
 `field.raw_amplitude` and `field.raw_photon_flux` retain the Markov-boundary
-traces before the outbound delay.
+traces before the outbound reference sections shift them.
 
 ## Two-tone response
 

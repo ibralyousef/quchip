@@ -16,9 +16,10 @@ def _readout_chip(*, phase_shift: float | None = None) -> tuple[Chip, float]:
     network = PortNetwork(label="readout_line")
     port = network.port("readout", target=resonator, rate=0.03, phase=0.2)
     if phase_shift is not None:
-        cable = network.phase_shift("cable", phase=phase_shift)
-        network.cascade(port, cable)
-        network.expose("feedline", input=port.input, output=cable.output, delay=0.125)
+        shifter = network.phase_shift("cable", phase=phase_shift)
+        line = network.delay("line", duration=0.125)
+        network.cascade(port, shifter, line.input_terminal("1"))
+        network.expose("feedline", input=port.input, output=line.output_terminal("2"))
     chip = Chip(
         [qubit, resonator],
         [Capacitive(qubit, resonator, g=0.04, label="qr")],
@@ -54,7 +55,7 @@ def test_eliminate_preserves_scattering_and_explicit_exposure() -> None:
     assert tuple(plane.label for plane in reduced.port_network.exposures) == ("feedline",)
     np.testing.assert_allclose(after.S, before.S)
     assert after.external_channels[0].key == "feedline"
-    assert after.external_channels[0].reference_delay == before.external_channels[0].reference_delay
+    assert after.external_channels[0].reference == before.external_channels[0].reference
 
 
 def test_exact_elimination_also_retains_the_network_boundary() -> None:

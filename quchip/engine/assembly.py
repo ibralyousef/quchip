@@ -104,6 +104,7 @@ from quchip.engine.ir import (
 )
 from quchip.engine.ir import simplify_signal as _simplify_signal
 from quchip.engine.approximations import resolve_drive_program
+from quchip.engine.reference import time_shift
 from quchip.engine.basis import (
     BasisRecord,
     resolve_local_basis,
@@ -1304,10 +1305,9 @@ def _instantiate_coherent_terms(
                 f"{type(operation.coherent_input).__name__}.signal() must return "
                 f"AnalyticSignal, got {type(reference).__name__}."
             )
+        inbound_shift = time_shift(channel.reference.inbound)
         boundary = (
-            reference
-            if _is_concrete_zero(channel.reference_delay)
-            else reference.shifted(channel.reference_delay)
+            reference if _is_concrete_zero(inbound_shift) else reference.shifted(inbound_shift)
         )
         boundary_signals[operation_index] = boundary
         bound.append(

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 
 from quchip.chip.ports import Port
+from quchip.engine.reference import ReferenceDelay, ReferencePlane
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar, select_array_module
 from quchip.utils.labeling import auto_label, resolve_label
 
@@ -136,7 +137,6 @@ class FieldExposure:
     label: str
     _input_key: TerminalKey = field(repr=False)
     _output_key: TerminalKey = field(repr=False)
-    delay: Any = 0.0
     _hidden: bool = field(default=False, repr=False)
     _network_token: object = field(repr=False, compare=False, kw_only=True)
 
@@ -267,9 +267,6 @@ class PortNetwork:
         if isinstance(self._authored_scattering, Mapping):
             for (output, input_), value in self._authored_scattering.items():
                 values[f"scattering.{resolve_label(output)}.{resolve_label(input_)}"] = value
-        for exposure in self._exposures:
-            if not exposure._hidden:
-                values[f"exposure.{exposure.label}.delay"] = exposure.delay
         for label, parameters in self._component_parameters.items():
             for name, value in parameters.items():
                 values[f"component.{label}.{name}"] = value
@@ -287,11 +284,6 @@ class PortNetwork:
             if key in self._authored_scattering:
                 self._authored_scattering[key] = value
                 return
-        if len(parts) == 3 and parts[0] == "exposure" and parts[2] == "delay":
-            for index, exposure in enumerate(self._exposures):
-                if exposure.label == parts[1]:
-                    self._exposures[index] = replace(exposure, delay=value)
-                    return
         if len(parts) == 3 and parts[0] == "component":
             parameters = self._component_parameters.get(parts[1])
             if parameters is not None and parts[2] in parameters:
@@ -417,6 +409,32 @@ class PortNetwork:
         self._component_parameters[label] = {"eta": eta}
         return component
 
+    def delay(self, label: str, *, duration: Any) -> SLHComponent:
+        """Add a two-sided reference section with duration ``duration`` ns.
+
+        Place it with :meth:`link` or :meth:`connect` like any other component.
+        The compiler peels adjacent runs from each exposure leg, so the section
+        never enters Markovian ``S``, ``L``, or ``H``. Every reference section must
+        belong to one of these runs. Its duration is tracked at
+        ``network.component.<label>.duration``.
+        """
+        concrete = maybe_concrete_scalar(duration)
+        if concrete is not None and concrete < 0:
+            raise ValueError("Delay duration must be non-negative.")
+        component = SLHComponent(
+            label=label,
+            input_names=("1", "2"),
+            output_names=("1", "2"),
+            scattering=None,
+            _network_token=self._token,
+            sides=("1", "2"),
+            _local_ports=(None, None),
+        )
+        component = self._add_component(component)
+        self._component_kinds[label] = "delay"
+        self._component_parameters[label] = {"duration": duration}
+        return component
+
     def circulator(self, label: str, *, ports: int = 3) -> SLHComponent:
         """Add an ideal circulator routing side ``k`` to side ``k + 1``.
 
@@ -519,7 +537,6 @@ class PortNetwork:
         at: Port | SLHComponent | FieldSide | None = None,
         input: FieldTerminal | Port | SLHComponent | None = None,
         output: FieldTerminal | Port | SLHComponent | None = None,
-        delay: Any = 0.0,
     ) -> FieldExposure:
         """Name and return an external input/output reference plane.
 
@@ -546,21 +563,7 @@ class PortNetwork:
             raise ValueError("Connected terminals cannot also be exposed.")
         if self._terminal_is_exposed(input) or self._terminal_is_exposed(output):
             raise ValueError("A terminal cannot belong to more than one exposure.")
-        concrete = None
-        if not contains_tracer(delay):
-            try:
-                concrete = float(np.asarray(delay))
-            except (TypeError, ValueError):
-                concrete = None
-        if concrete is not None and concrete < 0:
-            raise ValueError("Exposure delay must be non-negative.")
-        exposure = FieldExposure(
-            label,
-            input.key,
-            output.key,
-            delay,
-            _network_token=self._token,
-        )
+        exposure = FieldExposure(label, input.key, output.key, _network_token=self._token)
         self._exposures.append(exposure)
         return exposure
 
@@ -587,10 +590,7 @@ class PortNetwork:
                 for component in self.components
             ),
             tuple(self._connections.items()),
-            tuple(
-                (item.label, item._input_key, item._output_key, self._cache_value(item.delay))
-                for item in self._exposures
-            ),
+            tuple((item.label, item._input_key, item._output_key) for item in self._exposures),
             self._cache_value(self._authored_scattering),
         )
 
@@ -614,7 +614,7 @@ class PortNetwork:
                 f"network={expected}, assembled={list(port_channels)}."
             )
 
-        exposures, scattering, coupling_maps, generated_pairs = self._compile()
+        exposures, scattering, coupling_maps, generated_pairs, planes = self._compile()
         operators = {label: port_channels[label].coupling for label in expected}
         frame_frequencies = [
             self._common_frame_frequency(
@@ -630,11 +630,12 @@ class PortNetwork:
         ]
 
         channels: list[SLHChannel] = []
-        for exposure, mapping, coupling, frame_frequency in zip(
+        for exposure, mapping, coupling, frame_frequency, plane in zip(
             exposures,
             coupling_maps,
             resolved_couplings,
             frame_frequencies,
+            planes,
             strict=True,
         ):
             if (
@@ -647,7 +648,7 @@ class PortNetwork:
                         port_channels[exposure.label],
                         key=exposure.label,
                         accessibility="hidden" if exposure._hidden else "exposed",
-                        reference_delay=exposure.delay,
+                        reference=plane,
                     )
                 )
                 continue
@@ -664,7 +665,7 @@ class PortNetwork:
                     accessibility="hidden" if exposure._hidden else "exposed",
                     collapse=template,
                     coupling_operator=coupling,
-                    reference_delay=exposure.delay,
+                    reference=plane,
                 )
             )
 
@@ -730,7 +731,6 @@ class PortNetwork:
                     "label": exposure.label,
                     "input": list(exposure._input_key),
                     "output": list(exposure._output_key),
-                    "delay": self._serialize_scalar(exposure.delay),
                 }
                 for exposure in self._exposures
             ],
@@ -788,7 +788,6 @@ class PortNetwork:
                     payload["label"],
                     tuple(payload["input"]),
                     tuple(payload["output"]),
-                    cls._deserialize_scalar(payload.get("delay", 0.0)),
                     _network_token=network._token,
                 )
             )
@@ -854,7 +853,8 @@ class PortNetwork:
         return [
             "This instantaneous Markovian boundary uses b_out = S b_in + L; "
             "scalar S is unitary after explicit vacuum loss dilation.",
-            "Exposure delays move reciprocal external reference planes only and do not enter S.",
+            "Reference sections shift incident and reported fields at external planes only "
+            "and do not enter S, L, or H.",
         ]
 
     def dynamical_supports(self, chip: Any) -> tuple[tuple[str, ...], ...]:
@@ -893,14 +893,18 @@ class PortNetwork:
         return self._active_pairs(self._compile()[3])
 
     @staticmethod
-    def _serialize_matrix(value: Any) -> dict[str, Any]:
+    def _serialize_matrix(value: Any) -> dict[str, Any] | None:
+        if value is None:
+            return None
         if contains_tracer(value):
             raise TypeError("Traced PortNetwork scattering cannot be serialized.")
         matrix = np.asarray(value, dtype=complex)
         return {"real": matrix.real.tolist(), "imag": matrix.imag.tolist()}
 
     @staticmethod
-    def _deserialize_matrix(value: Mapping[str, Any]) -> np.ndarray:
+    def _deserialize_matrix(value: Mapping[str, Any] | None) -> np.ndarray | None:
+        if value is None:
+            return None
         return np.asarray(value["real"]) + 1j * np.asarray(value["imag"])
 
     @classmethod
@@ -1013,18 +1017,66 @@ class PortNetwork:
                 )
         return tuple((*exposed, *hidden))
 
+    def _is_reference(self, label: str) -> bool:
+        return self._component_kinds.get(label) == "delay"
+
+    def _peel(self, exposure: FieldExposure) -> tuple[TerminalKey, TerminalKey, ReferencePlane]:
+        """Peel adjacent reference runs from ``exposure`` to the Markov boundary.
+
+        The returned plane orders inbound sections from exposure to boundary and
+        outbound sections from boundary to exposure.
+        """
+
+        def walk(
+            key: TerminalKey, step: Mapping[TerminalKey, TerminalKey]
+        ) -> tuple[TerminalKey, list[ReferenceDelay]]:
+            run: list[ReferenceDelay] = []
+            while self._is_reference(key[0]):
+                label, name = key
+                if any(element.label == label for element in run):
+                    raise ValueError(f"Reference component {label!r} feeds back into itself.")
+                run.append(ReferenceDelay(label, self._component_parameters[label]["duration"]))
+                other = (label, "2" if name == "1" else "1")
+                if other not in step:
+                    raise ValueError(
+                        f"Reference component {label!r} must connect toward the Markov boundary; "
+                        f"terminal {other} is free."
+                    )
+                key = step[other]
+            return key, run
+
+        boundary_input, inbound = walk(exposure._input_key, self._used_outputs)
+        boundary_output, outbound = walk(exposure._output_key, self._connections)
+        plane = ReferencePlane(inbound=tuple(inbound), outbound=tuple(reversed(outbound)))
+        return boundary_input, boundary_output, plane
+
     def _compile(
         self,
-    ) -> tuple[tuple[FieldExposure, ...], Any, list[dict[str, Any]], list[tuple[str, str, Any]]]:
+    ) -> tuple[
+        tuple[FieldExposure, ...],
+        Any,
+        list[dict[str, Any]],
+        list[tuple[str, str, Any]],
+        list[ReferencePlane],
+    ]:
         exposures = self._effective_exposures()
-        covered_inputs = {exposure._input_key for exposure in exposures}
-        covered_outputs = {exposure._output_key for exposure in exposures}
-        all_inputs = {
-            (component.label, name) for component in self.components for name in component.input_names
+        peeled = [self._peel(exposure) for exposure in exposures]
+        planes = [plane for _, _, plane in peeled]
+        reached = {
+            element.label for plane in planes for element in (*plane.inbound, *plane.outbound)
         }
-        all_outputs = {
-            (component.label, name) for component in self.components for name in component.output_names
-        }
+        unreached = [
+            label for label in self._components if self._is_reference(label) and label not in reached
+        ]
+        if unreached:
+            raise ValueError(
+                f"Reference components {unreached} must sit between an exposure and the Markov boundary."
+            )
+        core = [component for component in self.components if not self._is_reference(component.label)]
+        covered_inputs = {boundary_input for boundary_input, _, _ in peeled}
+        covered_outputs = {boundary_output for _, boundary_output, _ in peeled}
+        all_inputs = {(component.label, name) for component in core for name in component.input_names}
+        all_outputs = {(component.label, name) for component in core for name in component.output_names}
         free_inputs = all_inputs - set(self._connections) - covered_inputs
         free_outputs = all_outputs - set(self._used_outputs) - covered_outputs
         if free_inputs or free_outputs:
@@ -1038,14 +1090,14 @@ class PortNetwork:
         size = len(exposures)
         input_fields: dict[TerminalKey, _AffineField] = {}
         output_fields: dict[TerminalKey, _AffineField] = {}
-        for column, exposure in enumerate(exposures):
+        for column, (boundary_input, _, _) in enumerate(peeled):
             basis = [0.0] * size
             basis[column] = 1.0
-            input_fields[exposure._input_key] = _AffineField(basis, {})
+            input_fields[boundary_input] = _AffineField(basis, {})
 
         pending = {
             (component.label, name): (component, row)
-            for component in self.components
+            for component in core
             for row, name in enumerate(component.output_names)
         }
         matrices: dict[str, Any] = {}
@@ -1095,7 +1147,7 @@ class PortNetwork:
             if not progressed:
                 raise ValueError("PortNetwork contains instantaneous feedback or a connection cycle.")
 
-        rows = [output_fields[exposure._output_key] for exposure in exposures]
+        rows = [output_fields[boundary_output] for _, boundary_output, _ in peeled]
         scattering_rows = [row.scattering for row in rows]
         xp = select_array_module(contains_tracer(scattering_rows))
         scattering = xp.asarray(scattering_rows, dtype=complex)
@@ -1123,7 +1175,7 @@ class PortNetwork:
             ]
 
         self._validate_unitary(scattering)
-        return exposures, scattering, coupling_maps, generated_pairs
+        return exposures, scattering, coupling_maps, generated_pairs, planes
 
     def _boundary_scattering(self, labels: tuple[str, ...]) -> Any | None:
         authored = self._authored_scattering

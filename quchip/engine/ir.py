@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeAlias, cast
 import jax.tree_util as jtu
 import numpy as np
 
+from quchip.engine.reference import ReferencePlane
 from quchip.utils.jax_utils import (
     array_namespace,
     contains_tracer,
@@ -1061,7 +1062,7 @@ class SLHChannel:
     accessibility: ChannelAccess
     collapse: CollapseTerm
     coupling_operator: CanonicalOperator | None = None
-    reference_delay: Any = 0.0
+    reference: ReferencePlane = field(default_factory=ReferencePlane)
 
     @property
     def coupling(self) -> CanonicalOperator:
@@ -1256,8 +1257,8 @@ class BoundCoherentInput:
     """One solve-bound incident field, retained outside input-free SLH.
 
     ``reference_beta`` is the signal scheduled at the authored external
-    reference plane. ``beta`` includes the exposure's inbound propagation
-    delay and is the field composed with the Markov boundary.
+    reference plane. ``beta`` is shifted by the total duration of the exposure's
+    inbound reference run and is the field composed with the Markov boundary.
     """
 
     exposure: str
@@ -1701,6 +1702,9 @@ class LinearResponseProblem:
     ``couplings`` stacks the channel rows of ``L = C a``, and ``scattering``
     is the complete instantaneous SLH matrix including hidden vacuum and loss
     channels. Frequencies remain ordinary GHz at the public boundary.
+    ``inbound_transfer`` and ``outbound_transfer`` contain the per-frequency
+    reference factors for each external channel. Backends return the undecorated
+    Markov response; the engine applies both factors.
     """
 
     frequencies: Any
@@ -1710,7 +1714,8 @@ class LinearResponseProblem:
     scattering: Any
     input_index: int
     output_indices: tuple[int, ...]
-    reference_delays: tuple[Any, ...]
+    inbound_transfer: Any
+    outbound_transfer: Any
 
 
 @dataclass(frozen=True)

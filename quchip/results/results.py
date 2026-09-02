@@ -62,8 +62,8 @@ class OutputFieldTrace:
 
     ``amplitude`` is the complex mean field ``<b_out>`` and ``photon_flux``
     is the normally ordered ``<b_out dagger b_out>`` in photons/ns.
-    ``raw_*`` retain the same moments at the Markov boundary before the
-    reciprocal reference-plane delay.
+    ``raw_*`` retain the same moments at the Markov boundary, before propagation
+    through the outbound reference run.
     """
 
     exposure: str

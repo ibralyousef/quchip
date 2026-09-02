@@ -10,6 +10,7 @@ from quchip.declarative.expr import PhysicsExpr, materialize_expr
 from quchip.devices.spaces import FockSpace
 from quchip.engine.assembly import _apply_2pi_scalar
 from quchip.engine.ir import LinearResponseProblem
+from quchip.engine.reference import cw_transfer
 
 
 class _UnsupportedLinearModel(Exception):
@@ -83,7 +84,7 @@ def _build_linear_response_problem(
     for port in network.ports:
         raw_ports[port.label] = _port_coupling_vector(port, chip, mode_index, backend)
 
-    exposures, network_scattering, coupling_maps, generated_pairs = network._compile()
+    exposures, network_scattering, coupling_maps, generated_pairs, planes = network._compile()
     exposure_couplings = xp.stack(
         [
             sum(
@@ -128,7 +129,20 @@ def _build_linear_response_problem(
         raise ValueError(
             f"Unknown linear-response exposure. Available exposures: {list(external_labels)}"
         ) from error
-    delays = tuple(exposure.delay for exposure in exposures) + (0.0,) * len(hidden_couplings)
+    frequency_values = xp.asarray(frequencies, dtype=float)
+    external_planes = [plane for exposure, plane in zip(exposures, planes, strict=True) if not exposure._hidden]
+
+    def transfer_columns(runs: list[Any]) -> Any:
+        return xp.stack(
+            [
+                xp.broadcast_to(cw_transfer(run, frequency_values, xp), frequency_values.shape)
+                for run in runs
+            ],
+            axis=1,
+        )
+
+    inbound_transfer = transfer_columns([plane.inbound for plane in external_planes])
+    outbound_transfer = transfer_columns([plane.outbound for plane in external_planes])
     return LinearResponseProblem(
         frequencies=frequencies,
         mode_labels=labels,
@@ -137,7 +151,8 @@ def _build_linear_response_problem(
         scattering=scattering,
         input_index=input_index,
         output_indices=output_indices,
-        reference_delays=delays,
+        inbound_transfer=inbound_transfer,
+        outbound_transfer=outbound_transfer,
     )
 
 

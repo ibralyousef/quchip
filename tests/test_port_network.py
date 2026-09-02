@@ -200,18 +200,58 @@ def test_sequence_template_retains_composed_input_free_slh() -> None:
     np.testing.assert_allclose(resolved.L[0].to_dense(), chip.resolve().slh.L[0].to_dense())
 
 
-def test_exposure_delay_is_reference_plane_metadata_only() -> None:
-    """Exposure delay moves the reference plane without entering instantaneous SLH."""
+def test_delay_section_is_reference_plane_metadata_only() -> None:
+    """A linked delay decorates both legs of the plane without entering instantaneous SLH."""
     resonator = Resonator(freq=6.0, levels=2, label="r")
     network = PortNetwork(label="line")
     port = network.port("chip_port", target=resonator, rate=0.01)
-    network.expose("readout", input=port.input, output=port.output, delay=0.25)
+    cable = network.delay("cable", duration=0.25)
+    network.link(port, cable)
+    network.expose("readout", at=cable.side(2))
 
     resolved = Chip([resonator], port_network=network).resolve().slh
+    plane = resolved.external_channels[0].reference
 
-    assert resolved.external_channels[0].reference_delay == 0.25
+    assert [element.duration for element in plane.inbound] == [0.25]
+    assert [element.duration for element in plane.outbound] == [0.25]
     np.testing.assert_allclose(resolved.S, [[1.0]])
     np.testing.assert_allclose(resolved.L[0].to_dense(), np.sqrt(0.01) * _lowering(2))
+
+
+def test_delay_section_after_a_circulator_decorates_only_the_reached_legs() -> None:
+    """Reference sections apply per propagation path; interior sections are rejected."""
+    resonator = Resonator(freq=6.0, levels=2, label="r")
+    network = PortNetwork(label="fridge")
+    port = network.port("chip_port", target=resonator, rate=0.04)
+    circulator = network.circulator("circ")
+    line = network.delay("line", duration=1.5)
+    network.link(port, circulator.side(2))
+    network.link(circulator.side(3), line)
+    network.expose("drive", at=circulator.side(1))
+    network.expose("readout", at=line.side(2))
+    chip = Chip([resonator], port_network=network)
+
+    resolved = chip.resolve().slh
+    drive_plane, readout_plane = (channel.reference for channel in resolved.external_channels)
+
+    assert drive_plane.inbound == () and drive_plane.outbound == ()
+    assert [element.label for element in readout_plane.inbound] == ["line"]
+    assert [element.label for element in readout_plane.outbound] == ["line"]
+    rebound = chip.with_params({"network.component.line.duration": 2.5}).resolve().slh
+    assert rebound.external_channels[1].reference.outbound[0].duration == 2.5
+
+
+def test_reference_section_between_core_components_is_rejected() -> None:
+    """A delay must sit between an exposure and the Markov boundary, never inside the core."""
+    resonator = Resonator(freq=6.0, levels=2, label="r")
+    interior = PortNetwork(label="interior")
+    inner_port = interior.port("chip_port", target=resonator, rate=0.04)
+    inner_loss = interior.attenuator("loss", eta=0.5)
+    inner_cable = interior.delay("cable", duration=0.1)
+    interior.link(inner_port, inner_cable, inner_loss)
+    interior.expose("readout", at=inner_loss.side(2))
+    with pytest.raises(ValueError, match="Reference components"):
+        Chip([resonator], port_network=interior).resolve()
 
 
 def test_attenuator_is_a_reciprocal_two_sided_vacuum_dilation() -> None:
@@ -316,7 +356,9 @@ def test_network_graph_round_trips_and_clone_remains_independent() -> None:
     port = network.port("chip_port", target=resonator, rate=0.04)
     loss = network.attenuator("cold_loss", eta=0.64)
     network.link(port, loss)
-    network.expose("readout", at=loss.side(2), delay=0.1)
+    cable = network.delay("cable", duration=0.1)
+    network.link(loss, cable)
+    network.expose("readout", at=cable.side(2))
     chip = Chip([resonator], port_network=network)
 
     restored = Chip.from_dict(json.loads(json.dumps(chip.to_dict())))
@@ -324,7 +366,7 @@ def test_network_graph_round_trips_and_clone_remains_independent() -> None:
 
     np.testing.assert_allclose(restored.resolve().slh.S, chip.resolve().slh.S)
     np.testing.assert_allclose(restored.resolve().slh.L[0].to_dense(), chip.resolve().slh.L[0].to_dense())
-    assert restored.resolve().slh.external_channels[0].reference_delay == 0.1
+    assert restored.resolve().slh.external_channels[0].reference == chip.resolve().slh.external_channels[0].reference
     assert cloned.port_network is not chip.port_network
     assert cloned.ports[0] is not chip.ports[0]
     cloned.ports[0].rate = 0.09
@@ -334,28 +376,21 @@ def test_network_graph_round_trips_and_clone_remains_independent() -> None:
     np.testing.assert_allclose(chip.resolve().slh.S[0, :3], [0.64, 0.6, 0.48])
 
 
-def test_scattering_and_exposure_delay_are_bindable_network_parameters() -> None:
-    """Scattering entries and exposure delays rebind through stable parameter paths."""
+def test_scattering_entries_are_bindable_network_parameters() -> None:
+    """Scattering entries rebind through stable parameter paths."""
     resonator = Resonator(freq=6.0, levels=2, label="r")
     network = PortNetwork(
         label="line",
         scattering={("readout", "readout"): 1.0},
     )
-    port = network.port("chip_port", target=resonator, rate=0.04)
-    network.expose("readout", input=port.input, output=port.output, delay=0.1)
+    network.port("chip_port", target=resonator, rate=0.04)
+    network.expose("readout", at=network.ports[0])
     chip = Chip([resonator], port_network=network)
 
-    rebound = chip.with_params(
-        {
-            "network.scattering.readout.readout": -1.0,
-            "network.exposure.readout.delay": 0.2,
-        }
-    )
+    rebound = chip.with_params({"network.scattering.readout.readout": -1.0})
 
     np.testing.assert_allclose(rebound.resolve().slh.S, [[-1.0]])
-    assert rebound.resolve().slh.external_channels[0].reference_delay == 0.2
     np.testing.assert_allclose(chip.resolve().slh.S, [[1.0]])
-    assert chip.resolve().slh.external_channels[0].reference_delay == 0.1
 
 
 def test_attenuator_power_transmission_is_jax_differentiable() -> None:

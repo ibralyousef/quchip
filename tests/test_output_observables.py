@@ -34,12 +34,9 @@ def _one_port_chip(
     resonator = Resonator(freq=0.2, levels=4, label="r")
     network = PortNetwork(label="line")
     port = network.port("coupler", target=resonator, rate=rate)
-    plane = network.expose(
-        "readout",
-        input=port.input,
-        output=port.output,
-        delay=delay,
-    )
+    cable = network.delay("cable", duration=delay)
+    network.link(port, cable)
+    plane = network.expose("readout", at=cable.side(2))
     chip = Chip([resonator], port_network=network, frame="lab", backend=backend)
     return chip, resonator, plane
 
