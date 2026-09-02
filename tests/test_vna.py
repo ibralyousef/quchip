@@ -178,8 +178,29 @@ def test_vna_rejects_sweep_axes_it_does_not_own() -> None:
     _, input_port, _, chip = _linear_resonator(kappa_in=0.04)
     vna = VNA(chip, input=input_port, outputs=[input_port])
 
-    with pytest.raises(ValueError, match="created by this VNA"):
+    with pytest.raises(ValueError, match="this VNA"):
         vna.sweep([6.0], Sweep([5.9, 6.0], name="r.freq"))
+
+
+def test_vna_rejects_duplicate_public_axis_names() -> None:
+    """Custom axis names cannot collide with each other or with the frequency axis."""
+    _, input_port, _, chip = _linear_resonator(kappa_in=0.04)
+    vna = VNA(chip, input=input_port, outputs=[input_port])
+    pump = vna.pump(input_port, freq=5.0, amplitude=0.01)
+
+    with pytest.raises(ValueError, match="unique"):
+        vna.sweep(
+            [6.0, 6.01],
+            vna.zip(pump.vary("freq", [4.9, 5.1], name="power"), pump.vary("amplitude", [0.01, 0.02], name="power")),
+        )
+    with pytest.raises(ValueError, match="unique"):
+        vna.sweep([6.0, 6.01], pump.vary("amplitude", [0.01, 0.02], name="frequency"))
+    with pytest.raises(ValueError, match="unique"):
+        vna.sweep(
+            6.0,
+            vna.zip(pump.vary("freq", [4.9, 5.1], name="gain"), pump.vary("amplitude", [0.01, 0.02], name="phase")),
+            pump.vary("amplitude", [0.03, 0.04], name="gain/phase"),
+        )
 
 
 def test_vna_result_does_not_depend_on_chip_default_frame() -> None:
@@ -221,11 +242,11 @@ def test_fixed_tone_variation_uses_pump_axes_without_new_drive_physics() -> None
 
     result = vna.sweep(
         np.array([5.99, 6.0]),
-        vna.vary(pump, "freq", np.array([4.98, 5.02, 5.04])),
+        pump.vary("freq", np.array([4.98, 5.02, 5.04]), name="pump_freq"),
     )
 
     assert result.shape == (3, 2)
-    assert result.axis_names == ("pump_port.freq", "frequency")
+    assert result.axis_names == ("pump_freq", "frequency")
 
 
 def test_distinct_stationary_tones_on_one_mode_require_time_evolution() -> None:
@@ -297,10 +318,9 @@ def test_eight_resonator_cascade_matches_exact_series_product() -> None:
     previous = ports[0]
     for index, (phase, following) in enumerate(zip(phases, ports[1:], strict=True)):
         section = network.phase_shift(f"section{index}", phase=phase)
-        network.cascade(previous, section)
-        network.cascade(section, following)
+        network.cascade(previous, section, following)
         previous = following
-    network.expose("readout", input=ports[0].input, output=ports[-1].output, delay=0.08)
+    network.expose("readout", input=ports[0], output=ports[-1], delay=0.08)
     frequencies = np.asarray([6.42, 6.69, 7.12])
 
     result = VNA(
@@ -459,7 +479,7 @@ def test_two_tone_cross_kerr_model_produces_a_pump_frequency_axis() -> None:
 
     result = vna.sweep(
         np.array([5.99, 6.0]),
-        vna.vary(pump, "freq", np.array([4.97, 5.0, 5.03])),
+        pump.vary("freq", np.array([4.97, 5.0, 5.03])),
     )
 
     assert result.s11.shape == (3, 2)
@@ -486,7 +506,7 @@ def test_two_tone_probe_frame_propagates_through_passive_filter_network() -> Non
 
     result = vna.sweep(
         np.array([5.99, 6.00]),
-        vna.vary(pump, "freq", np.array([4.98, 5.00, 5.02])),
+        pump.vary("freq", np.array([4.98, 5.00, 5.02])),
     )
 
     assert result.s11.shape == (3, 2)

@@ -140,9 +140,8 @@ def test_phase_component_enters_series_coupling_and_generated_hamiltonian() -> N
     a = network.port("a_port", target=first, rate=0.04)
     phase = network.phase_shift("phase", phase=np.pi / 2)
     b = network.port("b_port", target=second, rate=0.09)
-    network.cascade(a, phase)
-    network.cascade(phase, b)
-    network.expose("feedline", input=a.input, output=b.output)
+    network.cascade(a, phase, b)
+    network.expose("feedline", input=a, output=b)
 
     resolved = Chip([first, second], port_network=network).resolve().slh
     identity = np.eye(2)
@@ -158,6 +157,29 @@ def test_phase_component_enters_series_coupling_and_generated_hamiltonian() -> N
         generated[0].operator.to_dense(),
         (product - product.conj().T) / (2j),
     )
+
+
+def test_cascade_and_expose_accept_terminals_ports_and_components() -> None:
+    """One cascade call chains mixed endpoints; ambiguous shorthand fails loudly."""
+    resonator = Resonator(freq=6.0, levels=2, label="r")
+    network = PortNetwork(label="line")
+    port = network.port("chip_port", target=resonator, rate=0.04)
+    loss = network.attenuator("cold_loss", eta=0.64)
+    splitter = network.beam_splitter("splitter")
+    network.cascade(port, loss, splitter.input_terminal("left"))
+    network.expose("readout", input=port, output=splitter.output_terminal("left"))
+
+    with pytest.raises(AttributeError, match="multiple inputs"):
+        network.expose("other", input=splitter, output=splitter.output_terminal("right"))
+    with pytest.raises(ValueError, match="output terminal"):
+        network.cascade(splitter.input_terminal("right"), port)
+
+    network.expose("spare", input=splitter.input_terminal("right"), output=splitter.output_terminal("right"))
+
+    resolved = Chip([resonator], port_network=network).resolve().slh
+    transmitted = 0.8 * np.sqrt(0.5) * np.sqrt(0.04) * _lowering(2)
+    np.testing.assert_allclose(resolved.L[0].to_dense(), transmitted)
+    np.testing.assert_allclose(resolved.L[1].to_dense(), -transmitted)
 
 
 def test_sequence_template_retains_composed_input_free_slh() -> None:

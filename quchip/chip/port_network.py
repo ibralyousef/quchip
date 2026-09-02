@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from itertools import pairwise
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -416,19 +417,28 @@ class PortNetwork:
         self._connections[input.key] = output.key
         self._used_outputs[output.key] = input.key
 
-    def cascade(self, first: Port | SLHComponent, second: Port | SLHComponent) -> None:
-        """Connect the sole or signal output of ``first`` to the input of ``second``."""
-        self.connect(self._output_of(first), self._input_of(second))
+    def cascade(self, *items: Port | SLHComponent | FieldTerminal) -> None:
+        """Connect each item's output to the next item's input in sequence."""
+        if len(items) < 2:
+            raise ValueError(f"cascade() requires at least two items, got {len(items)}")
+        for first, second in pairwise(items):
+            self.connect(self._endpoint_of(first, "output"), self._endpoint_of(second, "input"))
 
     def expose(
         self,
         label: str,
         *,
-        input: FieldTerminal,
-        output: FieldTerminal,
+        input: FieldTerminal | Port | SLHComponent,
+        output: FieldTerminal | Port | SLHComponent,
         delay: Any = 0.0,
     ) -> FieldExposure:
-        """Name and return one external input/output reference plane."""
+        """Name and return an external input/output reference plane.
+
+        Ports and components select their sole or signal terminal. Use explicit
+        terminals for multi-terminal components.
+        """
+        input = self._endpoint_of(input, "input")
+        output = self._endpoint_of(output, "output")
         self._validate_terminal(input, "input")
         self._validate_terminal(output, "output")
         self._reject_hidden_terminal(input)
@@ -1201,11 +1211,13 @@ class PortNetwork:
                 return component
         raise ValueError(f"Port {port.label!r} is not owned by this PortNetwork.")
 
-    def _input_of(self, value: Port | SLHComponent) -> FieldTerminal:
-        return self._component_for_port(value).input if isinstance(value, Port) else value.input
-
-    def _output_of(self, value: Port | SLHComponent) -> FieldTerminal:
-        return self._component_for_port(value).output if isinstance(value, Port) else value.output
+    def _endpoint_of(
+        self, value: Port | SLHComponent | FieldTerminal, direction: TerminalDirection
+    ) -> FieldTerminal:
+        if isinstance(value, FieldTerminal):
+            return value
+        component = self._component_for_port(value) if isinstance(value, Port) else value
+        return component.input if direction == "input" else component.output
 
     @staticmethod
     def _cache_value(value: Any) -> Any:

@@ -34,6 +34,27 @@ class PortTone:
     freq: Any
     amplitude: Any
     _index: int
+    _owner: "VNA"
+
+    def vary(self, field: str, values: Any, *, name: str | None = None) -> Sweep:
+        """Create a sweep axis for this tone's ``freq`` or ``amplitude``."""
+        if field not in {"freq", "amplitude"}:
+            raise ValueError(f"A port tone can vary only 'freq' or 'amplitude', got {field!r}.")
+        return _ToneAxis(
+            values,
+            name=f"__vna_tone_{self._index}_{field}",
+            owner=self._owner,
+            public_name=name or f"{self.port}.{field}",
+        )
+
+
+class _ToneAxis(Sweep):
+    """Sweep axis owned by one VNA tone; ``public_name`` labels the result axis."""
+
+    def __init__(self, values: Any, *, name: str, owner: "VNA", public_name: str) -> None:
+        super().__init__(values, name=name)
+        self.owner = owner
+        self.public_name = public_name
 
 
 @dataclass(frozen=True)
@@ -56,24 +77,13 @@ class VNA:
         if len(set(labels)) != len(labels):
             raise ValueError(f"VNA output ports must be unique, got {labels}.")
         self._tones: list[PortTone] = []
-        self._variations: set[Sweep] = set()
 
     def pump(self, port: Any, *, freq: Any, amplitude: Any) -> PortTone:
         """Add a fixed background tone and return its variation handle."""
         resolved = _resolve_exposure(self.chip, port)
-        tone = PortTone(resolved.label, freq, amplitude, len(self._tones))
+        tone = PortTone(resolved.label, freq, amplitude, len(self._tones), self)
         self._tones.append(tone)
         return tone
-
-    def vary(self, tone: PortTone, parameter: str, values: Any) -> Sweep:
-        """Create a sweep axis for one fixed tone's frequency or amplitude."""
-        if tone._index >= len(self._tones) or self._tones[tone._index] is not tone:
-            raise ValueError("The tone does not belong to this VNA.")
-        if parameter not in {"freq", "amplitude"}:
-            raise ValueError("A port tone can vary only 'freq' or 'amplitude'.")
-        variation = Sweep(values, name=f"__vna_tone_{tone._index}_{parameter}")
-        self._variations.add(variation)
-        return variation
 
     @staticmethod
     def zip(*variations: Sweep) -> ZippedSweep:
@@ -88,8 +98,8 @@ class VNA:
         progress: bool = False,
     ) -> SParameterResult:
         """Compute the differential scattering response around fixed pumps."""
-        self._validate_variations(variations)
         freq_values, freq_is_axis = _axis_values(frequencies)
+        self._validate_variations(variations, frequency_axis=freq_is_axis)
         variation_shape, variation_points = _iter_axis_points(variations)
         shape = variation_shape
         if freq_is_axis:
@@ -113,7 +123,7 @@ class VNA:
                     )
                     for index, port in enumerate(self.outputs)
                 }
-                axes = _public_axes(variations, self._tones)
+                axes = _public_axes(variations)
                 if freq_is_axis:
                     axes += (("frequency", freq_values),)
                 linear_diagnostics = tuple(
@@ -192,7 +202,7 @@ class VNA:
             (label, self.input.label): xp.reshape(xp.asarray(values), shape)
             for label, values in responses.items()
         }
-        axes = _public_axes(variations, self._tones)
+        axes = _public_axes(variations)
         if freq_is_axis:
             axes += (("frequency", freq_values),)
         return SParameterResult(
@@ -205,11 +215,23 @@ class VNA:
             _response=response_arrays,
         )
 
-    def _validate_variations(self, variations: tuple[Sweep | ZippedSweep, ...]) -> None:
+    def _validate_variations(
+        self, variations: tuple[Sweep | ZippedSweep, ...], *, frequency_axis: bool
+    ) -> None:
+        names = ["frequency"] if frequency_axis else []
         for variation in variations:
             members = variation.sweeps if isinstance(variation, ZippedSweep) else (variation,)
-            if any(member not in self._variations for member in members):
-                raise ValueError("VNA variations must be created by this VNA's vary() method.")
+            for member in members:
+                if not isinstance(member, _ToneAxis) or member.owner is not self:
+                    raise ValueError(
+                        "VNA variations must come from tone.vary(...) on a tone created by this VNA."
+                    )
+                if isinstance(variation, ZippedSweep):
+                    names.append(member.public_name)
+        names.extend(name for name, _ in _public_axes(variations))
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"VNA axis names must be unique, got duplicates {duplicates}.")
 
     def output_spectrum(
         self,
@@ -448,24 +470,14 @@ def _exposure_reference_frequency(chip: Any, label: str) -> Any:
     raise ValueError(f"Unknown VNA exposure {label!r}. Available exposures: {available}.")
 
 
-def _public_axis_name(name: str, tones: list[PortTone]) -> str:
-    prefix = "__vna_tone_"
-    if not name.startswith(prefix):
-        return name
-    body = name[len(prefix):]
-    index_text, parameter = body.split("_", 1)
-    return f"{tones[int(index_text)].port}.{parameter}"
-
-
-def _public_axes(
-    variations: tuple[Sweep | ZippedSweep, ...],
-    tones: list[PortTone] | None = None,
-) -> tuple[tuple[str, Any], ...]:
-    tone_list = tones or []
-    return _axis_metadata(
-        variations,
-        rename=lambda name: _public_axis_name(name, tone_list),
-    )
+def _public_axes(variations: tuple[Sweep | ZippedSweep, ...]) -> tuple[tuple[str, Any], ...]:
+    public = {
+        sweep.name: sweep.public_name
+        for axis in variations
+        for sweep in (axis.sweeps if isinstance(axis, ZippedSweep) else (axis,))
+        if isinstance(sweep, _ToneAxis)
+    }
+    return _axis_metadata(variations, rename=lambda name: public.get(name, name))
 
 
 def _solve_engine(chip: Any, engine: EngineResult, options: dict | None) -> Any:

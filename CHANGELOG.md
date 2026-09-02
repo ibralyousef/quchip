@@ -8,6 +8,7 @@ This file records notable user-visible changes to quchip.
 
 - Added an immutable, input-free scalar-S SLH normal form to every resolved engine snapshot. With no ports, ordinary closed/open-system quchip workflows retain their existing behavior.
 - Added `PortNetwork` for symbolic series composition, named exposures, convenient scalar scattering, reciprocal reference-plane delays, and unitary vacuum dilation of attenuation.
+- `PortNetwork.cascade(*items)` accepts variadic chains of ports, single-channel components, and explicit field terminals; `PortNetwork.expose(...)` accepts ports or components as shorthand for their sole or signal terminals. VNA pump tones own their frequency and amplitude axes through `pump.vary(...)`, with `name=` setting the result axis name; `vna.zip(...)` pairs axes point by point.
 - Added external-plane input scheduling through `network.expose(...).input`; coherent amplitudes are in `sqrt(photons/ns)` and are not stored on `ResolvedSLH`.
 - Added complete transient field traces through `result.output(plane)`, with complex amplitude, arbitrary post-solve quadratures, normally ordered photon flux, and the pre-delay Markov-boundary values derived from the same `b_out = S b_in + L` model. VNA probing remains small signal.
 

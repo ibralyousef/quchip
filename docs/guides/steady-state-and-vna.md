@@ -96,8 +96,8 @@ cable = measurement_network.phase_shift("cable", phase=0.12)
 measurement_network.cascade(coupler, cable)
 vna_plane = measurement_network.expose(
     "vna_plane",
-    input=coupler.input,
-    output=cable.output,
+    input=coupler,
+    output=cable,
     delay=3.2,
 )
 
@@ -187,20 +187,22 @@ traces before the outbound delay.
 
 ## Two-tone response
 
-A pump is a fixed port tone. `vary()` turns its frequency or amplitude into a
-sweep axis.
+A pump is a fixed port tone and owns its sweep axes. Call
+`pump.vary("freq", values)` or
+`pump.vary("amplitude", values, name="pump_power")`; `name=` becomes the result
+axis name, and a frequency axis defaults to `<plane>.freq`.
 
 ```python
 pump = vna.pump(qubit_port, freq=5.0, amplitude=0.02)
 
 trace = vna.sweep(
     6.8,
-    vna.vary(pump, "freq", np.linspace(4.8, 5.2, 401)),
+    pump.vary("freq", np.linspace(4.8, 5.2, 401)),
 )
 
 map_2d = vna.sweep(
     np.linspace(6.75, 6.85, 201),
-    vna.vary(pump, "freq", np.linspace(4.8, 5.2, 161)),
+    pump.vary("freq", np.linspace(4.8, 5.2, 161)),
 )
 ```
 
