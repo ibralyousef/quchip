@@ -1247,7 +1247,7 @@ def _compile_coherent_terms(
                 f"Unknown coherent-input exposure {operation.exposure!r}. "
                 f"Available exposures: {list(exposure_index)}."
             )
-        for output_index, channel in enumerate(external):
+        for output_index, channel in enumerate(slh.channels):
             scattering = slh.S[output_index, input_index]
             if _is_concrete_zero(scattering):
                 continue

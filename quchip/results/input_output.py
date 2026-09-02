@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -13,18 +13,21 @@ from quchip.utils.labeling import resolve_label
 
 @dataclass(frozen=True)
 class SParameterResult:
-    """Complex small-signal scattering over a declared VNA sweep grid."""
+    """Complete selected-plane small-signal scattering over a sweep grid.
+
+    ``matrix`` has shape ``(*shape, n_planes, n_planes)`` and is indexed
+    ``[..., output, input]`` in ``planes`` order. ``numpy.asarray(result)``
+    returns ``matrix``.
+    """
 
     frequencies: Any
-    input_port: str
-    output_ports: tuple[str, ...]
+    planes: tuple[str, ...]
     axes: tuple[tuple[str, Any], ...]
     shape: tuple[int, ...]
     diagnostics: tuple[Mapping[str, Any], ...]
-    _response: Mapping[tuple[str, str], Any] = field(repr=False)
+    matrix: Any
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "_response", MappingProxyType(dict(self._response)))
         object.__setattr__(
             self,
             "diagnostics",
@@ -36,31 +39,31 @@ class SParameterResult:
         """Names of the result axes, in array order."""
         return tuple(name for name, _ in self.axes)
 
-    def s(self, output: Any, input: Any | None = None) -> Any:
-        """Return one complex ``S(output, input)`` array."""
-        output_label = resolve_label(output)
-        input_label = self.input_port if input is None else resolve_label(input)
-        try:
-            return self._response[(output_label, input_label)]
-        except KeyError:
-            available = [key for key in self._response]
-            raise KeyError(f"S({output_label!r}, {input_label!r}) is unavailable. Available: {available}") from None
+    def s(self, output: Any, input: Any) -> Any:
+        """Return ``S(output, input)`` over the sweep grid for two selected planes."""
+        return self.matrix[..., self._index(output), self._index(input)]
 
     @property
     def s11(self) -> Any:
-        """Reflection at the swept input port."""
-        return self.s(self.input_port, self.input_port)
+        """Return reflection from the first selected plane back onto itself."""
+        return self.matrix[..., 0, 0]
 
     @property
     def s21(self) -> Any:
-        """Transmission to the first requested output distinct from the input."""
-        output = next((label for label in self.output_ports if label != self.input_port), None)
-        if output is None:
-            raise AttributeError("s21 requires an output port distinct from the swept input port.")
-        return self.s(output, self.input_port)
+        """Return transmission from the first selected plane to the second."""
+        if len(self.planes) < 2:
+            raise AttributeError("s21 requires at least two planes.")
+        return self.matrix[..., 1, 0]
+
+    def _index(self, plane: Any) -> int:
+        label = resolve_label(plane)
+        try:
+            return self.planes.index(label)
+        except ValueError:
+            raise KeyError(f"Plane {label!r} is not in this result. Available: {list(self.planes)}") from None
 
     def __array__(self) -> np.ndarray:
-        return np.asarray(self.s11)
+        return np.asarray(self.matrix)
 
 
 @dataclass(frozen=True)

@@ -583,20 +583,16 @@ class DynamiqsBackend(Backend):
         scattering = jnp.asarray(problem.scattering, dtype=jnp.complex128)
         frequencies = jnp.atleast_1d(jnp.asarray(problem.frequencies, dtype=jnp.float64))
         drift = -1j * hamiltonian - 0.5 * couplings.conj().T @ couplings
-        input_vector = -couplings.conj().T @ scattering[:, problem.input_index]
+        indices = jnp.asarray(problem.plane_indices)
+        sources = -couplings.conj().T @ scattering[:, indices]
         systems = (
             -1j * 2.0 * jnp.pi * frequencies[:, None, None]
             * jnp.eye(len(problem.mode_labels), dtype=jnp.complex128)[None, :, :]
             - drift[None, :, :]
         )
-        amplitudes = jnp.linalg.solve(systems, input_vector)
-        output_indices = jnp.asarray(problem.output_indices)
-        output_rows = couplings[output_indices]
-        responses = scattering[output_indices, problem.input_index][None, :] + amplitudes @ output_rows.T
-        residuals = jnp.linalg.norm(
-            systems @ amplitudes[..., None] - input_vector[None, :, None],
-            axis=(-2, -1),
-        )
+        amplitudes = jnp.linalg.solve(systems, sources[None, :, :])
+        responses = scattering[jnp.ix_(indices, indices)][None, :, :] + couplings[indices] @ amplitudes
+        residuals = jnp.linalg.norm(systems @ amplitudes - sources[None, :, :], axis=(-2, -1))
         return LinearResponseSolverResult(
             responses=responses,
             residuals=residuals,
@@ -606,14 +602,21 @@ class DynamiqsBackend(Backend):
     def stationary_resolvent(
         self,
         engine_result: Any,
-        source: Any,
+        sources: tuple[tuple[str, Any], ...],
         observables: tuple[tuple[str, Any], ...],
         frequencies: Any,
-    ) -> dict[str, Any]:
+    ) -> dict[tuple[str, str], Any]:
         """Evaluate stationary resolvents with Dynamiqs' JAX Liouvillian."""
         liouvillian = self._stationary_liouvillian(engine_result)
         dimension = math.prod(engine_result.dims)
-        source_vector = jnp.asarray(source.to_dense(), dtype=jnp.complex128).T.reshape(-1)
+        targets = jnp.stack(
+            [
+                jnp.asarray(operator.to_dense(), dtype=jnp.complex128).T.reshape(-1)
+                for _, operator in sources
+            ],
+            axis=1,
+        )
+        targets = targets.at[-1, :].set(0.0)
         trace_row = jnp.zeros((dimension * dimension,), dtype=jnp.complex128)
         trace_row = trace_row.at[:: dimension + 1].set(1.0)
         identity = jnp.eye(dimension * dimension, dtype=jnp.complex128)
@@ -621,17 +624,20 @@ class DynamiqsBackend(Backend):
             (label, jnp.asarray(operator.to_dense(), dtype=jnp.complex128))
             for label, operator in observables
         )
-        values: dict[str, list[Any]] = {label: [] for label, _ in observables}
-        target = source_vector.at[-1].set(0.0)
+        values: dict[tuple[str, str], list[Any]] = {
+            (source_label, label): [] for source_label, _ in sources for label, _ in observables
+        }
 
         for frequency in jnp.atleast_1d(jnp.asarray(frequencies, dtype=float)):
             shifted = liouvillian + 1j * (2.0 * jnp.pi) * frequency * identity
             constrained = shifted.at[-1, :].set(trace_row)
-            response = jnp.linalg.solve(constrained, target).reshape((dimension, dimension)).T
-            for label, observable in native_observables:
-                values[label].append(jnp.trace(observable @ response))
+            solutions = jnp.linalg.solve(constrained, targets)
+            for column, (source_label, _) in enumerate(sources):
+                response = solutions[:, column].reshape((dimension, dimension)).T
+                for label, observable in native_observables:
+                    values[(source_label, label)].append(jnp.trace(observable @ response))
 
-        return {label: jnp.asarray(items) for label, items in values.items()}
+        return {key: jnp.asarray(items) for key, items in values.items()}
 
     def stationary_propagate(
         self,

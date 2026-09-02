@@ -142,20 +142,24 @@ Markovian `S`, `L`, and `H`.
 import numpy as np
 from quchip import VNA
 
-vna = VNA(chip, input=input_port, outputs=[input_port, output_port])
+vna = VNA(chip, planes=[input_port, output_port])
 result = vna.sweep(np.linspace(6.75, 6.85, 501))
 
+matrix = result.matrix
 s11 = result.s11
 s21 = result.s21
 s_out_in = result.s(output_port, input_port)
 ```
 
-`sweep()` computes the small-signal derivative around the current fixed-tone
-operating point:
+`sweep()` computes every small-signal derivative between the selected planes
+around the current fixed-tone operating point:
 
 ```text
 S_ji(f) = d <b_out,j> / d beta_in,i  at beta_probe -> 0.
 ```
+
+`result.matrix` has shape `(*sweep_axes, n_planes, n_planes)` and is indexed
+`[..., output, input]` in `result.planes` order.
 
 For a passive-linear model without fixed pumps or stationary solver options,
 quchip lowers the declared Hamiltonian, loss channels, and `PortNetwork` to a
@@ -163,7 +167,10 @@ mode-space transfer problem. Eight harmonic resonators therefore require an
 eight-dimensional linear solve, not a density matrix on their product Hilbert
 space. The same call falls back to the stationary Liouvillian when the model
 contains Kerr terms, finite-level saturation, pumps, time dependence, or
-operator forms that cannot be classified as passive and linear.
+operator forms that cannot be classified as passive and linear. At each
+frequency, the passive-linear route uses one multi-right-hand-side mode-space
+solve. The stationary route solves one pumped operating point, then uses one
+shifted-Liouvillian factorization for every input plane.
 `result.diagnostics` records `linear_response` or `stationary_resolvent` as the
 solver.
 
@@ -171,8 +178,8 @@ The direct background remains the resolved network `S`, while `L` supplies the
 mode coupling and damping. Reference sections transform each exposure leg
 between the chip boundary and its declared reference plane, with a continuous-
 wave factor `exp(+i 2π f τ)` per leg. `SParameterResult` contains the scattering
-data and diagnostics; use `chip.steadystate()` when the stationary density
-matrix is itself the requested result.
+matrix, selected plane labels, and diagnostics; use `chip.steadystate()` when
+the stationary density matrix is itself the requested result.
 
 ## Finite fields and transient outputs
 

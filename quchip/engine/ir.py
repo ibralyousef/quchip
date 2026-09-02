@@ -1702,9 +1702,10 @@ class LinearResponseProblem:
     ``couplings`` stacks the channel rows of ``L = C a``, and ``scattering``
     is the complete instantaneous SLH matrix including hidden vacuum and loss
     channels. Frequencies remain ordinary GHz at the public boundary.
-    ``inbound_transfer`` and ``outbound_transfer`` contain the per-frequency
-    reference factors for each external channel. Backends return the undecorated
-    Markov response; the engine applies both factors.
+    ``plane_indices`` selects the external channels used as matrix rows and
+    columns. ``inbound_transfer`` and ``outbound_transfer`` contain the
+    per-frequency reference factors for each external channel. Backends return
+    the undecorated Markov response; the engine applies both factors.
     """
 
     frequencies: Any
@@ -1712,8 +1713,7 @@ class LinearResponseProblem:
     hamiltonian: Any
     couplings: Any
     scattering: Any
-    input_index: int
-    output_indices: tuple[int, ...]
+    plane_indices: tuple[int, ...]
     inbound_transfer: Any
     outbound_transfer: Any
 

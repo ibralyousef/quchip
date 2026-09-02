@@ -87,9 +87,9 @@ def resolve_stationary_engine(
 
 
 def port_operators(engine: EngineResult, backend: Any) -> dict[str, CanonicalOperator]:
-    """Return each resolved ``L_p = exp(i phi) sqrt(kappa) A_p`` operator."""
+    """Return each resolved channel coupling ``L_p = exp(i phi) sqrt(kappa) A_p``."""
     operators: dict[str, CanonicalOperator] = {}
-    for channel in engine.slh.external_channels:
+    for channel in engine.slh.channels:
         operators[channel.key] = channel.coupling.with_metadata(tag=f"port:{channel.key}")
     return operators
 
@@ -118,7 +118,7 @@ def add_port_inputs(
         )
 
     terms = list(engine.applied_hamiltonian.static_terms)
-    for output_index, channel in enumerate(external):
+    for output_index, channel in enumerate(engine.slh.channels):
         coefficient = xp.asarray(0.0 + 0.0j)
         for input_index, amplitude in enumerate(incident):
             coefficient = coefficient + xp.asarray(

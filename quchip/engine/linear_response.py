@@ -21,17 +21,11 @@ def try_build_linear_response_problem(
     chip: Any,
     frequencies: Any,
     *,
-    input_label: str,
-    output_labels: tuple[str, ...],
+    plane_labels: tuple[str, ...],
 ) -> LinearResponseProblem | None:
     """Return a compact passive-linear problem, or ``None`` for fallback."""
     try:
-        return _build_linear_response_problem(
-            chip,
-            frequencies,
-            input_label=input_label,
-            output_labels=output_labels,
-        )
+        return _build_linear_response_problem(chip, frequencies, plane_labels=plane_labels)
     except _UnsupportedLinearModel:
         return None
 
@@ -40,8 +34,7 @@ def _build_linear_response_problem(
     chip: Any,
     frequencies: Any,
     *,
-    input_label: str,
-    output_labels: tuple[str, ...],
+    plane_labels: tuple[str, ...],
 ) -> LinearResponseProblem:
     network = chip.port_network
     if network is None:
@@ -123,8 +116,7 @@ def _build_linear_response_problem(
     scattering = _set_block(scattering, xp.asarray(network_scattering), network_size)
     external_labels = tuple(exposure.label for exposure in exposures if not exposure._hidden)
     try:
-        input_index = external_labels.index(input_label)
-        output_indices = tuple(external_labels.index(label) for label in output_labels)
+        plane_indices = tuple(external_labels.index(label) for label in plane_labels)
     except ValueError as error:
         raise ValueError(
             f"Unknown linear-response exposure. Available exposures: {list(external_labels)}"
@@ -149,8 +141,7 @@ def _build_linear_response_problem(
         hamiltonian=hamiltonian,
         couplings=couplings,
         scattering=scattering,
-        input_index=input_index,
-        output_indices=output_indices,
+        plane_indices=plane_indices,
         inbound_transfer=inbound_transfer,
         outbound_transfer=outbound_transfer,
     )

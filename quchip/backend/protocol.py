@@ -716,17 +716,17 @@ class Backend(ABC):
     def stationary_resolvent(
         self,
         engine_result: "EngineResult",
-        source: "CanonicalOperator",
+        sources: tuple[tuple[str, "CanonicalOperator"], ...],
         observables: tuple[tuple[str, "CanonicalOperator"], ...],
         frequencies: Any,
-    ) -> dict[str, Any]:
-        """Evaluate trace-zero stationary resolvents in the backend's native representation.
+    ) -> dict[tuple[str, str], Any]:
+        """Evaluate trace-zero stationary resolvents in native backend arrays.
 
-        For every ordinary-GHz offset ``f``, solve
-        ``(L + i 2π f) X = source`` with ``Tr(X) = 0`` and return
-        ``Tr(observable X)`` for each named observable. The engine supplies
-        canonical operators; each backend owns Liouvillian construction and
-        the numerical linear solve.
+        For each ordinary-GHz offset ``f``, form and factor the trace-constrained
+        shifted Liouvillian once, then solve ``(L + i 2π f) X = source`` with
+        ``Tr(X) = 0`` for every named source column. Return ``Tr(observable X)``
+        keyed by ``(source, observable)``. The engine supplies canonical operators;
+        the backend owns Liouvillian construction, factorization, and solves.
         """
         raise NotImplementedError(f"{type(self).__name__} must implement stationary_resolvent()")
 

@@ -886,21 +886,16 @@ class QuTiPBackend(Backend):
         scattering = np.asarray(problem.scattering, dtype=complex)
         frequencies = np.atleast_1d(np.asarray(problem.frequencies, dtype=float))
         drift = -1j * hamiltonian - 0.5 * couplings.conj().T @ couplings
-        input_vector = -couplings.conj().T @ scattering[:, problem.input_index]
+        indices = np.asarray(problem.plane_indices)
+        sources = -couplings.conj().T @ scattering[:, indices]
         systems = (
             -1j * 2.0 * np.pi * frequencies[:, None, None]
             * np.eye(len(problem.mode_labels), dtype=complex)[None, :, :]
             - drift[None, :, :]
         )
-        amplitudes = np.linalg.solve(systems, input_vector)
-        output_rows = couplings[np.asarray(problem.output_indices)]
-        responses = scattering[np.asarray(problem.output_indices), problem.input_index][None, :] + (
-            amplitudes @ output_rows.T
-        )
-        residuals = np.linalg.norm(
-            systems @ amplitudes[..., None] - input_vector[None, :, None],
-            axis=(-2, -1),
-        )
+        amplitudes = np.linalg.solve(systems, sources[None, :, :])
+        responses = scattering[np.ix_(indices, indices)][None, :, :] + couplings[indices] @ amplitudes
+        residuals = np.linalg.norm(systems @ amplitudes - sources[None, :, :], axis=(-2, -1))
         return LinearResponseSolverResult(
             responses=responses,
             residuals=residuals,
@@ -910,41 +905,51 @@ class QuTiPBackend(Backend):
     def stationary_resolvent(
         self,
         engine_result: Any,
-        source: Any,
+        sources: tuple[tuple[str, Any], ...],
         observables: tuple[tuple[str, Any], ...],
         frequencies: Any,
-    ) -> dict[str, Any]:
+    ) -> dict[tuple[str, str], Any]:
         """Evaluate stationary resolvents with QuTiP's sparse Liouvillian."""
         _, _, liouvillian = self._stationary_system(engine_result)
         matrix = self._scipy_liouvillian(liouvillian)
-        source_operator = self.from_canonical_operator(source)
-        source_vector = np.asarray(
-            qutip.operator_to_vector(source_operator).full(), dtype=complex
-        ).reshape(-1)
-        dimension = source_operator.shape[0]
-        trace_row = np.zeros(dimension * dimension, dtype=complex)
-        trace_row[:: dimension + 1] = 1.0
-        identity = sparse.identity(matrix.shape[0], dtype=complex, format="csr")
+        native_sources = [(label, self.from_canonical_operator(operator)) for label, operator in sources]
+        dims = native_sources[0][1].dims
+        dimension = math.prod(engine_result.dims)
+        targets = np.stack(
+            [
+                np.asarray(qutip.operator_to_vector(operator).full(), dtype=complex).reshape(-1)
+                for _, operator in native_sources
+            ],
+            axis=1,
+        )
+        targets[-1, :] = 0.0
+        size = matrix.shape[0]
+        keep = sparse.diags([1.0] * (size - 1) + [0.0], format="csr", dtype=complex)
+        trace_row = sparse.csr_matrix(
+            (np.ones(dimension, dtype=complex), (np.full(dimension, size - 1), np.arange(0, size, dimension + 1))),
+            shape=(size, size),
+        )
+        base = keep @ matrix + trace_row
         native_observables = tuple(
             (label, self.from_canonical_operator(operator))
             for label, operator in observables
         )
-        values: dict[str, list[Any]] = {label: [] for label, _ in observables}
-        target = source_vector.copy()
-        target[-1] = 0.0
+        values: dict[tuple[str, str], list[Any]] = {
+            (source_label, label): [] for source_label, _ in sources for label, _ in observables
+        }
 
         for frequency in np.atleast_1d(np.asarray(frequencies, dtype=float)):
-            constrained = (matrix + 1j * (2.0 * np.pi) * frequency * identity).tolil()
-            constrained[-1, :] = trace_row
-            response_vector = sparse.linalg.spsolve(constrained.tocsc(), target)
-            response = Qobj(
-                response_vector.reshape((dimension, dimension), order="F"),
-                dims=source_operator.dims,
-            )
-            for label, observable in native_observables:
-                values[label].append((observable * response).tr())
+            constrained = (base + 1j * (2.0 * np.pi) * frequency * keep).tocsc()
+            solutions = sparse.linalg.splu(constrained).solve(targets)
+            for column, (source_label, _) in enumerate(native_sources):
+                response = Qobj(
+                    solutions[:, column].reshape((dimension, dimension), order="F"),
+                    dims=dims,
+                )
+                for label, observable in native_observables:
+                    values[(source_label, label)].append((observable * response).tr())
 
-        return {label: np.asarray(items) for label, items in values.items()}
+        return {key: np.asarray(items) for key, items in values.items()}
 
     def stationary_propagate(
         self,

@@ -437,8 +437,12 @@ This makes `result.expect` a **co-rotating readout**: observables are always rep
 `Chip.steadystate()` solves `L(rho_ss) = 0` together with
 `Tr(rho_ss) = 1`. It requires a static resolved Hamiltonian and a unique
 normalized stationary state. `VNA.sweep()` adds continuous-wave port terms in
-their stationary tone frames. Small-signal scattering differentiates the
-output mean around the fixed-tone state,
+their stationary tone frames and returns the complete scattering matrix
+between the selected planes. At each frequency, the stationary route solves
+one pumped operating point and uses one shifted-Liouvillian factorization for
+all input columns; the passive-linear route uses one multi-right-hand-side
+mode-space solve. Small-signal scattering differentiates the output mean
+around the fixed-tone state,
 
 ```text
 S_ji(f) = d <b_out,j> / d beta_in,i  at beta_probe -> 0.
