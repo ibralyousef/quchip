@@ -164,9 +164,9 @@ def test_cascade_and_expose_accept_terminals_ports_and_components() -> None:
     resonator = Resonator(freq=6.0, levels=2, label="r")
     network = PortNetwork(label="line")
     port = network.port("chip_port", target=resonator, rate=0.04)
-    loss = network.attenuator("cold_loss", eta=0.64)
+    line = network.phase_shift("line", phase=0.0)
     splitter = network.beam_splitter("splitter")
-    network.cascade(port, loss, splitter.input_terminal("left"))
+    network.cascade(port, line, splitter.input_terminal("left"))
     network.expose("readout", input=port, output=splitter.output_terminal("left"))
 
     with pytest.raises(AttributeError, match="multiple inputs"):
@@ -177,7 +177,7 @@ def test_cascade_and_expose_accept_terminals_ports_and_components() -> None:
     network.expose("spare", input=splitter.input_terminal("right"), output=splitter.output_terminal("right"))
 
     resolved = Chip([resonator], port_network=network).resolve().slh
-    transmitted = 0.8 * np.sqrt(0.5) * np.sqrt(0.04) * _lowering(2)
+    transmitted = np.sqrt(0.5) * np.sqrt(0.04) * _lowering(2)
     np.testing.assert_allclose(resolved.L[0].to_dense(), transmitted)
     np.testing.assert_allclose(resolved.L[1].to_dense(), -transmitted)
 
@@ -214,26 +214,31 @@ def test_exposure_delay_is_reference_plane_metadata_only() -> None:
     np.testing.assert_allclose(resolved.L[0].to_dense(), np.sqrt(0.01) * _lowering(2))
 
 
-def test_attenuator_uses_power_transmission_and_hidden_vacuum_dilation() -> None:
-    """Power attenuation resolves through a unitary hidden-vacuum dilation."""
+def test_attenuator_is_a_reciprocal_two_sided_vacuum_dilation() -> None:
+    """A linked attenuator attenuates both directions through hidden vacuum channels."""
     resonator = Resonator(freq=6.0, levels=2, label="r")
     network = PortNetwork(label="line")
     port = network.port("chip_port", target=resonator, rate=0.04)
     loss = network.attenuator("cold_loss", eta=0.64)
-    network.connect(port.output, loss.input)
-    network.expose("readout", input=port.input, output=loss.output)
+    network.link(port, loss)
+    network.expose("readout", at=loss.side(2))
 
     resolved = Chip([resonator], port_network=network).resolve().slh
     coupling = np.sqrt(0.04) * _lowering(2)
 
     assert [channel.key for channel in resolved.channels] == [
         "readout",
-        "hidden.cold_loss.vacuum",
+        "hidden.cold_loss.vacuum_1",
+        "hidden.cold_loss.vacuum_2",
     ]
-    assert [channel.accessibility for channel in resolved.channels] == ["exposed", "hidden"]
-    np.testing.assert_allclose(resolved.S, [[0.8, 0.6], [-0.6, 0.8]])
+    assert [channel.accessibility for channel in resolved.channels] == ["exposed", "hidden", "hidden"]
+    np.testing.assert_allclose(
+        resolved.S,
+        [[0.64, 0.6, 0.48], [-0.48, 0.8, -0.36], [-0.6, 0.0, 0.8]],
+    )
     np.testing.assert_allclose(resolved.L[0].to_dense(), 0.8 * coupling)
     np.testing.assert_allclose(resolved.L[1].to_dense(), -0.6 * coupling)
+    np.testing.assert_allclose(resolved.L[2].to_dense(), 0.0 * coupling)
     dissipative_strength = sum(
         operator.to_dense().conj().T @ operator.to_dense() for operator in resolved.L
     )
@@ -251,20 +256,19 @@ def test_network_dilation_precedes_stable_identity_hidden_baths() -> None:
     network = PortNetwork(label="line")
     port = network.port("chip_port", target=resonator, rate=0.04)
     loss = network.attenuator("cold_loss", eta=0.64)
-    network.connect(port.output, loss.input)
-    network.expose("readout", input=port.input, output=loss.output)
+    network.link(port, loss)
+    network.expose("readout", at=loss.side(2))
 
     resolved = Chip([resonator], port_network=network).resolve().slh
 
-    assert [channel.key for channel in resolved.channels[:2]] == [
+    assert [channel.key for channel in resolved.channels[:3]] == [
         "readout",
-        "hidden.cold_loss.vacuum",
+        "hidden.cold_loss.vacuum_1",
+        "hidden.cold_loss.vacuum_2",
     ]
-    assert resolved.channels[2].collapse.source == "r"
-    np.testing.assert_allclose(
-        resolved.S,
-        [[0.8, 0.6, 0.0], [-0.6, 0.8, 0.0], [0.0, 0.0, 1.0]],
-    )
+    assert resolved.channels[3].collapse.source == "r"
+    np.testing.assert_allclose(resolved.S[3], [0.0, 0.0, 0.0, 1.0])
+    np.testing.assert_allclose(resolved.S[:3, 3], 0.0)
 
 
 def test_from_ports_builds_an_explicit_identity_network() -> None:
@@ -311,8 +315,8 @@ def test_network_graph_round_trips_and_clone_remains_independent() -> None:
     network = PortNetwork(label="line")
     port = network.port("chip_port", target=resonator, rate=0.04)
     loss = network.attenuator("cold_loss", eta=0.64)
-    network.connect(port.output, loss.input)
-    network.expose("readout", input=port.input, output=loss.output, delay=0.1)
+    network.link(port, loss)
+    network.expose("readout", at=loss.side(2), delay=0.1)
     chip = Chip([resonator], port_network=network)
 
     restored = Chip.from_dict(json.loads(json.dumps(chip.to_dict())))
@@ -326,8 +330,8 @@ def test_network_graph_round_trips_and_clone_remains_independent() -> None:
     cloned.ports[0].rate = 0.09
     assert chip.ports[0].rate == 0.04
     rebound = chip.with_params({"network.component.cold_loss.eta": 0.25})
-    np.testing.assert_allclose(rebound.resolve().slh.S[:2, :2], [[0.5, np.sqrt(0.75)], [-np.sqrt(0.75), 0.5]])
-    np.testing.assert_allclose(chip.resolve().slh.S[:2, :2], [[0.8, 0.6], [-0.6, 0.8]])
+    np.testing.assert_allclose(rebound.resolve().slh.S[0, :3], [0.25, np.sqrt(0.75), 0.5 * np.sqrt(0.75)])
+    np.testing.assert_allclose(chip.resolve().slh.S[0, :3], [0.64, 0.6, 0.48])
 
 
 def test_scattering_and_exposure_delay_are_bindable_network_parameters() -> None:
@@ -364,10 +368,60 @@ def test_attenuator_power_transmission_is_jax_differentiable() -> None:
         network = PortNetwork(label="line")
         port = network.port("chip_port", target=resonator, rate=0.04)
         loss = network.attenuator("cold_loss", eta=eta)
-        network.connect(port.output, loss.input)
-        network.expose("readout", input=port.input, output=loss.output)
+        network.link(port, loss)
+        network.expose("readout", at=loss.side(2))
         value = Chip([resonator], port_network=network).resolve().slh.L[0].to_dense()[0, 1]
         return jnp.real(value)
 
     np.testing.assert_allclose(transmitted_coupling(0.64), 0.16)
     np.testing.assert_allclose(jax.grad(transmitted_coupling)(0.64), 0.125)
+
+
+def test_circulator_and_isolator_route_a_reflection_readout() -> None:
+    """Linked sides wire both directions; permutation rows compile terminal by terminal."""
+    resonator = Resonator(freq=6.0, levels=2, label="r")
+    network = PortNetwork(label="fridge")
+    port = network.port("chip_port", target=resonator, rate=0.04)
+    circulator = network.circulator("circ")
+    isolator = network.isolator("iso")
+    network.link(port, circulator.side(2))
+    network.link(circulator.side(3), isolator)
+    network.expose("drive", at=circulator.side(1))
+    network.expose("readout", at=isolator.side(2))
+    chip = Chip([resonator], port_network=network)
+
+    with pytest.raises(ValueError, match="side"):
+        network.expose("ambiguous", at=isolator)
+
+    resolved = chip.resolve().slh
+    coupling = np.sqrt(0.04) * _lowering(2)
+
+    assert [channel.key for channel in resolved.channels] == ["drive", "readout", "hidden.iso.load"]
+    np.testing.assert_allclose(resolved.S, [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    np.testing.assert_allclose(resolved.L[0].to_dense(), 0.0 * coupling)
+    np.testing.assert_allclose(resolved.L[1].to_dense(), coupling)
+    assert not [term for term in resolved.H.static_terms if term.origin == "network"]
+
+    restored = Chip.from_dict(json.loads(json.dumps(chip.to_dict())))
+    np.testing.assert_allclose(restored.resolve().slh.S, resolved.S)
+    np.testing.assert_allclose(chip.clone().resolve().slh.L[1].to_dense(), coupling)
+
+
+def test_link_rejects_directional_components_and_keeps_true_feedback_explicit() -> None:
+    """Only sided components link; a bidirectional line between two ports is feedback."""
+    first = Resonator(freq=5.0, levels=2, label="a")
+    second = Resonator(freq=6.0, levels=2, label="b")
+    directional = PortNetwork(label="directional")
+    with pytest.raises(ValueError, match="side"):
+        directional.link(
+            directional.port("a_port", target=first, rate=0.04),
+            directional.phase_shift("line", phase=0.1),
+        )
+
+    network = PortNetwork(label="loop")
+    network.link(
+        network.port("a_port", target=first, rate=0.04),
+        network.port("b_port", target=second, rate=0.09),
+    )
+    with pytest.raises(ValueError, match="feedback|cycle"):
+        Chip([first, second], port_network=network).resolve()

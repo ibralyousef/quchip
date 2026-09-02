@@ -201,9 +201,18 @@ L = L2 + S2 L1
 H = H1 + H2 + Im(L2^dagger S2 L1).
 ```
 
+`port.side` and `component.side(k)` each select one physical connector, pairing
+that side's input and output terminals. `network.link(...)` cables consecutive
+sides in both directions; each cable compiles to two directed terminal
+connections. An ideal circulator routes `1 -> 2 -> 3 -> 1`; an isolator is a
+circulator whose third side is a hidden vacuum load. Compilation proceeds per
+terminal, so permutation components do not create false cycles. Genuine
+instantaneous loops still raise.
+
 Concrete scattering must be unitary. Loss is represented by an explicit
-unitary dilation: an attenuator with power transmission `eta` has amplitude
-transmission `sqrt(eta)` and a hidden vacuum channel with amplitude
+unitary dilation: a two-sided reciprocal attenuator with power transmission
+`eta` has amplitude transmission `sqrt(eta)` in both directions and couples
+each direction to one of two hidden vacuum channels with amplitude
 `sqrt(1-eta)`. Network exposures define the external channel order. Their
 optional reciprocal delay moves the incident and reported reference planes;
 it never enters the instantaneous `S` or generates a Hamiltonian term.

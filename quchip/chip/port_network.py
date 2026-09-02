@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import pairwise
 from types import MappingProxyType
@@ -48,10 +48,19 @@ class SLHComponent:
     output_names: tuple[str, ...]
     scattering: Any
     _network_token: object = field(repr=False, compare=False)
+    sides: tuple[str, ...] = ()
     _local_ports: tuple[Port | None, ...] = field(default=(), repr=False, compare=False)
     _hidden_pairs: tuple[tuple[str, str, str], ...] = field(
         default=(), repr=False, compare=False
     )
+    _row_inputs: tuple[tuple[int, ...], ...] | None = field(default=None, repr=False, compare=False)
+
+    def side(self, name: str | int) -> "FieldSide":
+        """Return the physical side whose input and output terminals share ``name``."""
+        label = str(name)
+        if label not in self.sides:
+            raise KeyError(f"No side {label!r} on component {self.label!r}; available: {list(self.sides)}")
+        return FieldSide(self.input_terminal(label), self.output_terminal(label))
 
     @property
     def inputs(self) -> tuple[FieldTerminal, ...]:
@@ -110,6 +119,14 @@ class SLHComponent:
         raise AttributeError(
             f"Component {self.label!r} has multiple outputs; use output_terminal(name)."
         )
+
+
+@dataclass(frozen=True)
+class FieldSide:
+    """One physical connector pairing a component side's input and output terminals."""
+
+    input: FieldTerminal
+    output: FieldTerminal
 
 
 @dataclass(frozen=True, eq=False)
@@ -370,36 +387,90 @@ class PortNetwork:
         order = tuple(order)
         if sorted(order) != list(range(len(order))):
             raise ValueError("Permutation order must contain each input index exactly once.")
-        matrix = np.zeros((len(order), len(order)), dtype=complex)
-        matrix[np.arange(len(order)), order] = 1.0
-        return self.component(
-            label,
-            scattering=matrix,
-            terminals=tuple(str(index) for index in range(len(order))),
-        )
+        names = tuple(str(index) for index in range(len(order)))
+        return self._permutation_component(label, names, order, kind="scattering", sided=False)
 
     def attenuator(self, label: str, *, eta: Any) -> SLHComponent:
-        """Add a lossless dilation of power transmission ``eta`` and hidden vacuum."""
-        concrete = None
-        if not contains_tracer(eta):
-            try:
-                concrete = float(np.asarray(eta))
-            except (TypeError, ValueError):
-                concrete = None
+        """Add a reciprocal two-sided attenuator with power transmission ``eta``.
+
+        Each direction has amplitude transmission ``sqrt(eta)`` and couples to
+        one of two hidden vacuum channels with amplitude ``sqrt(1-eta)``.
+        """
+        concrete = maybe_concrete_scalar(eta)
         if concrete is not None and not 0.0 <= concrete <= 1.0:
             raise ValueError(f"Attenuator eta must lie in [0, 1], got {eta}.")
         component = SLHComponent(
             label=label,
-            input_names=("signal", "vacuum"),
-            output_names=("signal", "vacuum"),
-            scattering=self._transmission_matrix(eta),
+            input_names=("1", "2", "vacuum_1", "vacuum_2"),
+            output_names=("1", "2", "vacuum_1", "vacuum_2"),
+            scattering=self._attenuator_matrix(eta),
             _network_token=self._token,
-            _local_ports=(None, None),
-            _hidden_pairs=(("vacuum", "vacuum", f"hidden.{label}.vacuum"),),
+            sides=("1", "2"),
+            _local_ports=(None,) * 4,
+            _hidden_pairs=tuple(
+                (name, name, f"hidden.{label}.{name}") for name in ("vacuum_1", "vacuum_2")
+            ),
+            _row_inputs=((1, 3), (0, 2), (0, 2), (1, 3)),
         )
         component = self._add_component(component)
         self._component_kinds[label] = "attenuator"
         self._component_parameters[label] = {"eta": eta}
+        return component
+
+    def circulator(self, label: str, *, ports: int = 3) -> SLHComponent:
+        """Add an ideal circulator routing side ``k`` to side ``k + 1``.
+
+        The highest-numbered side routes back to side 1.
+        """
+        if ports < 3:
+            raise ValueError(f"A circulator needs at least three sides, got {ports}.")
+        names = tuple(str(index) for index in range(1, ports + 1))
+        sources = tuple((row - 1) % ports for row in range(ports))
+        return self._permutation_component(label, names, sources, kind="circulator")
+
+    def isolator(self, label: str) -> SLHComponent:
+        """Add an ideal isolator routing side 1 to side 2.
+
+        The reverse field is dumped into ``hidden.<label>.load``, whose vacuum
+        travels back toward side 1.
+        """
+        return self._permutation_component(
+            label,
+            ("1", "2", "load"),
+            (2, 0, 1),
+            kind="isolator",
+            hidden_pairs=(("load", "load", f"hidden.{label}.load"),),
+        )
+
+    def _permutation_component(
+        self,
+        label: str,
+        names: tuple[str, ...],
+        sources: Sequence[int],
+        *,
+        kind: str,
+        hidden_pairs: tuple[tuple[str, str, str], ...] = (),
+        sided: bool = True,
+    ) -> SLHComponent:
+        """Add a selection component whose output row ``r`` copies input ``sources[r]``."""
+        size = len(names)
+        matrix = np.zeros((size, size), dtype=complex)
+        matrix[np.arange(size), sources] = 1.0
+        hidden = {pair[0] for pair in hidden_pairs}
+        component = SLHComponent(
+            label=label,
+            input_names=names,
+            output_names=names,
+            scattering=matrix,
+            _network_token=self._token,
+            sides=tuple(name for name in names if name not in hidden) if sided else (),
+            _local_ports=(None,) * size,
+            _hidden_pairs=hidden_pairs,
+            _row_inputs=tuple((source,) for source in sources),
+        )
+        component = self._add_component(component)
+        if kind != "scattering":
+            self._component_kinds[label] = kind
         return component
 
     def connect(self, output: FieldTerminal, input: FieldTerminal) -> None:
@@ -417,26 +488,52 @@ class PortNetwork:
         self._connections[input.key] = output.key
         self._used_outputs[output.key] = input.key
 
+    def link(self, *items: Port | SLHComponent | FieldSide) -> None:
+        """Link consecutive physical sides in both directions.
+
+        When a two-sided component is passed directly, the chain enters side 1
+        and leaves side 2. Pass ``component.side(k)`` to select a side
+        explicitly.
+        """
+        for first, second in self._pairs("link", items):
+            left = self._side_of(first, leaving=True)
+            right = self._side_of(second, leaving=False)
+            self.connect(left.output, right.input)
+            self.connect(right.output, left.input)
+
     def cascade(self, *items: Port | SLHComponent | FieldTerminal) -> None:
         """Connect each item's output to the next item's input in sequence."""
-        if len(items) < 2:
-            raise ValueError(f"cascade() requires at least two items, got {len(items)}")
-        for first, second in pairwise(items):
+        for first, second in self._pairs("cascade", items):
             self.connect(self._endpoint_of(first, "output"), self._endpoint_of(second, "input"))
+
+    @staticmethod
+    def _pairs(name: str, items: tuple[Any, ...]) -> Iterator[tuple[Any, Any]]:
+        if len(items) < 2:
+            raise ValueError(f"{name}() requires at least two items, got {len(items)}")
+        return pairwise(items)
 
     def expose(
         self,
         label: str,
         *,
-        input: FieldTerminal | Port | SLHComponent,
-        output: FieldTerminal | Port | SLHComponent,
+        at: Port | SLHComponent | FieldSide | None = None,
+        input: FieldTerminal | Port | SLHComponent | None = None,
+        output: FieldTerminal | Port | SLHComponent | None = None,
         delay: Any = 0.0,
     ) -> FieldExposure:
         """Name and return an external input/output reference plane.
 
-        Ports and components select their sole or signal terminal. Use explicit
-        terminals for multi-terminal components.
+        Pass ``at=`` to expose one physical side. Use ``input=`` and
+        ``output=`` for an asymmetric plane; ports and components then select
+        their sole or ``signal`` terminal unless explicit terminals are passed.
         """
+        if at is not None:
+            if input is not None or output is not None:
+                raise TypeError("expose() takes either at= or input=/output=, not both.")
+            side = self._side_of(at, leaving=None)
+            input, output = side.input, side.output
+        if input is None or output is None:
+            raise TypeError("expose() requires at= or both input= and output=.")
         input = self._endpoint_of(input, "input")
         output = self._endpoint_of(output, "output")
         self._validate_terminal(input, "input")
@@ -607,6 +704,11 @@ class PortNetwork:
                     "output_names": list(component.output_names),
                     "scattering": self._serialize_matrix(component.scattering),
                     "hidden_pairs": [list(item) for item in component._hidden_pairs],
+                    "sides": list(component.sides),
+                    "row_inputs": (
+                        None if component._row_inputs is None
+                        else [list(item) for item in component._row_inputs]
+                    ),
                     "kind": self._component_kinds.get(component.label, "scattering"),
                     "parameters": {
                         name: self._serialize_scalar(value)
@@ -661,8 +763,13 @@ class PortNetwork:
                     output_names=tuple(payload["output_names"]),
                     scattering=cls._deserialize_matrix(payload["scattering"]),
                     _network_token=network._token,
+                    sides=tuple(payload.get("sides", ())),
                     _local_ports=tuple(None for _ in payload["output_names"]),
                     _hidden_pairs=tuple(tuple(item) for item in payload.get("hidden_pairs", [])),
+                    _row_inputs=(
+                        None if payload.get("row_inputs") is None
+                        else tuple(tuple(item) for item in payload["row_inputs"])
+                    ),
                 )
             )
             network._component_kinds[payload["label"]] = payload.get("kind", "scattering")
@@ -723,8 +830,10 @@ class PortNetwork:
                         output_names=component.output_names,
                         scattering=self._copy_value(component.scattering),
                         _network_token=copied._token,
+                        sides=component.sides,
                         _local_ports=component._local_ports,
                         _hidden_pairs=component._hidden_pairs,
+                        _row_inputs=component._row_inputs,
                     )
                 )
         copied._connections = dict(self._connections)
@@ -850,6 +959,7 @@ class PortNetwork:
             output_names=("field",),
             scattering=np.asarray([[1.0]], dtype=complex),
             _network_token=self._token,
+            sides=("field",),
             _local_ports=(port,),
         )
         self._add_component(component)
@@ -933,38 +1043,44 @@ class PortNetwork:
             basis[column] = 1.0
             input_fields[exposure._input_key] = _AffineField(basis, {})
 
-        pending = list(self._components)
+        pending = {
+            (component.label, name): (component, row)
+            for component in self.components
+            for row, name in enumerate(component.output_names)
+        }
+        matrices: dict[str, Any] = {}
         generated_pairs: list[tuple[str, str, Any]] = []
         while pending:
             progressed = False
-            for label in tuple(pending):
-                component = self._components[label]
-                incoming: list[_AffineField] = []
-                ready = True
-                for name in component.input_names:
-                    key = (label, name)
-                    if key in input_fields:
-                        incoming.append(input_fields[key])
-                        continue
-                    upstream_output = self._connections.get(key)
-                    if upstream_output is None or upstream_output not in output_fields:
-                        ready = False
+            for terminal, (component, row) in tuple(pending.items()):
+                label = component.label
+                columns = (
+                    range(len(component.input_names))
+                    if component._row_inputs is None
+                    else component._row_inputs[row]
+                )
+                incoming: dict[int, _AffineField] = {}
+                for column in columns:
+                    key = (label, component.input_names[column])
+                    source = input_fields.get(key)
+                    if source is None and key in self._connections:
+                        source = output_fields.get(self._connections[key])
+                    if source is None:
                         break
-                    incoming.append(output_fields[upstream_output])
-                if not ready:
-                    continue
-                matrix = self._component_matrix(component)
-                for row, output_name in enumerate(component.output_names):
+                    incoming[column] = source
+                else:
+                    if label not in matrices:
+                        matrices[label] = self._component_matrix(component)
+                    matrix = matrices[label]
                     scattering = [
-                        sum(matrix[row, column] * incoming[column].scattering[index] for column in range(len(incoming)))
+                        sum(matrix[row, column] * incoming[column].scattering[index] for column in incoming)
                         for index in range(size)
                     ]
                     upstream: dict[str, Any] = {}
-                    for column, incoming_field in enumerate(incoming):
+                    for column, incoming_field in incoming.items():
                         for coupling_source, coefficient in incoming_field.coupling.items():
                             upstream[coupling_source] = (
-                                upstream.get(coupling_source, 0.0)
-                                + matrix[row, column] * coefficient
+                                upstream.get(coupling_source, 0.0) + matrix[row, column] * coefficient
                             )
                     local_port = component._local_ports[row]
                     coupling = dict(upstream)
@@ -973,9 +1089,9 @@ class PortNetwork:
                         for coupling_source, coefficient in upstream.items():
                             generated_pairs.append((local_label, coupling_source, coefficient))
                         coupling[local_label] = coupling.get(local_label, 0.0) + 1.0
-                    output_fields[(label, output_name)] = _AffineField(scattering, coupling)
-                pending.remove(label)
-                progressed = True
+                    output_fields[terminal] = _AffineField(scattering, coupling)
+                    del pending[terminal]
+                    progressed = True
             if not progressed:
                 raise ValueError("PortNetwork contains instantaneous feedback or a connection cycle.")
 
@@ -1146,8 +1262,10 @@ class PortNetwork:
             phase = parameters["phase"]
             xp = select_array_module(contains_tracer(phase))
             matrix = xp.asarray([[xp.exp(1j * xp.asarray(phase))]])
-        elif kind in {"beam_splitter", "attenuator"}:
+        elif kind == "beam_splitter":
             matrix = self._transmission_matrix(parameters["eta"])
+        elif kind == "attenuator":
+            matrix = self._attenuator_matrix(parameters["eta"])
         else:
             matrix = component.scattering
         xp = select_array_module(contains_tracer(matrix))
@@ -1175,6 +1293,17 @@ class PortNetwork:
         transmission = xp.sqrt(xp.asarray(eta))
         loss = xp.sqrt(1.0 - xp.asarray(eta))
         return xp.asarray([[transmission, loss], [-loss, transmission]], dtype=complex)
+
+    @staticmethod
+    def _attenuator_matrix(eta: Any) -> Any:
+        """Return the reciprocal unitary dilation for a two-sided attenuator."""
+        xp = select_array_module(contains_tracer(eta))
+        t = xp.sqrt(xp.asarray(eta))
+        r = xp.sqrt(1.0 - xp.asarray(eta))
+        return xp.asarray(
+            [[0.0, t, 0.0, r], [t, 0.0, r, 0.0], [-r, 0.0, t, 0.0], [0.0, -r, 0.0, t]],
+            dtype=complex,
+        )
 
     def _validate_terminal(self, terminal: FieldTerminal, direction: TerminalDirection) -> None:
         if not isinstance(terminal, FieldTerminal):
@@ -1211,13 +1340,40 @@ class PortNetwork:
                 return component
         raise ValueError(f"Port {port.label!r} is not owned by this PortNetwork.")
 
+    def _side_of(
+        self, value: Port | SLHComponent | FieldSide, *, leaving: bool | None
+    ) -> FieldSide:
+        """Resolve a physical side for ``link`` or ``expose``.
+
+        For a two-sided component, ``leaving=True`` selects side 2,
+        ``leaving=False`` selects side 1, and ``leaving=None`` requires an
+        explicit side.
+        """
+        if isinstance(value, FieldSide):
+            self._validate_terminal(value.input, "input")
+            self._validate_terminal(value.output, "output")
+            return value
+        component = self._component_of(value)
+        if len(component.sides) == 1:
+            return component.side(component.sides[0])
+        if len(component.sides) == 2 and leaving is not None:
+            return component.side(component.sides[1 if leaving else 0])
+        raise ValueError(
+            f"Cannot infer a physical side for component {component.label!r} with "
+            f"{len(component.sides)} sides; pass component.side(k) for a "
+            "multi-sided component or use cascade() for a directional one."
+        )
+
     def _endpoint_of(
         self, value: Port | SLHComponent | FieldTerminal, direction: TerminalDirection
     ) -> FieldTerminal:
         if isinstance(value, FieldTerminal):
             return value
-        component = self._component_for_port(value) if isinstance(value, Port) else value
+        component = self._component_of(value)
         return component.input if direction == "input" else component.output
+
+    def _component_of(self, value: Port | SLHComponent) -> SLHComponent:
+        return self._component_for_port(value) if isinstance(value, Port) else value
 
     @staticmethod
     def _cache_value(value: Any) -> Any:

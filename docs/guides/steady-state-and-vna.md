@@ -107,12 +107,31 @@ print(resolved.slh.S)
 print(resolved.slh.L)
 ```
 
+For reflection readout through a circulator and isolator:
+
+```python
+network = PortNetwork(label="fridge")
+port = network.port("chip_port", target=r, rate=0.04)
+circulator = network.circulator("circ")
+isolator = network.isolator("iso")
+network.link(port, circulator.side(2))
+network.link(circulator.side(3), isolator)
+drive = network.expose("drive", at=circulator.side(1))
+readout = network.expose("readout", at=isolator.side(2))
+```
+
+Use `link` for physical cabling; it joins consecutive sides in both directions
+and traverses a two-sided component from side 1 to side 2. Use `cascade` for a
+directional SLH series connection.
+
 `PortNetwork` composes instantaneous scalar scattering with the port coupling
-operators. Scattering mappings use `(output, input)` keys. Attenuators are
-parameterized by power transmission and add their vacuum channel explicitly,
-so the resolved scattering matrix remains unitary. An exposure `delay` moves
-the reciprocal external reference plane; it does not become a Markov-network
-component.
+operators. Scattering mappings use `(output, input)` keys. A reciprocal
+two-sided attenuator uses power transmission `eta`; each direction has
+amplitude transmission `sqrt(eta)` and couples to one of two hidden vacuum
+channels with amplitude `sqrt(1-eta)`, so the resolved scattering matrix
+remains unitary. A reflected amplitude crossing the attenuator in both
+directions acquires a net factor `eta`. An exposure `delay` moves the reciprocal
+external reference plane; it does not become a Markov-network component.
 
 ## One-tone response
 
