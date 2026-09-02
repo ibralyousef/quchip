@@ -224,6 +224,34 @@ frequency. Different local carriers would make both the collective `L` and
 channels exist, quchip rejects that network and directs the model to the lab
 or a common frame.
 
+`network.filter(...)` adds a two-sided passive reference section with complex
+transfer `H(f)`. Its `transfer(frequency, **parameters)` callable takes scalar
+or array frequencies in ordinary GHz and remains outside the Markovian `S`,
+`L`, and `H`; each keyword parameter is tracked at
+`network.component.<label>.<name>`. Continuous-wave calculations, including
+VNA, small-signal response, spectra, and stationary pumps, apply `H(f)` exactly
+on each leg. In particular, `output_spectrum` scales the fluctuation spectrum
+at offset `nu` by
+
+```text
+|H(f_c + nu)|^2.
+```
+
+Transient filtering uses a narrowband carrier approximation rather than a
+time-domain convolution:
+
+```text
+beta_boundary(t) = H(f_carrier) beta_plane(t),
+b_out,plane(t) = H(f_c) b_out,boundary(t),
+Phi_plane(t) = |H(f_c)|^2 Phi_boundary(t).
+```
+
+Here `f_carrier` is the scheduled input carrier and `f_c` is the channel's
+rotating-frame carrier. A lab-frame outbound channel has no such carrier, so
+requesting its filtered output raises before the solve. A concrete evaluation
+with `|H| > 1` also raises: filter sections are passive, and gain belongs to a
+future amplifier model.
+
 Noise parameters are ordinary tracked attributes: set (or clear with `None`) at construction **or any time after** — collapse operators are rebuilt from current values on every solve, and post-construction writes get the same validation as the constructor. Chip-level shared/collective dissipation lives in `Bath` ([`quchip/chip/baths.py`](quchip/chip/baths.py)), attached at construction or later via `chip.add_bath(...)`; bath rates are Lindblad-ready 1/ns with no assembly `2π` (that boundary is Hamiltonian-only — a component's *intrinsic* `2π`, e.g. a resonator's `κ = 2π·f/Q`, is its own physics).
 
 ### 3.4 Authored local spaces and solver bases

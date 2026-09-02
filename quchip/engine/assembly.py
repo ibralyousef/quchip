@@ -104,7 +104,7 @@ from quchip.engine.ir import (
 )
 from quchip.engine.ir import simplify_signal as _simplify_signal
 from quchip.engine.approximations import resolve_drive_program
-from quchip.engine.reference import time_shift
+from quchip.engine.reference import carrier_transfer, has_filter, time_shift
 from quchip.engine.basis import (
     BasisRecord,
     resolve_local_basis,
@@ -1270,11 +1270,7 @@ def _compile_coherent_terms(
                     scattering=scattering,
                     lowering=lowering,
                     raising=raising,
-                    frame_frequency=(
-                        0.0
-                        if channel.collapse.frame_frequency is None
-                        else channel.collapse.frame_frequency
-                    ),
+                    frame_frequency=channel.carrier,
                 )
             )
     return tuple(compiled)
@@ -1309,6 +1305,9 @@ def _instantiate_coherent_terms(
         boundary = (
             reference if _is_concrete_zero(inbound_shift) else reference.shifted(inbound_shift)
         )
+        if has_filter(channel.reference.inbound):
+            carrier = 0.0 if reference.carrier is None else reference.carrier
+            boundary = boundary.scaled(carrier_transfer(channel.reference.inbound, carrier))
         boundary_signals[operation_index] = boundary
         bound.append(
             BoundCoherentInput(

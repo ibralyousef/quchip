@@ -294,3 +294,88 @@ def test_dynamiqs_output_quadrature_is_differentiable_after_the_solve() -> None:
     assert jnp.isfinite(value)
     assert jnp.isfinite(gradient)
     assert gradient != 0.0
+
+
+def _tilt(frequency, *, slope):
+    return 0.8 * np.exp(1j * slope * frequency)
+
+
+def test_transient_filters_apply_at_the_carrier() -> None:
+    """Inbound filters scale beta at the pulse carrier; outbound filters scale the reported field."""
+
+    def build(with_filter: bool):
+        resonator = Resonator(freq=0.2, levels=12, label="r")
+        network = PortNetwork(label="line")
+        port = network.port("coupler", target=resonator, rate=0.04)
+        if with_filter:
+            section = network.filter("tilt", transfer=_tilt, slope=1.3)
+            network.link(port, section)
+            plane = network.expose("readout", at=section.side(2))
+        else:
+            plane = network.expose("readout", at=port)
+        return Chip([resonator], port_network=network, frame="rotating"), plane
+
+    times = np.linspace(0.0, 30.0, 61)
+    traces = []
+    for with_filter in (False, True):
+        chip, plane = build(with_filter)
+        sequence = QuantumSequence(chip)
+        sequence.schedule(plane.input, envelope=Square(duration=20.0, amplitude=0.02), freq=0.2)
+        traces.append(sequence.simulate(tlist=times, e_ops={plane: plane.output}).output(plane))
+    plain, filtered = traces
+    factor = _tilt(0.2, slope=1.3)
+
+    np.testing.assert_allclose(filtered.raw_amplitude, factor * plain.raw_amplitude, atol=1e-5)
+    np.testing.assert_allclose(filtered.amplitude, factor**2 * plain.amplitude, atol=1e-5)
+    np.testing.assert_allclose(filtered.photon_flux, abs(factor) ** 4 * plain.photon_flux, atol=1e-5)
+
+
+def test_outbound_filter_needs_a_known_output_carrier() -> None:
+    """A lab-frame output has no carrier to evaluate an outbound filter at."""
+    resonator = Resonator(freq=0.2, levels=4, label="r")
+    network = PortNetwork(label="line")
+    port = network.port("coupler", target=resonator, rate=0.04)
+    section = network.filter("tilt", transfer=_tilt, slope=1.3)
+    network.link(port, section)
+    plane = network.expose("readout", at=section.side(2))
+    chip = Chip([resonator], port_network=network, frame="lab")
+
+    with pytest.raises(ValueError, match="carrier"):
+        QuantumSequence(chip).simulate(
+            tlist=np.linspace(0.0, 1.0, 5),
+            initial_state={resonator: 1},
+            e_ops={plane: plane.output},
+        )
+
+
+def test_dynamiqs_transient_filter_parameter_is_differentiable() -> None:
+    """A traced filter parameter flows through the inbound and outbound carrier factors."""
+    pytest.importorskip("dynamiqs")
+    import jax
+    import jax.numpy as jnp
+
+    def tilt(frequency, *, slope):
+        return 0.8 * jnp.exp(1j * slope * frequency)
+
+    resonator = Resonator(freq=0.2, levels=6, label="r")
+    network = PortNetwork(label="line")
+    port = network.port("coupler", target=resonator, rate=0.04)
+    section = network.filter("tilt", transfer=tilt, slope=1.3)
+    network.link(port, section)
+    plane = network.expose("readout", at=section.side(2))
+    chip = Chip([resonator], port_network=network, frame="rotating", backend="dynamiqs")
+
+    def final_quadrature(slope: object) -> object:
+        sequence = QuantumSequence(chip.with_params({"network.component.tilt.slope": slope}))
+        sequence.schedule(plane.input, envelope=Square(duration=5.0, amplitude=0.02), freq=0.2)
+        field = sequence.simulate(
+            tlist=jnp.linspace(0.0, 5.0, 6),
+            e_ops={plane: plane.output},
+            partition=False,
+        ).output(plane)
+        return field.quadrature()[-1]
+
+    value, gradient = jax.value_and_grad(final_quadrature)(jnp.asarray(1.3))
+    assert jnp.isfinite(value)
+    assert jnp.isfinite(gradient)
+    assert gradient != 0.0

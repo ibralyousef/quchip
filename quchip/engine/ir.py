@@ -1065,6 +1065,11 @@ class SLHChannel:
     reference: ReferencePlane = field(default_factory=ReferencePlane)
 
     @property
+    def carrier(self) -> Any:
+        """Return this channel's stationary carrier in GHz, zero when unframed."""
+        return 0.0 if self.collapse.frame_frequency is None else self.collapse.frame_frequency
+
+    @property
     def coupling(self) -> CanonicalOperator:
         """Return the physical coupling operator for this channel."""
         if self.coupling_operator is not None:
@@ -1102,8 +1107,21 @@ class ResolvedSLH:
     scattering: Any
     hamiltonian: HamiltonianProgram
     channels: tuple[SLHChannel, ...] = ()
+    support: Any = None
 
     def __post_init__(self) -> None:
+        size = len(self.channels)
+        support = (
+            np.ones((size, size), dtype=bool)
+            if self.support is None
+            else np.array(self.support, dtype=bool, copy=True)
+        )
+        if support.shape != (size, size):
+            raise ValueError(
+                f"ResolvedSLH support must be one boolean per channel pair; got {support.shape} for {size} channels."
+            )
+        support.setflags(write=False)
+        object.__setattr__(self, "support", support)
         scattering = self.scattering
         if isinstance(scattering, np.ndarray) or not hasattr(scattering, "shape"):
             scattering = np.array(scattering, dtype=complex, copy=True)
@@ -1168,12 +1186,17 @@ class ResolvedSLH:
                 dynamic_terms=tuple(dynamic_terms),
             ),
             channels=channels,
+            support=np.eye(len(channels), dtype=bool),
         )
 
     @property
     def S(self) -> Any:
         """Return the scalar scattering matrix."""
         return self.scattering
+
+    def feeds(self, output_index: int, input_index: int) -> bool:
+        """Return whether input channel ``input_index`` structurally reaches output ``output_index``."""
+        return bool(self.support[output_index, input_index])
 
     @property
     def L(self) -> tuple[CanonicalOperator, ...]:

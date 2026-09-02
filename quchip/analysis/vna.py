@@ -12,9 +12,10 @@ from quchip.engine.input_output import (
     add_port_inputs,
     port_operators,
     resolve_stationary_engine,
+    same_frequency,
 )
 from quchip.engine.linear_response import try_build_linear_response_problem
-from quchip.engine.reference import cw_transfer
+from quchip.engine.reference import carrier_transfer, cw_transfer
 from quchip.engine.ir import CanonicalOperator, EngineResult, SteadyStateProblem
 from quchip.engine.steady_state import solve_steadystate_problem
 from quchip.results.input_output import (
@@ -220,15 +221,18 @@ class VNA:
         """
         output_port = _resolve_exposure(self.chip, output)
         frequency_values, _ = _axis_values(frequencies)
-        engine, state, operators, incoming = self._stationary_output(output_port, options)
+        engine, state, operators, incoming, tones = self._stationary_output(output_port, options)
         xp = self.chip.backend.array_module
         rho = xp.asarray(self.chip.backend.to_array(state.state), dtype=complex)
-        field = _output_field_matrix(
+        channel = next(item for item in engine.slh.external_channels if item.key == output_port)
+        carrier = self._output_carrier(engine, output_port, tones)
+        boundary_field = _output_field_matrix(
             operators[output_port], incoming.get(output_port, 0.0), xp
         )
+        field = cw_transfer(channel.reference.outbound, carrier, xp) * boundary_field
         mean = xp.trace(field @ rho)
         identity = xp.eye(rho.shape[0], dtype=complex)
-        fluctuation = field - mean * identity
+        fluctuation = boundary_field - xp.trace(boundary_field @ rho) * identity
         intensity = xp.real(xp.trace(xp.conj(xp.swapaxes(field, -1, -2)) @ field @ rho))
         coherent_flux = xp.abs(mean) ** 2
         source = _canonical_matrix(
@@ -247,7 +251,9 @@ class VNA:
             ((output_port, observable),),
             frequency_values,
         )[(output_port, output_port)]
-        spectra = 2.0 * xp.real(response)
+        sideband = carrier + xp.asarray(frequency_values)
+        offset_gain = xp.abs(carrier_transfer(channel.reference.outbound, sideband, xp)) ** 2
+        spectra = 2.0 * xp.real(response) * offset_gain
         return OutputSpectrumResult(
             port=output_port,
             frequencies=frequency_values,
@@ -294,16 +300,18 @@ class VNA:
         delay_values, _ = _axis_values(delays)
         if not contains_tracer(delay_values) and np.any(np.asarray(delay_values) < 0):
             raise ValueError("Stationary output correlations require non-negative delays.")
-        engine, state, operators, incoming = self._stationary_output(output_port, options)
+        engine, state, operators, incoming, tones = self._stationary_output(output_port, options)
         backend = self.chip.backend
         xp = backend.array_module
         rho = xp.asarray(backend.to_array(state.state), dtype=complex)
-        output_field = _output_field_matrix(
-            operators[output_port], incoming.get(output_port, 0.0), xp
-        )
-        input_field = _output_field_matrix(
-            operators[input_port], incoming.get(input_port, 0.0), xp
-        )
+        runs = {item.key: item.reference.outbound for item in engine.slh.external_channels}
+
+        def plane_field(key: str) -> Any:
+            factor = cw_transfer(runs[key], self._output_carrier(engine, key, tones), xp)
+            return factor * _output_field_matrix(operators[key], incoming.get(key, 0.0), xp)
+
+        output_field = plane_field(output_port)
+        input_field = plane_field(input_port)
         output_field_dag = xp.conj(xp.swapaxes(output_field, -1, -2))
         input_field_dag = xp.conj(xp.swapaxes(input_field, -1, -2))
         output_number = output_field_dag @ output_field
@@ -367,7 +375,7 @@ class VNA:
         self,
         output_label: str,
         options: dict | None,
-    ) -> tuple[EngineResult, Any, dict[str, CanonicalOperator], dict[str, Any]]:
+    ) -> tuple[EngineResult, Any, dict[str, CanonicalOperator], dict[str, Any], Any]:
         """Solve stationary output statistics in the applicable reference frames.
 
         Pump tones define the stationary frames when present; otherwise the requested
@@ -382,20 +390,27 @@ class VNA:
         state = _solve_engine(self.chip, driven_engine, options)
         incoming = _stationary_output_backgrounds(driven_engine, tones, self.chip.backend)
         operators = port_operators(driven_engine, self.chip.backend)
-        xp = self.chip.backend.array_module
-        for channel in driven_engine.slh.external_channels:
-            frequency = (
-                0.0
-                if channel.collapse.frame_frequency is None
-                else channel.collapse.frame_frequency
+        return driven_engine, state, operators, incoming, tones
+
+    @staticmethod
+    def _output_carrier(engine: EngineResult, key: str, tones: Any) -> Any:
+        """Return the carrier a plane's outbound run is evaluated at.
+
+        A coupling-free composed output inherits the unique tone that structurally
+        feeds it; without one, an outbound reference run has no defined carrier.
+        """
+        external = {item.key: index for index, item in enumerate(engine.slh.external_channels)}
+        row = external[key]
+        channel = engine.slh.external_channels[row]
+        if channel.collapse.frame_frequency is not None or not channel.reference.outbound:
+            return channel.carrier
+        feeding = [frequency for label, frequency, _ in tones if engine.slh.feeds(row, external[label])]
+        if not feeding or any(not same_frequency(feeding[0], other) for other in feeding[1:]):
+            raise ValueError(
+                f"Output plane {key!r} carries no coupling and is fed by {len(feeding)} tones; "
+                "its outbound reference sections need exactly one carrier."
             )
-            outbound = cw_transfer(channel.reference.outbound, frequency, xp)
-            operators[channel.key] = operators[channel.key].scaled(
-                outbound,
-                tag=f"reference_plane:{channel.key}",
-            )
-            incoming[channel.key] = outbound * incoming[channel.key]
-        return driven_engine, state, operators, incoming
+        return feeding[0]
 
     def _linear_sweep(
         self, chips: list[Any], frequencies: Any, labels: tuple[str, ...]

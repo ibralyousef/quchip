@@ -176,6 +176,179 @@ def test_hidden_dilation_channels_carry_probe_and_pump_fields() -> None:
     np.testing.assert_allclose(lossy_state, direct_state, atol=1e-8)
 
 
+def _lowpass(frequency, *, cutoff, order):
+    return 1.0 / (1.0 + 1j * (frequency / cutoff) ** order)
+
+
+def test_filter_section_is_exact_for_continuous_waves_and_sweepable() -> None:
+    """A reciprocal filter multiplies both legs by H(f); its parameters are chip paths."""
+    resonator = Resonator(freq=6.0, levels=8, label="r")
+    network = PortNetwork(label="line")
+    port = network.port("coupler", target=resonator, rate=0.04)
+    lowpass = network.filter("lowpass", transfer=_lowpass, cutoff=6.5, order=2)
+    network.link(port, lowpass)
+    network.expose("readout", at=lowpass.side(2))
+    chip = Chip([resonator], port_network=network)
+    frequencies = np.array([5.98, 6.0, 6.02])
+
+    bare = Resonator(freq=6.0, levels=8, label="r")
+    bare_network = PortNetwork(label="bare")
+    bare_port = bare_network.port("coupler", target=bare, rate=0.04)
+    bare_chip = Chip([bare], port_network=bare_network)
+
+    filtered = VNA(chip).sweep(frequencies)
+    reference = VNA(bare_chip, planes=[bare_port]).sweep(frequencies)
+    expected = _lowpass(frequencies, cutoff=6.5, order=2) ** 2 * reference.s11
+    np.testing.assert_allclose(filtered.s11, expected, atol=1e-10)
+    np.testing.assert_allclose(
+        VNA(chip).sweep(frequencies, options={"method": "direct"}).s11, expected, atol=2e-8
+    )
+
+    rebound = VNA(chip).sweep(frequencies, Sweep([6.5, 8.0], name="network.component.lowpass.cutoff"))
+    np.testing.assert_allclose(rebound.s11[0], expected, atol=1e-10)
+    np.testing.assert_allclose(
+        rebound.s11[1], _lowpass(frequencies, cutoff=8.0, order=2) ** 2 * reference.s11, atol=1e-10
+    )
+    with pytest.raises(TypeError, match="lowpass"):
+        chip.to_dict()
+
+
+def test_filter_section_must_be_passive() -> None:
+    """A concretely evaluated |H| above one is gain and is rejected."""
+    resonator = Resonator(freq=6.0, levels=4, label="r")
+    network = PortNetwork(label="line")
+    port = network.port("coupler", target=resonator, rate=0.04)
+    amplifier = network.filter("gain", transfer=lambda frequency, *, gain: gain, gain=2.0)
+    network.link(port, amplifier)
+    network.expose("readout", at=amplifier.side(2))
+
+    with pytest.raises(ValueError, match="passive"):
+        VNA(Chip([resonator], port_network=network)).sweep([6.0])
+
+
+def test_output_spectrum_is_filtered_at_the_offset_frequency() -> None:
+    """An outbound filter scales the fluctuation spectrum by |H(f_frame + nu)|^2."""
+
+    def build(with_filter: bool):
+        resonator = DuffingTransmon(freq=6.0, anharmonicity=-0.2, levels=2, label="q")
+        network = PortNetwork(label="line")
+        port = network.port("coupler", target=resonator, rate=0.04)
+        if with_filter:
+            section = network.filter("lowpass", transfer=_lowpass, cutoff=6.02, order=1)
+            network.link(port, section)
+            network.expose("readout", at=section.side(2))
+        else:
+            network.expose("readout", at=port)
+        vna = VNA(Chip([resonator], port_network=network))
+        inbound = 1.0 if with_filter else abs(_lowpass(6.0, cutoff=6.02, order=1))
+        vna.pump("readout", freq=6.0, amplitude=0.02 * inbound)
+        return vna
+
+    offsets = np.array([-0.02, 0.0, 0.03])
+    filtered = build(True).output_spectrum("readout", frequencies=offsets)
+    plain = build(False).output_spectrum("readout", frequencies=offsets)
+    gain = np.abs(_lowpass(6.0 + offsets, cutoff=6.02, order=1)) ** 2
+    np.testing.assert_allclose(filtered.fluctuation_spectrum, gain * plain.fluctuation_spectrum, rtol=1e-8)
+
+
+def test_output_notch_filter_keeps_the_sideband_spectrum() -> None:
+    """A filter that nulls the carrier still passes the sidebands with |H(f_c + nu)|^2."""
+
+    def notch(frequency, *, center, width):
+        detuning = (frequency - center) / width
+        return 1j * detuning / (1.0 + 1j * detuning)
+
+    def build(with_filter: bool):
+        qubit = DuffingTransmon(freq=6.0, anharmonicity=-0.2, levels=2, label="q")
+        network = PortNetwork(label="fridge")
+        port = network.port("coupler", target=qubit, rate=0.04)
+        circulator = network.circulator("circ")
+        network.link(port, circulator.side(2))
+        network.expose("drive", at=circulator.side(1))
+        if with_filter:
+            section = network.filter("notch", transfer=notch, center=6.0, width=0.01)
+            network.link(circulator.side(3), section)
+            network.expose("readout", at=section.side(2))
+        else:
+            network.expose("readout", at=circulator.side(3))
+        vna = VNA(Chip([qubit], port_network=network))
+        vna.pump("drive", freq=6.0, amplitude=0.02)
+        return vna
+
+    offsets = np.array([-0.02, 0.0, 0.03])
+    filtered = build(True).output_spectrum("readout", frequencies=offsets)
+    plain = build(False).output_spectrum("readout", frequencies=offsets)
+    gain = np.abs(notch(6.0 + offsets, center=6.0, width=0.01)) ** 2
+    np.testing.assert_allclose(filtered.fluctuation_spectrum, gain * plain.fluctuation_spectrum, atol=1e-12)
+    assert filtered.fluctuation_spectrum[1] == pytest.approx(0.0, abs=1e-12)
+    assert filtered.fluctuation_spectrum[2] > 0.0
+
+
+def test_coupling_free_output_takes_its_carrier_from_the_feeding_tone() -> None:
+    """A circulator's drive-side output has no coupling; its filter follows the unique feeding tone."""
+
+    def tilt(frequency, *, slope):
+        return 0.5 * np.exp(1j * slope * frequency)
+
+    def build(pumped: bool, *, delay_only: bool = False):
+        qubit = DuffingTransmon(freq=6.0, anharmonicity=-0.2, levels=2, label="q")
+        network = PortNetwork(label="fridge")
+        port = network.port("coupler", target=qubit, rate=0.04)
+        circulator = network.circulator("circ")
+        line = (
+            network.delay("line", duration=0.3)
+            if delay_only
+            else network.filter("line", transfer=tilt, slope=0.7)
+        )
+        network.link(line, circulator.side(1))
+        network.link(port, circulator.side(2))
+        network.expose("drive", at=line.side(1))
+        network.expose("readout", at=circulator.side(3))
+        vna = VNA(Chip([qubit], port_network=network))
+        if pumped:
+            vna.pump("readout", freq=6.0, amplitude=0.03)
+        return vna
+
+    spectrum = build(True).output_spectrum("drive", frequencies=np.array([0.0]))
+    assert spectrum.coherent_flux == pytest.approx(abs(tilt(6.0, slope=0.7)) ** 2 * 0.03**2)
+    with pytest.raises(ValueError, match="carrier"):
+        build(False).output_spectrum("drive", frequencies=np.array([0.0]))
+    delayed = build(True, delay_only=True).output_spectrum("drive", frequencies=np.array([0.0]))
+    assert delayed.coherent_flux == pytest.approx(0.03**2)
+    with pytest.raises(ValueError, match="carrier"):
+        build(False, delay_only=True).output_spectrum("drive", frequencies=np.array([0.0]))
+    assert build(False).output_spectrum("readout", frequencies=np.array([0.0])).coherent_flux == pytest.approx(0.0)
+
+
+def test_distinct_tones_stay_valid_with_traced_network_scattering() -> None:
+    """Reachability comes from the compiled structure, not from traced S values."""
+    jax = pytest.importorskip("jax")
+    pytest.importorskip("dynamiqs")
+    import jax.numpy as jnp
+
+    qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="q")
+    resonator = Resonator(freq=6.0, levels=4, label="r")
+    network = PortNetwork(label="fridge")
+    qubit_port = network.port("qubit_port", target=qubit, rate=0.04)
+    readout_port = network.port("readout_port", target=resonator, rate=0.03)
+    loss = network.attenuator("loss", eta=0.5)
+    network.link(readout_port, loss)
+    network.expose("readout", at=loss.side(2))
+    chip = Chip(
+        [qubit, resonator],
+        [CrossKerr(qubit, resonator, chi=-0.03)],
+        port_network=network,
+        backend="dynamiqs",
+    )
+
+    def response(eta):
+        vna = VNA(chip.with_params({"network.component.loss.eta": eta}), planes=["readout"])
+        vna.pump(qubit_port, freq=5.0, amplitude=0.02)
+        return jnp.abs(vna.sweep([6.0]).s11[0])
+
+    assert jnp.isfinite(jax.jit(response)(jnp.asarray(0.5)))
+
+
 def test_vna_uses_network_exposure_labels_and_scattering_background() -> None:
     """VNA queries named network exposures and retains direct scattering."""
     resonator = Resonator(freq=6.0, levels=6, label="r")

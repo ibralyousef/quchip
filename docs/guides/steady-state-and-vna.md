@@ -136,6 +136,27 @@ reference section, placed with `link` or `connect` like any other component.
 The compiler peels adjacent sections from each exposure leg before forming the
 Markovian `S`, `L`, and `H`.
 
+Use `network.filter(...)` for a passive frequency-dependent reference section:
+
+```python
+def lowpass(frequency, *, cutoff, order):
+    return 1.0 / (1.0 + 1j * (frequency / cutoff) ** order)
+
+
+filter_network = PortNetwork(label="filtered_line")
+filter_port = filter_network.port("chip_port", target=r, rate=0.04)
+ir_filter = filter_network.filter("ir_filter", transfer=lowpass, cutoff=7.2, order=2)
+filter_network.link(filter_port, ir_filter)
+filtered_readout = filter_network.expose("readout", at=ir_filter.side(2))
+```
+
+The keywords become sweepable, differentiable paths such as
+`network.component.ir_filter.cutoff`. Continuous-wave calculations apply
+`H(f)` exactly; transient inputs use `H(f_carrier)`, while transient output
+amplitude and photon flux use `H(f_c)` and `|H(f_c)|^2` at the channel's
+rotating-frame carrier. A network containing a filter cannot be serialized
+with `to_dict()` because its transfer is a Python callable.
+
 ## One-tone response
 
 ```python

@@ -41,14 +41,7 @@ def resolve_stationary_engine(
 
     device_frequencies: dict[str, Any] = {}
     for port_label, frequency in port_frequencies:
-        try:
-            targets = chip.port(port_label).resolve_targets(chip)
-        except KeyError as exc:
-            raise ValueError(
-                "Distinct stationary tones through composed PortNetwork exposures "
-                "are not representable by one static frame. Use QuantumSequence "
-                "for time evolution."
-            ) from exc
+        targets = _tone_targets(chip, port_label)
         for target in targets:
             assigned = device_frequencies.get(target)
             if assigned is not None and not same_frequency(assigned, frequency):
@@ -84,6 +77,27 @@ def resolve_stationary_engine(
         )
     _validate_port_frequencies(engine, port_frequencies)
     return engine
+
+
+def _tone_targets(chip: Any, exposure: str) -> tuple[str, ...]:
+    """Return the devices whose ports a tone entering ``exposure`` structurally reaches."""
+    from quchip.chip.port_network import PortNetwork
+
+    network = chip.port_network
+    if network is None:
+        return chip.port(exposure).resolve_targets(chip)
+    exposures, _, coupling_maps, _, _, support = network._compile()
+    labels = [item.label for item in exposures]
+    if exposure not in labels:
+        raise ValueError(f"Unknown resolved port {exposure!r}.")
+    column = labels.index(exposure)
+    targets: list[str] = []
+    for row, mapping in enumerate(coupling_maps):
+        if not support[row, column]:
+            continue
+        for source in PortNetwork._active_mapping_sources(mapping):
+            targets.extend(chip.port(source).resolve_targets(chip))
+    return tuple(dict.fromkeys(targets))
 
 
 def port_operators(engine: EngineResult, backend: Any) -> dict[str, CanonicalOperator]:
@@ -150,20 +164,22 @@ def _validate_port_frequencies(
     engine: EngineResult,
     port_frequencies: tuple[tuple[str, Any], ...],
 ) -> None:
-    """Check that every requested tone matches its resolved port phase."""
-    port_terms = {
-        channel.key: channel.collapse_term
-        for channel in engine.slh.external_channels
-    }
+    """Check that every channel a tone feeds is stationary in the tone's frame."""
+    external = {channel.key: index for index, channel in enumerate(engine.slh.external_channels)}
     for port_label, frequency in port_frequencies:
-        if port_label not in port_terms:
+        if port_label not in external:
             raise ValueError(f"Unknown resolved port {port_label!r}.")
-        resolved = port_terms[port_label].frame_frequency
-        if not same_frequency(resolved, frequency):
-            raise ValueError(
-                f"Tone at {frequency!r} GHz is not stationary for port {port_label!r} "
-                f"in its resolved frame ({resolved!r} GHz). Use QuantumSequence for time evolution."
-            )
+        column = external[port_label]
+        for row, channel in enumerate(engine.slh.channels):
+            resolved = channel.collapse.frame_frequency
+            if resolved is None or not engine.slh.feeds(row, column):
+                continue
+            if not same_frequency(resolved, frequency):
+                raise ValueError(
+                    f"Tone at {frequency!r} GHz entering {port_label!r} reaches channel "
+                    f"{channel.key!r}, which is stationary at {resolved!r} GHz. "
+                    "Use QuantumSequence for time evolution."
+                )
 
 
 def same_frequency(first: Any, second: Any) -> bool:

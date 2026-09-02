@@ -39,7 +39,7 @@ import numpy as np
 from quchip.backend import Backend, SolverResult
 from quchip.chip.chip import Chip
 from quchip.engine.ir import ResolvedFrame
-from quchip.engine.reference import time_shift
+from quchip.engine.reference import carrier_transfer, has_filter, time_shift
 from quchip.observables import OutputField, is_output_field
 from quchip.results.results import ObservableTrace, OutputFieldTrace
 from quchip.utils.constants import TWO_PI
@@ -250,6 +250,14 @@ def _append_output_eops(
         raise ValueError(
             f"Unknown output exposure {observable.exposure!r}. "
             f"Available exposures: {list(external)}."
+        )
+    if has_filter(channel.reference.outbound) and (
+        engine_result.resolved_frame.mode == "lab" or channel.collapse.frame_frequency is None
+    ):
+        raise ValueError(
+            f"Output plane {observable.exposure!r} has an outbound filter, but a lab-frame "
+            "channel has no carrier at which to evaluate transient output. Simulate in a "
+            "rotating frame at the readout carrier."
         )
 
     coupling = channel.coupling
@@ -484,12 +492,7 @@ def _build_output_traces(
         for input_index, beta in enumerate(incident):
             direct = direct + xp.asarray(engine_result.slh.S[output_index, input_index]) * beta
 
-        frame_frequency = (
-            0.0
-            if channel.collapse.frame_frequency is None
-            else channel.collapse.frame_frequency
-        )
-        carrier = xp.exp(-1j * TWO_PI * xp.asarray(frame_frequency) * times)
+        carrier = xp.exp(-1j * TWO_PI * xp.asarray(channel.carrier) * times)
         lowering = carrier * moments["amplitude"]
         field = direct + lowering
 
@@ -499,12 +502,15 @@ def _build_output_traces(
             + 2.0 * xp.real(xp.conj(direct) * lowering)
             + number
         )
+        factor = carrier_transfer(channel.reference.outbound, channel.carrier, xp)
+        reported = factor * field
+        reported_flux = xp.abs(factor) ** 2 * boundary_flux
         outbound_shift = time_shift(channel.reference.outbound)
         traces[key] = OutputFieldTrace(
             exposure=observable.exposure,
             times=times,
-            amplitude=_delay_trace(field, times, outbound_shift, xp),
-            photon_flux=_delay_trace(boundary_flux, times, outbound_shift, xp),
+            amplitude=_delay_trace(reported, times, outbound_shift, xp),
+            photon_flux=_delay_trace(reported_flux, times, outbound_shift, xp),
             raw_amplitude=field,
             raw_photon_flux=boundary_flux,
         )

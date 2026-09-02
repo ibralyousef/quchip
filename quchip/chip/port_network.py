@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import pairwise
 from types import MappingProxyType
@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 
 from quchip.chip.ports import Port
-from quchip.engine.reference import ReferenceDelay, ReferencePlane
+from quchip.engine.reference import ReferenceDelay, ReferenceElement, ReferenceFilter, ReferencePlane
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar, select_array_module
 from quchip.utils.labeling import auto_label, resolve_label
 
@@ -175,6 +175,7 @@ class FieldExposure:
 class _AffineField:
     scattering: list[Any]
     coupling: dict[str, Any]
+    support: list[bool]
 
 
 class PortNetwork:
@@ -208,6 +209,7 @@ class PortNetwork:
         self._ports: list[Port] = []
         self._component_kinds: dict[str, str] = {}
         self._component_parameters: dict[str, dict[str, Any]] = {}
+        self._component_transfers: dict[str, Callable[..., Any]] = {}
         self._connections: dict[TerminalKey, TerminalKey] = {}
         self._used_outputs: dict[TerminalKey, TerminalKey] = {}
         self._exposures: list[FieldExposure] = []
@@ -421,6 +423,29 @@ class PortNetwork:
         concrete = maybe_concrete_scalar(duration)
         if concrete is not None and concrete < 0:
             raise ValueError("Delay duration must be non-negative.")
+        return self._reference_component(label, kind="delay", parameters={"duration": duration})
+
+    def filter(self, label: str, *, transfer: Callable[..., Any], **parameters: Any) -> SLHComponent:
+        """Add a two-sided passive filter reference section.
+
+        ``transfer(frequency, **parameters)`` must accept scalar or array frequencies
+        in GHz and return a broadcast-compatible complex value without concretizing
+        traced inputs. Each keyword parameter is tracked at
+        ``network.component.<label>.<name>``.
+
+        Place the section with :meth:`link` or :meth:`connect`. The compiler peels it
+        from an adjacent exposure leg, so it never enters the Markovian ``S``, ``L``,
+        or ``H``. Continuous-wave APIs evaluate the transfer at each frequency;
+        transient APIs use its narrowband value at the relevant carrier. Concrete
+        evaluations with ``|H| > 1`` raise. Networks containing filters cannot be
+        serialized with :meth:`to_dict`; ``Chip.clone()`` and ``Chip.with_params()``
+        preserve the callable.
+        """
+        component = self._reference_component(label, kind="filter", parameters=dict(parameters))
+        self._component_transfers[label] = transfer
+        return component
+
+    def _reference_component(self, label: str, *, kind: str, parameters: dict[str, Any]) -> SLHComponent:
         component = SLHComponent(
             label=label,
             input_names=("1", "2"),
@@ -431,8 +456,8 @@ class PortNetwork:
             _local_ports=(None, None),
         )
         component = self._add_component(component)
-        self._component_kinds[label] = "delay"
-        self._component_parameters[label] = {"duration": duration}
+        self._component_kinds[label] = kind
+        self._component_parameters[label] = parameters
         return component
 
     def circulator(self, label: str, *, ports: int = 3) -> SLHComponent:
@@ -591,6 +616,7 @@ class PortNetwork:
             ),
             tuple(self._connections.items()),
             tuple((item.label, item._input_key, item._output_key) for item in self._exposures),
+            tuple((label, id(transfer)) for label, transfer in self._component_transfers.items()),
             self._cache_value(self._authored_scattering),
         )
 
@@ -614,7 +640,7 @@ class PortNetwork:
                 f"network={expected}, assembled={list(port_channels)}."
             )
 
-        exposures, scattering, coupling_maps, generated_pairs, planes = self._compile()
+        exposures, scattering, coupling_maps, generated_pairs, planes, support = self._compile()
         operators = {label: port_channels[label].coupling for label in expected}
         frame_frequencies = [
             self._common_frame_frequency(
@@ -677,6 +703,8 @@ class PortNetwork:
         hidden = base.hidden_channels
         full_size = len(channels) + len(hidden)
         xp = select_array_module(contains_tracer(scattering))
+        full_support = np.eye(full_size, dtype=bool)
+        full_support[: len(channels), : len(channels)] = support
         full_scattering = xp.eye(full_size, dtype=complex)
         if channels:
             if hasattr(full_scattering, "at"):
@@ -690,10 +718,17 @@ class PortNetwork:
                 dynamic_terms=base.H.dynamic_terms,
             ),
             channels=tuple((*channels, *hidden)),
+            support=full_support,
         )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize a static network graph and its quantum ports."""
+        if self._component_transfers:
+            raise TypeError(
+                f"PortNetwork filter components {sorted(self._component_transfers)} use Python "
+                "transfer callables and cannot be serialized by to_dict(). Chip.clone() and "
+                "Chip.with_params() preserve them."
+            )
         return {
             "label": self.label,
             "ports": [port.to_dict() for port in self._ports],
@@ -846,6 +881,7 @@ class PortNetwork:
             label: dict(parameters)
             for label, parameters in self._component_parameters.items()
         }
+        copied._component_transfers = dict(self._component_transfers)
         return copied
 
     def physics_notes(self) -> list[str]:
@@ -1018,7 +1054,13 @@ class PortNetwork:
         return tuple((*exposed, *hidden))
 
     def _is_reference(self, label: str) -> bool:
-        return self._component_kinds.get(label) == "delay"
+        return self._component_kinds.get(label) in {"delay", "filter"}
+
+    def _reference_element(self, label: str) -> ReferenceElement:
+        parameters = self._component_parameters[label]
+        if self._component_kinds[label] == "delay":
+            return ReferenceDelay(label, parameters["duration"])
+        return ReferenceFilter(label, self._component_transfers[label], MappingProxyType(dict(parameters)))
 
     def _peel(self, exposure: FieldExposure) -> tuple[TerminalKey, TerminalKey, ReferencePlane]:
         """Peel adjacent reference runs from ``exposure`` to the Markov boundary.
@@ -1029,13 +1071,13 @@ class PortNetwork:
 
         def walk(
             key: TerminalKey, step: Mapping[TerminalKey, TerminalKey]
-        ) -> tuple[TerminalKey, list[ReferenceDelay]]:
-            run: list[ReferenceDelay] = []
+        ) -> tuple[TerminalKey, list[ReferenceElement]]:
+            run: list[ReferenceElement] = []
             while self._is_reference(key[0]):
                 label, name = key
                 if any(element.label == label for element in run):
                     raise ValueError(f"Reference component {label!r} feeds back into itself.")
-                run.append(ReferenceDelay(label, self._component_parameters[label]["duration"]))
+                run.append(self._reference_element(label))
                 other = (label, "2" if name == "1" else "1")
                 if other not in step:
                     raise ValueError(
@@ -1058,6 +1100,7 @@ class PortNetwork:
         list[dict[str, Any]],
         list[tuple[str, str, Any]],
         list[ReferencePlane],
+        np.ndarray,
     ]:
         exposures = self._effective_exposures()
         peeled = [self._peel(exposure) for exposure in exposures]
@@ -1093,7 +1136,7 @@ class PortNetwork:
         for column, (boundary_input, _, _) in enumerate(peeled):
             basis = [0.0] * size
             basis[column] = 1.0
-            input_fields[boundary_input] = _AffineField(basis, {})
+            input_fields[boundary_input] = _AffineField(basis, {}, [index == column for index in range(size)])
 
         pending = {
             (component.label, name): (component, row)
@@ -1141,13 +1184,17 @@ class PortNetwork:
                         for coupling_source, coefficient in upstream.items():
                             generated_pairs.append((local_label, coupling_source, coefficient))
                         coupling[local_label] = coupling.get(local_label, 0.0) + 1.0
-                    output_fields[terminal] = _AffineField(scattering, coupling)
+                    support = [
+                        any(incoming[column].support[index] for column in incoming) for index in range(size)
+                    ]
+                    output_fields[terminal] = _AffineField(scattering, coupling, support)
                     del pending[terminal]
                     progressed = True
             if not progressed:
                 raise ValueError("PortNetwork contains instantaneous feedback or a connection cycle.")
 
         rows = [output_fields[boundary_output] for _, boundary_output, _ in peeled]
+        support_matrix = np.asarray([row.support for row in rows], dtype=bool)
         scattering_rows = [row.scattering for row in rows]
         xp = select_array_module(contains_tracer(scattering_rows))
         scattering = xp.asarray(scattering_rows, dtype=complex)
@@ -1173,9 +1220,14 @@ class PortNetwork:
                 self._combine_maps(full_boundary[row], coupling_maps)
                 for row in range(size)
             ]
+            mixes = np.asarray(
+                [[not self._is_concrete_zero(full_boundary[row, k]) for k in range(size)] for row in range(size)],
+                dtype=bool,
+            )
+            support_matrix = (mixes.astype(int) @ support_matrix.astype(int)) > 0
 
         self._validate_unitary(scattering)
-        return exposures, scattering, coupling_maps, generated_pairs, planes
+        return exposures, scattering, coupling_maps, generated_pairs, planes, support_matrix
 
     def _boundary_scattering(self, labels: tuple[str, ...]) -> Any | None:
         authored = self._authored_scattering
@@ -1235,10 +1287,10 @@ class PortNetwork:
         *,
         boundary: str,
     ) -> Any:
-        """Return one valid carrier for a statically composed output channel."""
+        """Return one carrier for a statically composed output channel; ``None`` without coupling."""
         sources = cls._active_mapping_sources(mapping)
         if not sources:
-            return 0.0
+            return None
         reference = channels[sources[0]].collapse.frame_frequency
         if any(
             not cls._same_frame_frequency(

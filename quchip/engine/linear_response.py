@@ -77,7 +77,7 @@ def _build_linear_response_problem(
     for port in network.ports:
         raw_ports[port.label] = _port_coupling_vector(port, chip, mode_index, backend)
 
-    exposures, network_scattering, coupling_maps, generated_pairs, planes = network._compile()
+    exposures, network_scattering, coupling_maps, generated_pairs, planes, _ = network._compile()
     exposure_couplings = xp.stack(
         [
             sum(
