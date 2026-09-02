@@ -22,6 +22,7 @@ from quchip.results.steady_state import SteadyStateBatchResult, SteadyStateResul
 from quchip.results.input_output import (
     OutputCorrelationResult,
     OutputSpectrumResult,
+    MeanFieldResponseResult,
     SParameterResult,
 )
 
@@ -32,6 +33,7 @@ __all__ = [
     "SimulationResult",
     "SteadyStateResult",
     "SteadyStateBatchResult",
+    "MeanFieldResponseResult",
     "SParameterResult",
     "OutputSpectrumResult",
     "OutputCorrelationResult",

@@ -472,6 +472,80 @@ def test_amplifier_orientation_is_structural() -> None:
         Chip([resonator], port_network=network).resolve()
 
 
+def test_finite_power_converges_to_small_signal_and_then_saturates() -> None:
+    """The mean-field ratio tends to S as beta -> 0 and departs from it at strong drive."""
+    qubit = DuffingTransmon(freq=6.0, anharmonicity=-0.2, levels=2, label="q")
+    port = Port(qubit, rate=0.04, label="p")
+    chip = Chip([qubit], port_network=_network(port))
+    vna = VNA(chip, planes=[port])
+    amplitudes = np.array([0.0, 1e-5, 0.05, 0.3])
+    frequencies = np.array([5.99, 6.0, 6.01])
+
+    power = vna.finite_power(frequencies, amplitudes)
+    small = vna.sweep(frequencies)
+
+    assert power.shape == (4, 3)
+    assert power.axis_names == ("amplitude", "frequency")
+    assert power.planes == ("p",) and power.input == "p"
+    assert np.all(np.isnan(power.ratio(port)[0]))
+    np.testing.assert_allclose(power.mean(port)[0], 0.0, atol=1e-12)
+    np.testing.assert_allclose(power.ratio(port)[1], small.s11, rtol=1e-6, atol=1e-8)
+    assert np.all(np.abs(power.ratio(port)[3] - small.s11) > 1e-2)
+    np.testing.assert_allclose(power.mean(port)[1:], power.ratio(port)[1:] * power.incident[1:])
+
+    single = vna.finite_power(6.0, 0.05)
+    assert single.shape == ()
+    assert complex(single.mean(port)) == pytest.approx(complex(power.mean(port)[2, 1]))
+
+
+def test_finite_power_matches_small_signal_for_a_linear_resonator() -> None:
+    """A harmonic mode responds linearly, so mean/beta equals S at every amplitude."""
+    _, input_port, output_port, chip = _linear_resonator(kappa_in=0.04, kappa_out=0.02)
+    vna = VNA(chip)
+    frequencies = np.array([5.98, 6.0, 6.03])
+
+    power = vna.finite_power(frequencies, np.array([0.01, 0.03]), input=input_port)
+    small = vna.sweep(frequencies)
+
+    for row in range(2):
+        np.testing.assert_allclose(power.ratio(output_port)[row], small.s21, atol=1e-8)
+        np.testing.assert_allclose(power.ratio(input_port)[row], small.s11, atol=1e-8)
+
+
+def test_finite_power_rejects_ambiguous_probes() -> None:
+    """The probe plane must be explicit, unpumped, and free of axis-name collisions."""
+    _, input_port, output_port, chip = _linear_resonator(kappa_in=0.04, kappa_out=0.02)
+    vna = VNA(chip)
+    with pytest.raises(ValueError, match="input"):
+        vna.finite_power(6.0, 0.01)
+    pumped = VNA(chip, planes=[input_port])
+    pumped.pump(input_port, freq=6.0, amplitude=0.01)
+    with pytest.raises(ValueError, match="pump"):
+        pumped.finite_power(6.0, 0.01)
+    other = VNA(chip)
+    pump = other.pump(output_port, freq=6.0, amplitude=0.01)
+    with pytest.raises(ValueError, match="unique"):
+        other.finite_power(6.0, [0.01, 0.02], pump.vary("amplitude", [0.01, 0.02], name="amplitude"), input=input_port)
+
+
+def test_dynamiqs_finite_power_is_differentiable_in_amplitude() -> None:
+    """The finite-power mean field stays differentiable through the stationary solve."""
+    jax = pytest.importorskip("jax")
+    pytest.importorskip("dynamiqs")
+    import jax.numpy as jnp
+
+    qubit = DuffingTransmon(freq=6.0, anharmonicity=-0.2, levels=2, label="q")
+    port = Port(qubit, rate=0.04, label="p")
+    chip = Chip([qubit], port_network=_network(port), backend="dynamiqs")
+
+    def reflection(amplitude):
+        return jnp.abs(VNA(chip, planes=[port]).finite_power(6.0, amplitude).ratio(port))
+
+    value, gradient = jax.value_and_grad(reflection)(jnp.asarray(0.05))
+    assert jnp.isfinite(value) and jnp.isfinite(gradient)
+    assert gradient != 0.0
+
+
 def test_vna_uses_network_exposure_labels_and_scattering_background() -> None:
     """VNA queries named network exposures and retains direct scattering."""
     resonator = Resonator(freq=6.0, levels=6, label="r")

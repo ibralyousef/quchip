@@ -19,6 +19,7 @@ from quchip.engine.reference import carrier_transfer, cw_transfer, has_amplifier
 from quchip.engine.ir import CanonicalOperator, EngineResult, SteadyStateProblem
 from quchip.engine.steady_state import solve_steadystate_problem
 from quchip.results.input_output import (
+    MeanFieldResponseResult,
     OutputCorrelationResult,
     OutputSpectrumResult,
     SParameterResult,
@@ -114,7 +115,7 @@ class VNA:
         for every input plane.
         """
         freq_values, freq_is_axis = _axis_values(frequencies)
-        self._validate_variations(variations, frequency_axis=freq_is_axis)
+        self._validate_variations(variations, reserved=("frequency",) if freq_is_axis else ())
         variation_shape, variation_points = _iter_axis_points(variations)
         shape = variation_shape
         if freq_is_axis:
@@ -152,13 +153,9 @@ class VNA:
         matrices: list[Any] = []
         diagnostics: list[dict[str, Any]] = []
         for tones, chip, frequency in iterator:
-            engine = resolve_stationary_engine(
-                chip,
-                tuple((label, tone_frequency) for label, tone_frequency, _ in tones)
-                + tuple((label, frequency) for label in labels),
+            operating_engine, operating, point_diagnostics = _operating_point(
+                chip, tones, frequency, labels, options
             )
-            operating_engine = add_port_inputs(engine, chip.backend, tones)
-            operating = _solve_engine(chip, operating_engine, options)
             matrices.append(
                 _small_signal_matrix(
                     operating_engine,
@@ -169,22 +166,108 @@ class VNA:
                     frequency,
                 )
             )
-            diagnostics.append(
-                {
-                    "solver": "stationary_resolvent",
-                    "residual": operating.residual,
-                    "trace_error": operating.trace_error,
-                    "positivity_error": operating.positivity_error,
-                    "condition_number": operating.condition_number,
-                }
-            )
+            diagnostics.append(point_diagnostics)
 
         return result(diagnostics, xp.stack(matrices))
 
+    def finite_power(
+        self,
+        frequencies: Any,
+        amplitudes: Any,
+        *variations: Sweep | ZippedSweep,
+        input: Any | None = None,
+        options: dict | None = None,
+        progress: bool = False,
+    ) -> MeanFieldResponseResult:
+        """Solve the stationary mean output fields for a finite coherent probe.
+
+        ``frequencies`` are in GHz. ``amplitudes`` are incident field amplitudes
+        ``beta`` in ``1/sqrt(ns)``; complex values encode phase. The probe enters
+        ``input`` beside any fixed pumps. When one plane is selected, ``input``
+        defaults to that plane; otherwise it is required. A fixed pump on the probe
+        input is rejected.
+
+        At each grid point, the method solves the stationary Liouvillian in the probe
+        frame. Chip and pump sweep axes precede ``"amplitude"`` and ``"frequency"``.
+        Every selected plane must resolve at the probe frequency. The returned
+        ``MeanFieldResponseResult`` reports ``<b_out>`` using the same reference-plane
+        and hidden-channel bookkeeping as ``sweep()``, and stores the incident
+        ``beta`` broadcast over the grid.
+
+        This method always uses the stationary Liouvillian route. It does not use the
+        passive-linear mode-space shortcut or follow sweep-rate hysteresis and
+        metastable branches.
+        """
+        if input is None:
+            if len(self.planes) != 1:
+                raise ValueError("finite_power() requires input= when more than one plane is selected.")
+            input_label = self.planes[0]
+        else:
+            input_label = _resolve_exposure(self.chip, input)
+            if input_label not in self.planes:
+                raise ValueError(f"finite_power() input {input_label!r} is not a selected plane {list(self.planes)}.")
+        if any(tone.port == input_label for tone in self._tones):
+            raise ValueError(
+                f"Plane {input_label!r} already carries a fixed pump. The finite_power() probe must be "
+                "the only tone entering the selected input so that <b_out>/beta is unambiguous."
+            )
+        freq_values, freq_is_axis = _axis_values(frequencies)
+        amp_values, amp_is_axis = _axis_values(amplitudes)
+        reserved = (["amplitude"] if amp_is_axis else []) + (["frequency"] if freq_is_axis else [])
+        self._validate_variations(variations, reserved=reserved)
+        variation_shape, variation_points = _iter_axis_points(variations)
+        shape = variation_shape
+        axes = _public_axes(variations)
+        if amp_is_axis:
+            shape += (len(amp_values),)
+            axes += (("amplitude", amp_values),)
+        if freq_is_axis:
+            shape += (len(freq_values),)
+            axes += (("frequency", freq_values),)
+        labels = self.planes
+        xp = self.chip.backend.array_module
+
+        points = [
+            (tones, chip, amplitude, frequency)
+            for tones, chip in ((self._tone_values(p), self._chip_at(p)) for _, p in variation_points)
+            for amplitude in amp_values
+            for frequency in freq_values
+        ]
+        iterator: Any = points
+        if progress:
+            from tqdm import tqdm
+
+            iterator = tqdm(points, desc="VNA power")
+
+        values: list[Any] = []
+        incident: list[Any] = []
+        diagnostics: list[dict[str, Any]] = []
+        for tones, chip, amplitude, frequency in iterator:
+            all_tones = tones + ((input_label, frequency, amplitude),)
+            operating_engine, operating, point_diagnostics = _operating_point(
+                chip, all_tones, frequency, (), options
+            )
+            values.append(
+                _plane_means(operating_engine, operating.state, chip.backend, labels, all_tones, frequency)
+            )
+            incident.append(xp.asarray(amplitude))
+            diagnostics.append(point_diagnostics)
+        return MeanFieldResponseResult(
+            planes=labels,
+            input=input_label,
+            frequencies=freq_values if freq_is_axis else freq_values[0],
+            amplitudes=amp_values if amp_is_axis else amp_values[0],
+            axes=axes,
+            shape=shape,
+            diagnostics=tuple(diagnostics),
+            values=xp.reshape(xp.stack(values), (*shape, len(labels))),
+            incident=xp.reshape(xp.stack(incident), shape),
+        )
+
     def _validate_variations(
-        self, variations: tuple[Sweep | ZippedSweep, ...], *, frequency_axis: bool
+        self, variations: tuple[Sweep | ZippedSweep, ...], *, reserved: Sequence[str] = ()
     ) -> None:
-        names = ["frequency"] if frequency_axis else []
+        names = list(reserved)
         chip_paths = set(self.chip.parameters)
         for variation in variations:
             members = variation.sweeps if isinstance(variation, ZippedSweep) else (variation,)
@@ -225,7 +308,7 @@ class VNA:
         xp = self.chip.backend.array_module
         rho = xp.asarray(self.chip.backend.to_array(state.state), dtype=complex)
         channel = next(item for item in engine.slh.external_channels if item.key == output_port)
-        carrier = self._output_carrier(engine, output_port, tones)
+        carrier = _output_carrier(engine, output_port, tones)
         boundary_field = _output_field_matrix(
             operators[output_port], incoming.get(output_port, 0.0), xp
         )
@@ -314,7 +397,7 @@ class VNA:
             )
 
         def plane_field(key: str) -> Any:
-            factor = cw_transfer(runs[key], self._output_carrier(engine, key, tones), xp)
+            factor = cw_transfer(runs[key], _output_carrier(engine, key, tones), xp)
             return factor * _output_field_matrix(operators[key], incoming.get(key, 0.0), xp)
 
         output_field = plane_field(output_port)
@@ -399,25 +482,6 @@ class VNA:
         operators = port_operators(driven_engine, self.chip.backend)
         return driven_engine, state, operators, incoming, tones
 
-    @staticmethod
-    def _output_carrier(engine: EngineResult, key: str, tones: Any) -> Any:
-        """Return the carrier a plane's outbound run is evaluated at.
-
-        A coupling-free composed output inherits the unique tone that structurally
-        feeds it; without one, an outbound reference run has no defined carrier.
-        """
-        external = {item.key: index for index, item in enumerate(engine.slh.external_channels)}
-        row = external[key]
-        channel = engine.slh.external_channels[row]
-        if channel.collapse.frame_frequency is not None or not channel.reference.outbound:
-            return channel.carrier
-        feeding = [frequency for label, frequency, _ in tones if engine.slh.feeds(row, external[label])]
-        if not feeding or any(not same_frequency(feeding[0], other) for other in feeding[1:]):
-            raise ValueError(
-                f"Output plane {key!r} carries no coupling and is fed by {len(feeding)} tones; "
-                "its outbound reference sections need exactly one carrier."
-            )
-        return feeding[0]
 
     def _linear_sweep(
         self, chips: list[Any], frequencies: Any, labels: tuple[str, ...]
@@ -512,6 +576,31 @@ def _public_axes(variations: tuple[Sweep | ZippedSweep, ...]) -> tuple[tuple[str
         if isinstance(sweep, _ToneAxis)
     }
     return _axis_metadata(variations, rename=lambda name: public.get(name, name))
+
+
+def _operating_point(
+    chip: Any,
+    tones: tuple[tuple[str, Any, Any], ...],
+    frequency: Any,
+    labels: tuple[str, ...],
+    options: dict | None,
+) -> tuple[EngineResult, Any, dict[str, Any]]:
+    """Solve the pumped stationary state with every selected plane framed at ``frequency``."""
+    engine = resolve_stationary_engine(
+        chip,
+        tuple((label, tone_frequency) for label, tone_frequency, _ in tones)
+        + tuple((label, frequency) for label in labels),
+    )
+    operating_engine = add_port_inputs(engine, chip.backend, tones)
+    solved = _solve_engine(chip, operating_engine, options)
+    diagnostics = {
+        "solver": "stationary_resolvent",
+        "residual": solved.residual,
+        "trace_error": solved.trace_error,
+        "positivity_error": solved.positivity_error,
+        "condition_number": solved.condition_number,
+    }
+    return operating_engine, solved, diagnostics
 
 
 def _solve_engine(chip: Any, engine: EngineResult, options: dict | None) -> Any:
@@ -610,6 +699,59 @@ def _small_signal_matrix(
         ]
     )
     return outbound[:, None] * inbound[None, :] * boundary
+
+
+def _output_carrier(engine: EngineResult, key: str, tones: Any) -> Any:
+    """Return the carrier a plane's outbound run is evaluated at.
+
+    A coupling-free composed output inherits the unique tone that structurally
+    feeds it; without one, an outbound reference run has no defined carrier.
+    """
+    external = {item.key: index for index, item in enumerate(engine.slh.external_channels)}
+    row = external[key]
+    channel = engine.slh.external_channels[row]
+    if channel.collapse.frame_frequency is not None or not channel.reference.outbound:
+        return channel.carrier
+    feeding = [frequency for label, frequency, _ in tones if engine.slh.feeds(row, external[label])]
+    if not feeding or any(not same_frequency(feeding[0], other) for other in feeding[1:]):
+        raise ValueError(
+            f"Output plane {key!r} carries no coupling and is fed by {len(feeding)} tones; "
+            "its outbound reference sections need exactly one carrier."
+        )
+    return feeding[0]
+
+
+def _plane_means(
+    engine: EngineResult,
+    state: Any,
+    backend: Any,
+    labels: tuple[str, ...],
+    tones: tuple[tuple[str, Any, Any], ...],
+    frequency: Any,
+) -> Any:
+    """Return stationary output means at the selected planes.
+
+    For each plane, apply its outbound continuous-wave transfer to
+    ``sum_i S_ji beta_boundary,i + <L_j>`` at ``frequency``. Every selected
+    plane must resolve at that frequency.
+    """
+    xp = backend.array_module
+    rho = xp.asarray(backend.to_array(state), dtype=complex)
+    operators = port_operators(engine, backend)
+    backgrounds = _stationary_output_backgrounds(engine, tones, backend)
+    channels = {channel.key: channel for channel in engine.slh.external_channels}
+    means = []
+    for label in labels:
+        channel = channels[label]
+        carrier = _output_carrier(engine, label, tones)
+        if not same_frequency(carrier, frequency):
+            raise ValueError(
+                f"Plane {label!r} resolves at {carrier!r} GHz, not at the probe frequency "
+                f"{frequency!r} GHz. Narrow VNA(..., planes=...) to planes at the probe carrier."
+            )
+        boundary = backgrounds[label] + xp.trace(xp.asarray(operators[label].to_dense(), dtype=complex) @ rho)
+        means.append(cw_transfer(channel.reference.outbound, carrier, xp) * boundary)
+    return xp.stack(means)
 
 
 def _output_field_matrix(operator: CanonicalOperator, incoming: Any, xp: Any) -> Any:

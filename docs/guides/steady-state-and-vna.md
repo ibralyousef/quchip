@@ -234,8 +234,31 @@ the stationary density matrix is itself the requested result.
 
 ## Finite fields and transient outputs
 
-Use an explicit coherent field simulation for finite-power spectroscopy,
-ring-up, ring-down, reflection, transmission, or emitted wave packets:
+Use `vna.finite_power(...)` for stationary finite-power spectroscopy, including
+power sweeps and saturation:
+
+```python
+power = vna.finite_power(
+    np.linspace(6.75, 6.85, 201),        # GHz -> trailing "frequency" axis
+    np.logspace(-3, -1, 9),              # incident beta in 1/sqrt(ns); complex values encode phase -> "amplitude" axis
+    input=input_port,                    # required when several planes are selected
+)
+power.mean(output_port)                  # <b_out> at that plane, shape (*axes, 9, 201)
+power.ratio(input_port)                  # <b_out>/beta; NaN where beta is 0
+power.incident                           # beta broadcast to the grid
+```
+
+At each grid point, the probe enters beside the fixed pumps and quchip solves
+the Lindblad steady state in the probe frame. Chip and pump `Sweep` axes come
+first, followed by `"amplitude"` and `"frequency"`. The reported mean fields use
+the same reference-plane and hidden-channel bookkeeping as `sweep()`. As
+`beta` tends to zero, `ratio()` tends to the corresponding small-signal `S`
+when no fixed pump leaves a coherent mean at that plane and carrier; the
+stationary solve does not follow sweep-rate hysteresis or metastable
+branches.
+
+Use `QuantumSequence` for ring-up, ring-down, emitted wave packets, and any
+time-resolved reflection or transmission:
 
 ```python
 from quchip import QuantumSequence, Square

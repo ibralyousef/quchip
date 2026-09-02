@@ -510,6 +510,22 @@ S_ji(f) = d <b_out,j> / d beta_in,i  at beta_probe -> 0.
 
 The direct term comes from the resolved scalar `S`; the system term comes from
 the stationary response of `L` under the same coherent-input Hamiltonian.
+`VNA.finite_power()` instead adds a probe of amplitude `beta` at one selected
+input and solves the stationary Liouvillian in the probe frame at each grid
+point. It reports the mean field at every selected plane,
+
+```text
+<b_out,j> = H_out,j(f) [sum_i S_ji beta_boundary,i + <L_j>].
+```
+
+This path uses the same reference-plane and hidden-channel bookkeeping as the
+small-signal response, but has no mode-space shortcut. Every selected plane
+must resolve at the probe frequency. The ratio `<b_out,j>/beta` tends to the
+corresponding `S_ji` as `beta -> 0` when no fixed pump leaves a coherent mean
+at that plane and carrier; at finite `beta` it is a stationary
+mean-field response, not a small-signal S-parameter. It does not describe
+sweep-rate hysteresis or metastable branches.
+
 For a pump-free passive-linear model, the same authored expressions also admit
 the mode-space form
 
@@ -536,9 +552,11 @@ Nonlinear, pumped, active, dynamic, or opaque operator models retain the
 stationary-Liouvillian route. This selection is structural and does not depend
 on the numerical value of a traced parameter.
 
-Finite-power spectroscopy schedules an external-plane input in a time-domain
-simulation; it is not a second VNA probe mode. Fixed finite pumps remain valid
-VNA operating-point fields.
+`VNA.sweep()` and `VNA.finite_power()` cover small-signal scattering and
+stationary finite-power mean fields, respectively. Ring-up, ring-down, wave
+packets, and other time-resolved fields require a scheduled external-plane
+input in a `QuantumSequence`. Fixed finite pumps remain valid VNA
+operating-point fields.
 The engine supplies canonical sources and observables for stationary response,
 spectrum, and correlation queries. Each backend constructs and solves its own
 native Liouvillian.
