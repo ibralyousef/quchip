@@ -11,7 +11,13 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 
 from quchip.chip.ports import Port
-from quchip.engine.reference import ReferenceDelay, ReferenceElement, ReferenceFilter, ReferencePlane
+from quchip.engine.reference import (
+    ReferenceAmplifier,
+    ReferenceDelay,
+    ReferenceElement,
+    ReferenceFilter,
+    ReferencePlane,
+)
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar, select_array_module
 from quchip.utils.labeling import auto_label, resolve_label
 
@@ -420,9 +426,7 @@ class PortNetwork:
         belong to one of these runs. Its duration is tracked at
         ``network.component.<label>.duration``.
         """
-        concrete = maybe_concrete_scalar(duration)
-        if concrete is not None and concrete < 0:
-            raise ValueError("Delay duration must be non-negative.")
+        ReferenceDelay(label, duration)
         return self._reference_component(label, kind="delay", parameters={"duration": duration})
 
     def filter(self, label: str, *, transfer: Callable[..., Any], **parameters: Any) -> SLHComponent:
@@ -444,6 +448,26 @@ class PortNetwork:
         component = self._reference_component(label, kind="filter", parameters=dict(parameters))
         self._component_transfers[label] = transfer
         return component
+
+    def amplifier(self, label: str, *, gain: Any, added_noise: Any) -> SLHComponent:
+        """Add a phase-preserving amplifier reference section to an output line.
+
+        ``gain`` is power gain ``G``. ``added_noise`` is input-referred
+        symmetrized noise in quanta and must be at least ``(1 - 1/G) / 2``.
+        Forward propagation from side 1 to side 2 multiplies field amplitudes by
+        ``sqrt(G)``; reverse propagation is transparent.
+
+        Place side 1 toward the chip and side 2 toward the exposed output plane.
+        The compiler rejects a section that would amplify an incident field into
+        the chip or put the output plane on side 1. Both parameters are tracked at
+        ``network.component.<label>.<name>`` and remain sweepable and
+        differentiable. The section remains outside Markovian ``S``, ``L``, and
+        ``H`` and serializes normally.
+        """
+        ReferenceAmplifier(label, gain, added_noise)
+        return self._reference_component(
+            label, kind="amplifier", parameters={"gain": gain, "added_noise": added_noise}
+        )
 
     def _reference_component(self, label: str, *, kind: str, parameters: dict[str, Any]) -> SLHComponent:
         component = SLHComponent(
@@ -1054,12 +1078,15 @@ class PortNetwork:
         return tuple((*exposed, *hidden))
 
     def _is_reference(self, label: str) -> bool:
-        return self._component_kinds.get(label) in {"delay", "filter"}
+        return self._component_kinds.get(label) in {"delay", "filter", "amplifier"}
 
     def _reference_element(self, label: str) -> ReferenceElement:
         parameters = self._component_parameters[label]
-        if self._component_kinds[label] == "delay":
+        kind = self._component_kinds[label]
+        if kind == "delay":
             return ReferenceDelay(label, parameters["duration"])
+        if kind == "amplifier":
+            return ReferenceAmplifier(label, parameters["gain"], parameters["added_noise"])
         return ReferenceFilter(label, self._component_transfers[label], MappingProxyType(dict(parameters)))
 
     def _peel(self, exposure: FieldExposure) -> tuple[TerminalKey, TerminalKey, ReferencePlane]:
@@ -1070,14 +1097,24 @@ class PortNetwork:
         """
 
         def walk(
-            key: TerminalKey, step: Mapping[TerminalKey, TerminalKey]
+            key: TerminalKey, step: Mapping[TerminalKey, TerminalKey], *, outbound: bool
         ) -> tuple[TerminalKey, list[ReferenceElement]]:
             run: list[ReferenceElement] = []
             while self._is_reference(key[0]):
                 label, name = key
                 if any(element.label == label for element in run):
                     raise ValueError(f"Reference component {label!r} feeds back into itself.")
-                run.append(self._reference_element(label))
+                if self._component_kinds[label] == "amplifier":
+                    if name != "2":
+                        raise ValueError(
+                            f"Amplifier {label!r} must lie on an output line with side 1 toward the "
+                            "chip and side 2 toward the exposed plane; it cannot amplify an incident "
+                            "field into the chip."
+                        )
+                    if outbound:
+                        run.append(self._reference_element(label))
+                else:
+                    run.append(self._reference_element(label))
                 other = (label, "2" if name == "1" else "1")
                 if other not in step:
                     raise ValueError(
@@ -1087,8 +1124,8 @@ class PortNetwork:
                 key = step[other]
             return key, run
 
-        boundary_input, inbound = walk(exposure._input_key, self._used_outputs)
-        boundary_output, outbound = walk(exposure._output_key, self._connections)
+        boundary_input, inbound = walk(exposure._input_key, self._used_outputs, outbound=False)
+        boundary_output, outbound = walk(exposure._output_key, self._connections, outbound=True)
         plane = ReferencePlane(inbound=tuple(inbound), outbound=tuple(reversed(outbound)))
         return boundary_input, boundary_output, plane
 

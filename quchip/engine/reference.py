@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 from quchip.utils.constants import TWO_PI
-from quchip.utils.jax_utils import contains_tracer, select_array_module
+from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar, select_array_module
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,16 @@ class ReferenceDelay:
 
     label: str
     duration: Any
+
+    def __post_init__(self) -> None:
+        concrete = maybe_concrete_scalar(self.duration)
+        if concrete is not None and concrete < 0:
+            raise ValueError(f"Delay {self.label!r} duration must be non-negative, got {self.duration}.")
+
+    @property
+    def tracked_values(self) -> tuple[Any, ...]:
+        """Return the values that may carry JAX tracers."""
+        return (self.duration,)
 
 
 @dataclass(frozen=True)
@@ -31,6 +41,11 @@ class ReferenceFilter:
     label: str
     transfer: Callable[..., Any]
     parameters: Mapping[str, Any]
+
+    @property
+    def tracked_values(self) -> tuple[Any, ...]:
+        """Return the values that may carry JAX tracers."""
+        return tuple(self.parameters.values())
 
     def __call__(self, frequency: Any) -> Any:
         """Evaluate the complex transfer at ``frequency`` in GHz.
@@ -47,7 +62,49 @@ class ReferenceFilter:
         return value
 
 
-ReferenceElement = ReferenceDelay | ReferenceFilter
+@dataclass(frozen=True)
+class ReferenceAmplifier:
+    """A phase-preserving output-line amplifier.
+
+    ``gain`` is power gain ``G``. ``added_noise`` is input-referred
+    symmetrized noise ``n_add`` in quanta, with quantum floor
+    ``(1 - 1/G) / 2``.
+    """
+
+    label: str
+    gain: Any
+    added_noise: Any
+
+    def __post_init__(self) -> None:
+        gain = maybe_concrete_scalar(self.gain)
+        noise = maybe_concrete_scalar(self.added_noise)
+        if gain is not None and gain < 1.0:
+            raise ValueError(f"Amplifier {self.label!r} power gain must be at least 1; got {self.gain}.")
+        if gain is not None and noise is not None:
+            floor = (1.0 - 1.0 / gain) / 2.0
+            if noise < floor - 1e-12:
+                raise ValueError(
+                    f"Amplifier {self.label!r} added_noise={self.added_noise} is below the "
+                    f"phase-preserving quantum limit {floor} input-referred symmetrized quanta "
+                    f"for gain={self.gain}."
+                )
+
+    @property
+    def tracked_values(self) -> tuple[Any, ...]:
+        """Return the values that may carry JAX tracers."""
+        return (self.gain, self.added_noise)
+
+    @property
+    def added_noise_density(self) -> Any:
+        """Return the output-referred normally ordered added noise density.
+
+        For power gain ``G`` and input-referred noise ``n_add``, the density is
+        ``G n_add + (G - 1) / 2``.
+        """
+        return self.gain * self.added_noise + (self.gain - 1.0) / 2.0
+
+
+ReferenceElement = ReferenceDelay | ReferenceFilter | ReferenceAmplifier
 
 
 @dataclass(frozen=True)
@@ -64,10 +121,7 @@ def _array_module(elements: tuple[ReferenceElement, ...], frequency: Any, xp: An
         return xp
     values: list[Any] = [frequency]
     for element in elements:
-        if isinstance(element, ReferenceDelay):
-            values.append(element.duration)
-        else:
-            values.extend(element.parameters.values())
+        values.extend(element.tracked_values)
     return select_array_module(contains_tracer(tuple(values)))
 
 
@@ -85,8 +139,10 @@ def cw_transfer(elements: tuple[ReferenceElement, ...], frequency: Any, xp: Any 
             transfer = transfer * xp.exp(
                 1j * TWO_PI * xp.asarray(frequency) * xp.asarray(element.duration)
             )
-        else:
+        elif isinstance(element, ReferenceFilter):
             transfer = transfer * xp.asarray(element(frequency))
+        else:
+            transfer = transfer * xp.sqrt(xp.asarray(element.gain))
     return transfer
 
 
@@ -97,16 +153,35 @@ def carrier_transfer(elements: tuple[ReferenceElement, ...], carrier: Any, xp: A
     propagation applies them as time shifts.
     """
     xp = _array_module(elements, carrier, xp)
-    transfer = xp.asarray(1.0 + 0.0j)
+    flat = tuple(element for element in elements if not isinstance(element, ReferenceDelay))
+    return cw_transfer(flat, carrier, xp)
+
+
+def noise_density(elements: tuple[ReferenceElement, ...], frequency: Any, xp: Any = None) -> Any:
+    """Return the chain's output-referred normally ordered added noise density.
+
+    At ``frequency`` in GHz, walk ``elements`` in propagation order. A filter
+    applies ``N <- |H(f)|^2 N``; an amplifier applies
+    ``N <- G N + G n_add + (G - 1) / 2``.
+    """
+    xp = _array_module(elements, frequency, xp)
+    density = xp.zeros_like(xp.asarray(frequency, dtype=float))
     for element in elements:
         if isinstance(element, ReferenceFilter):
-            transfer = transfer * xp.asarray(element(carrier))
-    return transfer
+            density = density * xp.abs(xp.asarray(element(frequency))) ** 2
+        elif isinstance(element, ReferenceAmplifier):
+            density = element.gain * density + element.added_noise_density
+    return density
 
 
 def has_filter(elements: tuple[ReferenceElement, ...]) -> bool:
     """Return whether a reference leg contains a filter section."""
     return any(isinstance(element, ReferenceFilter) for element in elements)
+
+
+def has_amplifier(elements: tuple[ReferenceElement, ...]) -> bool:
+    """Return ``True`` when ``elements`` contains an amplifier."""
+    return any(isinstance(element, ReferenceAmplifier) for element in elements)
 
 
 def time_shift(elements: tuple[ReferenceElement, ...]) -> Any:

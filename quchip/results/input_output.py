@@ -77,6 +77,7 @@ class OutputSpectrumResult:
     coherent_flux: Any
     incoherent_flux: Any
     steady_state: Any
+    added_noise_spectrum: Any
     fourier_convention: str = "2 Re integral_0^inf d tau exp(+i 2 pi f tau) C(tau)"
 
     @property

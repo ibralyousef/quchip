@@ -15,7 +15,7 @@ from quchip.engine.input_output import (
     same_frequency,
 )
 from quchip.engine.linear_response import try_build_linear_response_problem
-from quchip.engine.reference import carrier_transfer, cw_transfer
+from quchip.engine.reference import carrier_transfer, cw_transfer, has_amplifier, noise_density
 from quchip.engine.ir import CanonicalOperator, EngineResult, SteadyStateProblem
 from quchip.engine.steady_state import solve_steadystate_problem
 from quchip.results.input_output import (
@@ -253,7 +253,8 @@ class VNA:
         )[(output_port, output_port)]
         sideband = carrier + xp.asarray(frequency_values)
         offset_gain = xp.abs(carrier_transfer(channel.reference.outbound, sideband, xp)) ** 2
-        spectra = 2.0 * xp.real(response) * offset_gain
+        added_noise = noise_density(channel.reference.outbound, sideband, xp)
+        spectra = 2.0 * xp.real(response) * offset_gain + added_noise
         return OutputSpectrumResult(
             port=output_port,
             frequencies=frequency_values,
@@ -262,6 +263,7 @@ class VNA:
             coherent_flux=coherent_flux,
             incoherent_flux=intensity - coherent_flux,
             steady_state=state,
+            added_noise_spectrum=added_noise,
         )
 
     def g1(
@@ -305,6 +307,11 @@ class VNA:
         xp = backend.array_module
         rho = xp.asarray(backend.to_array(state.state), dtype=complex)
         runs = {item.key: item.reference.outbound for item in engine.slh.external_channels}
+        if has_amplifier(runs[output_port]) or has_amplifier(runs[input_port]):
+            raise NotImplementedError(
+                "Normalized g1 and g2 through an amplifier require a detection bandwidth for its "
+                "broadband added noise. Request the correlation at a plane before the amplifier."
+            )
 
         def plane_field(key: str) -> Any:
             factor = cw_transfer(runs[key], self._output_carrier(engine, key, tones), xp)

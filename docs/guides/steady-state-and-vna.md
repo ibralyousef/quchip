@@ -157,6 +157,21 @@ amplitude and photon flux use `H(f_c)` and `|H(f_c)|^2` at the channel's
 rotating-frame carrier. A network containing a filter cannot be serialized
 with `to_dict()` because its transfer is a Python callable.
 
+To put a phase-preserving HEMT after the isolator, replace the `readout`
+exposure above with:
+
+```python
+hemt = network.amplifier("hemt", gain=1e4, added_noise=20.0)
+network.link(isolator.side(2), hemt)
+readout = network.expose("readout", at=hemt.side(2))
+```
+
+The gain is a power gain; `added_noise` is input-referred symmetrized noise in
+quanta. `output_spectrum` reports the amplified fluctuation spectrum including
+the amplifier chain's added noise, while its flux fields and transient outputs
+contain amplified signal only. Request normalized `g1` and `g2` at a plane
+before the amplifier.
+
 ## One-tone response
 
 ```python
@@ -304,7 +319,8 @@ cross_g2 = vna.g2(
 
 The spectrum contains the normally ordered fluctuation spectrum. Its
 `coherent_flux` field records the carrier separately because the carrier is a
-delta peak rather than a sampled spectral density. `g1` and `g2` use the full
+delta peak rather than a sampled spectral density. `added_noise_spectrum`
+carries the amplifier chain's added noise density. `g1` and `g2` use the full
 output field, including fixed coherent input at that port. These three
 backend-neutral routines currently form a dense Liouvillian and therefore cap
 the total Hilbert dimension at 16. Backend-native correlation tools remain an

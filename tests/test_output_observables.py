@@ -379,3 +379,33 @@ def test_dynamiqs_transient_filter_parameter_is_differentiable() -> None:
     assert jnp.isfinite(value)
     assert jnp.isfinite(gradient)
     assert gradient != 0.0
+
+
+def test_transient_output_through_an_amplifier_scales_by_root_gain() -> None:
+    """Reported transient amplitude scales by sqrt(G) and flux by G; added noise is spectral only."""
+
+    def build(gain: float | None):
+        resonator = Resonator(freq=0.2, levels=8, label="r")
+        network = PortNetwork(label="fridge")
+        port = network.port("coupler", target=resonator, rate=0.04)
+        circulator = network.circulator("circ")
+        network.link(port, circulator.side(2))
+        drive = network.expose("drive", at=circulator.side(1))
+        if gain is None:
+            readout = network.expose("readout", at=circulator.side(3))
+        else:
+            amplifier = network.amplifier("hemt", gain=gain, added_noise=1.0)
+            network.link(circulator.side(3), amplifier)
+            readout = network.expose("readout", at=amplifier.side(2))
+        return Chip([resonator], port_network=network, frame="rotating"), drive, readout
+
+    times = np.linspace(0.0, 20.0, 41)
+    fields = []
+    for gain in (None, 25.0):
+        chip, drive, readout = build(gain)
+        sequence = QuantumSequence(chip)
+        sequence.schedule(drive.input, envelope=Square(duration=10.0, amplitude=0.02), freq=0.2)
+        fields.append(sequence.simulate(tlist=times, e_ops={readout: readout.output}).output(readout))
+    plain, amplified = fields
+    np.testing.assert_allclose(amplified.amplitude, 5.0 * plain.amplitude, atol=1e-6)
+    np.testing.assert_allclose(amplified.photon_flux, 25.0 * plain.photon_flux, atol=1e-6)

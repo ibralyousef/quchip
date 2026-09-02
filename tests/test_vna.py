@@ -349,6 +349,129 @@ def test_distinct_tones_stay_valid_with_traced_network_scattering() -> None:
     assert jnp.isfinite(jax.jit(response)(jnp.asarray(0.5)))
 
 
+def _amplified(
+    gain: float | None = None,
+    added_noise: float = 0.0,
+    *,
+    second: tuple[float, float] | None = None,
+    reverse: bool = False,
+):
+    qubit = DuffingTransmon(freq=6.0, anharmonicity=-0.2, levels=2, label="q")
+    network = PortNetwork(label="fridge")
+    port = network.port("coupler", target=qubit, rate=0.04)
+    circulator = network.circulator("circ")
+    network.link(port, circulator.side(2))
+    network.expose("drive", at=circulator.side(1))
+    tail = circulator.side(3)
+    if gain is not None:
+        amplifier = network.amplifier("hemt", gain=gain, added_noise=added_noise)
+        if reverse:
+            network.link(tail, amplifier.side(2))
+            tail = amplifier.side(1)
+        else:
+            network.link(tail, amplifier)
+            tail = amplifier.side(2)
+    if second is not None:
+        booster = network.amplifier("booster", gain=second[0], added_noise=second[1])
+        network.link(tail, booster)
+        tail = booster.side(2)
+    network.expose("readout", at=tail)
+    return Chip([qubit], port_network=network)
+
+
+def test_amplifier_adds_gain_to_scattering_and_noise_to_spectra() -> None:
+    """A forward amplifier multiplies the mean field by sqrt(G) and adds output-referred noise."""
+    gain, added = 100.0, 1.0
+    frequencies = np.array([5.99, 6.0, 6.02])
+    amplified = VNA(_amplified(gain, added)).sweep(frequencies)
+    plain = VNA(_amplified()).sweep(frequencies)
+    np.testing.assert_allclose(amplified.s("readout", "drive"), np.sqrt(gain) * plain.s("readout", "drive"), atol=1e-9)
+    np.testing.assert_allclose(amplified.s("drive", "drive"), plain.s("drive", "drive"), atol=1e-9)
+    stationary = VNA(_amplified(gain, added)).sweep(frequencies, options={"method": "direct"})
+    np.testing.assert_allclose(stationary.matrix, amplified.matrix, atol=2e-8)
+
+    offsets = np.array([-0.02, 0.0, 0.03])
+    vna = VNA(_amplified(gain, added))
+    vna.pump("drive", freq=6.0, amplitude=0.02)
+    reference = VNA(_amplified())
+    reference.pump("drive", freq=6.0, amplitude=0.02)
+    loud = vna.output_spectrum("readout", frequencies=offsets)
+    quiet = reference.output_spectrum("readout", frequencies=offsets)
+    noise = gain * added + (gain - 1.0) / 2.0
+    np.testing.assert_allclose(loud.added_noise_spectrum, noise)
+    np.testing.assert_allclose(loud.fluctuation_spectrum, gain * quiet.fluctuation_spectrum + noise, rtol=1e-8)
+    np.testing.assert_allclose(loud.coherent_flux, gain * quiet.coherent_flux, rtol=1e-8)
+    with pytest.raises(NotImplementedError, match="amplifier"):
+        vna.g1("readout", delays=np.array([0.0, 1.0]))
+
+
+def test_amplifier_noise_composes_by_friis_and_respects_the_quantum_limit() -> None:
+    """Two amplifiers in series follow Friis; the added-noise floor is (1 - 1/G)/2."""
+    g1, n1, g2, n2 = 10.0, 1.5, 100.0, 4.0
+    vna = VNA(_amplified(g1, n1, second=(g2, n2)))
+    vna.pump("drive", freq=6.0, amplitude=0.02)
+    spectrum = vna.output_spectrum("readout", frequencies=np.array([0.0]))
+    total_gain = g1 * g2
+    expected = total_gain * (n1 + n2 / g1) + (total_gain - 1.0) / 2.0
+    np.testing.assert_allclose(spectrum.added_noise_spectrum, expected)
+
+    floor = (1.0 - 1.0 / g1) / 2.0
+    limited = VNA(_amplified(g1, floor))
+    limited.pump("drive", freq=6.0, amplitude=0.02)
+    np.testing.assert_allclose(
+        limited.output_spectrum("readout", frequencies=np.array([0.0])).added_noise_spectrum, g1 - 1.0
+    )
+    with pytest.raises(ValueError, match="quantum"):
+        _amplified(g1, 0.9 * floor)
+    with pytest.raises(ValueError, match="gain"):
+        _amplified(0.5, 1.0)
+    with pytest.raises(ValueError, match="gain"):
+        _amplified(g1, n1).with_params({"network.component.hemt.gain": 0.5}).resolve()
+    with pytest.raises(ValueError, match="quantum"):
+        _amplified(g1, n1).with_params({"network.component.hemt.added_noise": 0.0}).resolve()
+
+
+def test_traced_amplifier_gain_flows_through_the_linear_response() -> None:
+    """A traced gain skips concrete validation and stays differentiable in mode space."""
+    jax = pytest.importorskip("jax")
+    pytest.importorskip("dynamiqs")
+    import jax.numpy as jnp
+
+    resonator = Resonator(freq=6.0, levels=4, label="r")
+    network = PortNetwork(label="fridge")
+    port = network.port("coupler", target=resonator, rate=0.04)
+    circulator = network.circulator("circ")
+    amplifier = network.amplifier("hemt", gain=10.0, added_noise=1.0)
+    network.link(port, circulator.side(2))
+    network.link(circulator.side(3), amplifier)
+    network.expose("drive", at=circulator.side(1))
+    network.expose("readout", at=amplifier.side(2))
+    chip = Chip([resonator], port_network=network, backend="dynamiqs")
+
+    def transmission(gain):
+        rebound = chip.with_params({"network.component.hemt.gain": gain})
+        return jnp.abs(VNA(rebound).sweep([6.02]).s("readout", "drive")[0])
+
+    value, gradient = jax.jit(jax.value_and_grad(transmission))(jnp.asarray(10.0))
+    assert jnp.isfinite(value) and jnp.isfinite(gradient)
+    np.testing.assert_allclose(gradient, value / 20.0, rtol=1e-6)
+
+
+def test_amplifier_orientation_is_structural() -> None:
+    """An amplifier traversed backwards or sitting on an inbound run is rejected."""
+    with pytest.raises(ValueError, match="output"):
+        _amplified(10.0, 1.0, reverse=True).resolve()
+
+    resonator = Resonator(freq=6.0, levels=3, label="r")
+    network = PortNetwork(label="line")
+    port = network.port("coupler", target=resonator, rate=0.04)
+    amplifier = network.amplifier("hemt", gain=10.0, added_noise=1.0)
+    network.link(port, amplifier.side(2))
+    network.expose("drive", at=amplifier.side(1))
+    with pytest.raises(ValueError, match="output"):
+        Chip([resonator], port_network=network).resolve()
+
+
 def test_vna_uses_network_exposure_labels_and_scattering_background() -> None:
     """VNA queries named network exposures and retains direct scattering."""
     resonator = Resonator(freq=6.0, levels=6, label="r")

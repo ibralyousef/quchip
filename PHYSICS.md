@@ -249,8 +249,40 @@ Phi_plane(t) = |H(f_c)|^2 Phi_boundary(t).
 Here `f_carrier` is the scheduled input carrier and `f_c` is the channel's
 rotating-frame carrier. A lab-frame outbound channel has no such carrier, so
 requesting its filtered output raises before the solve. A concrete evaluation
-with `|H| > 1` also raises: filter sections are passive, and gain belongs to a
-future amplifier model.
+with `|H| > 1` also raises: filter sections are passive; use
+`network.amplifier(...)` for gain.
+
+`network.amplifier(...)` adds a phase-preserving output-line reference section
+with power gain `G` and input-referred symmetrized added noise `n_add` in
+quanta. It amplifies side 1 to side 2 by `sqrt(G)` and is transparent in
+reverse. The exposure must lie beyond side 2 on the outbound leg. quchip raises
+if the forward direction would amplify an incident field into the chip, or if
+an outbound plane lies on side 1. `gain` and `added_noise` are sweepable,
+differentiable paths at `network.component.<label>.gain` and
+`network.component.<label>.added_noise`; amplifier sections serialize
+normally.
+
+The quantum floor and output-line noise recursion are
+
+```text
+n_add >= (1 - 1/G)/2,
+N <- |H(f)|^2 N,
+N <- G N + G n_add + (G - 1)/2.
+```
+
+The last line applies at each amplifier; its added term equals `G - 1` at the
+quantum limit. Two amplifiers in series obey the input-referred Friis relation
+`n_total = n1 + n2/G1`.
+
+Continuous-wave means and small-signal entries, including VNA, acquire
+`sqrt(G)`, so `|S|` may exceed one. `output_spectrum` adds the
+accumulated density `N` to `fluctuation_spectrum` and returns it separately as
+`added_noise_spectrum`. Its `coherent_flux`, `incoherent_flux`, and
+`output_photon_flux` fields scale the signal by `G` but exclude integrated
+amplifier noise, which requires a detection bandwidth. Transient
+`result.output(plane)` likewise scales amplitude by `sqrt(G)` and photon flux
+by `G`, with no added-noise term. Normalized `g1` and `g2` through an amplifier
+raise; request them at a plane before the amplifier.
 
 Noise parameters are ordinary tracked attributes: set (or clear with `None`) at construction **or any time after** — collapse operators are rebuilt from current values on every solve, and post-construction writes get the same validation as the constructor. Chip-level shared/collective dissipation lives in `Bath` ([`quchip/chip/baths.py`](quchip/chip/baths.py)), attached at construction or later via `chip.add_bath(...)`; bath rates are Lindblad-ready 1/ns with no assembly `2π` (that boundary is Hamiltonian-only — a component's *intrinsic* `2π`, e.g. a resonator's `κ = 2π·f/Q`, is its own physics).
 
