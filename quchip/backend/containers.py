@@ -69,6 +69,15 @@ class SteadyStateSolverResult:
     condition_number: Any = None
 
 
+@dataclass(frozen=True)
+class LinearResponseSolverResult:
+    """Backend payload for one batched passive-linear scattering solve."""
+
+    responses: Any
+    residuals: Any
+    condition_numbers: Any
+
+
 @dataclass
 class PreparedHamiltonian:
     """Backend-native Hamiltonian produced by :meth:`Backend.prepare_hamiltonian`.

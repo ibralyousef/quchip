@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from quchip.declarative.expr import PhysicsExpr, materialize_array
+from quchip.declarative.expr import PhysicsExpr, materialize_array, materialize_scalar
 from quchip.declarative.ops import EndpointOps, LocalOps
 from quchip.devices.spaces import FockSpace
 
@@ -78,6 +78,15 @@ def test_python_scalar_still_works():
     expr = 2.0 * op.n
     assert expr.args[0].args[0] == 2.0
     assert (op.n * 3).args[0].args[0] == 3
+
+
+def test_scalar_division_accepts_an_integer_parameter_binding():
+    """A declared reciprocal promotes integer bindings instead of applying integer power."""
+    quality = PhysicsExpr.parameter(scope="r", name="quality")
+
+    value = materialize_scalar(2.0 / quality, bindings={"r.quality": 8})
+
+    assert value == pytest.approx(0.25)
 
 
 def test_array_operand_rejected():

@@ -41,6 +41,7 @@ from quchip.backend.containers import (
     EigensystemData,
     DeferredBatch,
     PreparedHamiltonian,
+    LinearResponseSolverResult,
     SolverResult,
     SteadyStateSolverResult,
 )
@@ -876,6 +877,42 @@ class QuTiPBackend(Backend):
             residual=residual,
             nullity=nullity,
             condition_number=condition_number,
+        )
+
+    def linear_response(self, problem: Any) -> LinearResponseSolverResult:
+        """Solve passive-linear scattering with batched NumPy mode matrices."""
+        hamiltonian = np.asarray(problem.hamiltonian, dtype=complex)
+        couplings = np.asarray(problem.couplings, dtype=complex)
+        scattering = np.asarray(problem.scattering, dtype=complex)
+        frequencies = np.atleast_1d(np.asarray(problem.frequencies, dtype=float))
+        drift = -1j * hamiltonian - 0.5 * couplings.conj().T @ couplings
+        input_vector = -couplings.conj().T @ scattering[:, problem.input_index]
+        systems = (
+            -1j * 2.0 * np.pi * frequencies[:, None, None]
+            * np.eye(len(problem.mode_labels), dtype=complex)[None, :, :]
+            - drift[None, :, :]
+        )
+        amplitudes = np.linalg.solve(systems, input_vector)
+        output_rows = couplings[np.asarray(problem.output_indices)]
+        responses = scattering[np.asarray(problem.output_indices), problem.input_index][None, :] + (
+            amplitudes @ output_rows.T
+        )
+        delays = np.asarray(problem.reference_delays)
+        phases = np.exp(
+            1j
+            * 2.0
+            * np.pi
+            * frequencies[:, None]
+            * (delays[problem.input_index] + delays[np.asarray(problem.output_indices)])[None, :]
+        )
+        residuals = np.linalg.norm(
+            systems @ amplitudes[..., None] - input_vector[None, :, None],
+            axis=(-2, -1),
+        )
+        return LinearResponseSolverResult(
+            responses=phases * responses,
+            residuals=residuals,
+            condition_numbers=np.linalg.cond(systems),
         )
 
     def stationary_resolvent(

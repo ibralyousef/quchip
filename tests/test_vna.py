@@ -257,6 +257,130 @@ def test_qutip_and_dynamiqs_vna_response_agree() -> None:
     np.testing.assert_allclose(np.asarray(response("dynamiqs")), response("qutip"), atol=2e-8)
 
 
+def test_passive_linear_vna_uses_mode_space_and_matches_one_port_reflection() -> None:
+    """Passive harmonic scattering uses the exact mode-space transfer function."""
+    resonator = Resonator(freq=6.0, levels=8, label="r")
+    port = Port(resonator, rate=0.04, label="readout")
+    chip = Chip([resonator], port_network=_network(port))
+    frequencies = np.asarray([5.98, 6.0, 6.02])
+
+    result = VNA(chip, input=port, outputs=[port]).sweep(frequencies)
+
+    detuning = 2 * np.pi * (resonator.freq - frequencies)
+    expected = 1.0 - port.rate / (port.rate / 2.0 + 1j * detuning)
+    np.testing.assert_allclose(result.s11, expected, atol=2e-12)
+    assert {diagnostic["solver"] for diagnostic in result.diagnostics} == {
+        "linear_response"
+    }
+
+
+def test_eight_resonator_cascade_matches_exact_series_product() -> None:
+    """An eight-mode feedline stays in mode space and reproduces SLH series response."""
+    resonances = np.asarray([6.42, 6.505, 6.595, 6.69, 6.79, 6.895, 7.005, 7.12])
+    external_rates = np.asarray([0.0060, 0.0082, 0.0052, 0.0105, 0.0071, 0.0120, 0.0090, 0.0066])
+    qualities = np.asarray([28_000, 42_000, 22_000, 55_000, 31_000, 47_000, 26_000, 60_000])
+    phases = np.asarray([0.18, 0.27, 0.16, 0.31, 0.22, 0.28, 0.19])
+    resonators = [
+        Resonator(
+            freq=frequency,
+            levels=32,
+            internal_quality_factor=quality,
+            label=f"r{index}",
+        )
+        for index, (frequency, quality) in enumerate(zip(resonances, qualities, strict=True))
+    ]
+    network = PortNetwork(label="feedline")
+    ports = [
+        network.port(f"p{index}", target=resonator, rate=rate)
+        for index, (resonator, rate) in enumerate(zip(resonators, external_rates, strict=True))
+    ]
+    previous = ports[0]
+    for index, (phase, following) in enumerate(zip(phases, ports[1:], strict=True)):
+        section = network.phase_shift(f"section{index}", phase=phase)
+        network.cascade(previous, section)
+        network.cascade(section, following)
+        previous = following
+    network.expose("readout", input=ports[0].input, output=ports[-1].output, delay=0.08)
+    frequencies = np.asarray([6.42, 6.69, 7.12])
+
+    result = VNA(
+        Chip(resonators, port_network=network),
+        input="readout",
+        outputs=["readout"],
+    ).sweep(frequencies)
+
+    expected = np.exp(1j * np.sum(phases)) * np.exp(1j * 4 * np.pi * frequencies * 0.08)
+    for resonance, external_rate, quality in zip(resonances, external_rates, qualities, strict=True):
+        internal_rate = 2 * np.pi * resonance / quality
+        expected *= 1.0 - external_rate / (
+            0.5 * (external_rate + internal_rate) + 1j * 2 * np.pi * (resonance - frequencies)
+        )
+    np.testing.assert_allclose(result.s11, expected, atol=2e-11)
+    assert all(diagnostic["mode_count"] == 8 for diagnostic in result.diagnostics)
+
+
+def test_coupled_mode_response_matches_general_liouvillian_fallback() -> None:
+    """Mode-space scattering agrees with the general solver for a coupled linear chip."""
+    frequencies = np.asarray([5.97, 6.0, 6.04])
+
+    def response(*, explicit_operator: bool):
+        first = Resonator(freq=6.0, levels=3, label="a")
+        second = Resonator(freq=6.035, levels=3, label="b")
+        operator = (
+            np.diag(np.sqrt(np.arange(1, first.levels)), k=1).astype(complex)
+            if explicit_operator
+            else None
+        )
+        port = Port(first, rate=0.035, operator=operator, label="readout")
+        chip = Chip(
+            [first, second],
+            [Capacitive(first, second, g=0.012)],
+            port_network=_network(port),
+        )
+        return VNA(chip, input=port, outputs=[port]).sweep(frequencies)
+
+    linear = response(explicit_operator=False)
+    general = response(explicit_operator=True)
+
+    np.testing.assert_allclose(linear.s11, general.s11, atol=2e-10)
+    assert {item["solver"] for item in linear.diagnostics} == {"linear_response"}
+    assert {item["solver"] for item in general.diagnostics} == {"stationary_resolvent"}
+
+
+def test_nonlinear_hamiltonian_retains_stationary_fallback() -> None:
+    """A structurally nonlinear mode remains on the general stationary solver."""
+    cavity = KerrCavity(freq=6.0, kerr=0.02, levels=3, label="c")
+    port = Port(cavity, rate=0.04, label="readout")
+
+    result = VNA(
+        Chip([cavity], port_network=_network(port)),
+        input=port,
+        outputs=[port],
+    ).sweep([6.0])
+
+    assert {item["solver"] for item in result.diagnostics} == {"stationary_resolvent"}
+
+
+def test_dynamiqs_linear_response_is_jittable_and_differentiable() -> None:
+    """The mode-space VNA path preserves JIT and gradients through chip parameters."""
+    pytest.importorskip("dynamiqs")
+    import jax
+    import jax.numpy as jnp
+
+    resonator = Resonator(freq=6.0, levels=16, label="r")
+    port = Port(resonator, rate=0.04, label="readout")
+    chip = Chip([resonator], port_network=_network(port), backend="dynamiqs")
+
+    def reflection(resonance):
+        shifted = chip.with_params({"r.freq": resonance})
+        return jnp.real(VNA(shifted, input="readout", outputs=["readout"]).sweep([6.01]).s11[0])
+
+    value, gradient = jax.jit(jax.value_and_grad(reflection))(jnp.asarray(6.0))
+
+    assert jnp.isfinite(value)
+    assert jnp.isfinite(gradient)
+
+
 def test_dynamiqs_pumped_small_signal_response_is_jittable_and_differentiable() -> None:
     """Pumped Dynamiqs small-signal response is JIT-safe and differentiable."""
     pytest.importorskip("dynamiqs")
@@ -313,8 +437,7 @@ def test_resonantly_driven_two_level_population_matches_optical_bloch_solution()
 
     vna = VNA(chip, input=port, outputs=[port])
     vna.pump(port, freq=5.0, amplitude=amplitude)
-    result = vna.sweep([5.0])
-    state = np.asarray(result.steady_states[0].state.full())
+    state = np.asarray(vna._stationary_output(None)[1].state.full())
     excited_population = np.real(state[1, 1])
     expected = 4 * amplitude**2 / (decay_rate + 8 * amplitude**2)
 
@@ -380,8 +503,6 @@ def test_nonlinear_stationary_state_matches_long_time_master_equation() -> None:
     chip = Chip([cavity], port_network=_network(port), backend="qutip")
     vna = VNA(chip, input=port, outputs=[port])
     vna.pump(port, freq=6.0, amplitude=amplitude)
-    stationary = vna.sweep([6.0])
-
     engine = chip.resolve(frame={"c": 6.0})
     backend = chip.backend
     hamiltonian = sum(
@@ -409,4 +530,4 @@ def test_nonlinear_stationary_state_matches_long_time_master_equation() -> None:
         options={"method": "diag"},
     ).states[-1]
 
-    np.testing.assert_allclose(stationary.steady_states[0].state.full(), evolved.full(), atol=2e-7)
+    np.testing.assert_allclose(vna._stationary_output(None)[1].state.full(), evolved.full(), atol=2e-7)

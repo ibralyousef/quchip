@@ -639,6 +639,9 @@ def materialize_expr(
         if node.kind in ("scale", "mul"):
             return left * right
         if node.kind == "pow":
+            exponent = node.args[1]
+            if exponent.kind == "literal" and exponent.args[0] == -1:
+                return 1.0 / left
             return left ** right
         raise TypeError(f"Unknown PhysicsExpr kind {node.kind!r}.")
 

@@ -14,7 +14,8 @@ entirely here, in:
   or carried, per band,
 * :func:`_apply_2pi_canonical` — the single point that scales every
   embedded *dynamic* operator (drive, crosstalk, coupling-dynamic,
-  device-dynamic).
+  device-dynamic),
+* :func:`_apply_2pi_scalar` — compact mode-space Hamiltonian coefficients.
 
 The same ``2π`` convention also expresses signal-AST carrier and
 rotating-frame-phase *frequencies* in rad/ns
@@ -299,7 +300,7 @@ def _build_static_h0(
     where ``H_bare`` is the chip-level tensored sum of device and static
     coupling contributions (ordinary GHz), and ``ω^ref_i`` is the
     per-device frame reference. This function is one of the
-    four places in the engine where the 2π boundary is crossed.
+    assembly paths where the 2π boundary is crossed.
     """
     dims = resolution.dims
     h0: Operator | None = None
@@ -366,6 +367,11 @@ def _apply_2pi_canonical(backend: Backend, embedded: Operator, *, dims, labels, 
         subsystem_labels=labels,
         tag=tag,
     )
+
+
+def _apply_2pi_scalar(value: Any) -> Any:
+    """Cross the Hamiltonian ordinary-to-angular frequency boundary."""
+    return TWO_PI * value
 
 
 def _collect_collapse_terms(

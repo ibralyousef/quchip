@@ -52,6 +52,7 @@ from quchip.backend.containers import (  # noqa: E402
     DeferredBatch,
     EigensystemData,
     PreparedHamiltonian,
+    LinearResponseSolverResult,
     SolverResult,
     SteadyStateSolverResult,
 )
@@ -573,6 +574,41 @@ class DynamiqsBackend(Backend):
             residual=residual,
             nullity=nullity,
             condition_number=condition_number,
+        )
+
+    def linear_response(self, problem: Any) -> LinearResponseSolverResult:
+        """Solve passive-linear scattering with batched JAX mode matrices."""
+        hamiltonian = jnp.asarray(problem.hamiltonian, dtype=jnp.complex128)
+        couplings = jnp.asarray(problem.couplings, dtype=jnp.complex128)
+        scattering = jnp.asarray(problem.scattering, dtype=jnp.complex128)
+        frequencies = jnp.atleast_1d(jnp.asarray(problem.frequencies, dtype=jnp.float64))
+        drift = -1j * hamiltonian - 0.5 * couplings.conj().T @ couplings
+        input_vector = -couplings.conj().T @ scattering[:, problem.input_index]
+        systems = (
+            -1j * 2.0 * jnp.pi * frequencies[:, None, None]
+            * jnp.eye(len(problem.mode_labels), dtype=jnp.complex128)[None, :, :]
+            - drift[None, :, :]
+        )
+        amplitudes = jnp.linalg.solve(systems, input_vector)
+        output_indices = jnp.asarray(problem.output_indices)
+        output_rows = couplings[output_indices]
+        responses = scattering[output_indices, problem.input_index][None, :] + amplitudes @ output_rows.T
+        delays = jnp.asarray(problem.reference_delays)
+        phases = jnp.exp(
+            1j
+            * 2.0
+            * jnp.pi
+            * frequencies[:, None]
+            * (delays[problem.input_index] + delays[output_indices])[None, :]
+        )
+        residuals = jnp.linalg.norm(
+            systems @ amplitudes[..., None] - input_vector[None, :, None],
+            axis=(-2, -1),
+        )
+        return LinearResponseSolverResult(
+            responses=phases * responses,
+            residuals=residuals,
+            condition_numbers=jnp.linalg.cond(systems),
         )
 
     def stationary_resolvent(

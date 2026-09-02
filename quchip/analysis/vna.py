@@ -12,6 +12,7 @@ from quchip.engine.input_output import (
     port_operators,
     resolve_stationary_engine,
 )
+from quchip.engine.linear_response import try_build_linear_response_problem
 from quchip.engine.ir import CanonicalOperator, EngineResult, SteadyStateProblem
 from quchip.engine.steady_state import solve_steadystate_problem
 from quchip.results.input_output import (
@@ -94,6 +95,46 @@ class VNA:
         if freq_is_axis:
             shape += (len(freq_values),)
 
+        if not self._tones and not variations and options is None:
+            linear_problem = try_build_linear_response_problem(
+                self.chip,
+                freq_values,
+                input_label=self.input.label,
+                output_labels=tuple(port.label for port in self.outputs),
+            )
+            if linear_problem is not None:
+                solved = self.chip.backend.linear_response(linear_problem)
+                xp = self.chip.backend.array_module
+                linear_responses = {
+                    (port.label, self.input.label): (
+                        solved.responses[:, index]
+                        if freq_is_axis
+                        else solved.responses[0, index]
+                    )
+                    for index, port in enumerate(self.outputs)
+                }
+                axes = _public_axes(variations, self._tones)
+                if freq_is_axis:
+                    axes += (("frequency", freq_values),)
+                linear_diagnostics = tuple(
+                    {
+                        "solver": "linear_response",
+                        "mode_count": len(linear_problem.mode_labels),
+                        "residual": solved.residuals[index],
+                        "condition_number": solved.condition_numbers[index],
+                    }
+                    for index in range(len(freq_values))
+                )
+                return SParameterResult(
+                    frequencies=freq_values if freq_is_axis else freq_values[0],
+                    input_port=self.input.label,
+                    output_ports=tuple(port.label for port in self.outputs),
+                    axes=axes,
+                    shape=shape,
+                    diagnostics=linear_diagnostics,
+                    _response={key: xp.asarray(value) for key, value in linear_responses.items()},
+                )
+
         points = [
             (coord, params, frequency_index, frequency)
             for coord, params in variation_points
@@ -106,7 +147,6 @@ class VNA:
             iterator = tqdm(points, desc="VNA")
 
         responses: dict[str, list[Any]] = {port.label: [] for port in self.outputs}
-        steady_states: list[Any] = []
         diagnostics: list[dict[str, Any]] = []
         operating_cache: dict[tuple[tuple[int, ...], int], tuple[Any, Any, Any]] = {}
         for coord, params, frequency_index, frequency in iterator:
@@ -137,9 +177,9 @@ class VNA:
 
             for label, value in values.items():
                 responses[label].append(value)
-            steady_states.append(state)
             diagnostics.append(
                 {
+                    "solver": "stationary_resolvent",
                     "residual": state.residual,
                     "trace_error": state.trace_error,
                     "positivity_error": state.positivity_error,
@@ -161,7 +201,6 @@ class VNA:
             output_ports=tuple(port.label for port in self.outputs),
             axes=axes,
             shape=shape,
-            steady_states=tuple(steady_states),
             diagnostics=tuple(diagnostics),
             _response=response_arrays,
         )
@@ -389,7 +428,10 @@ def _axis_values(values: Any) -> tuple[Any, bool]:
 def _resolve_exposure(chip: Any, value: Any) -> _ExposureRef:
     """Resolve a Port object or label against the external SLH boundary."""
     label = resolve_label(value)
-    available = [channel.key for channel in chip.resolve().slh.external_channels]
+    network = chip.port_network
+    if network is None:
+        raise ValueError("VNA requires a chip with a PortNetwork.")
+    available = [exposure.label for exposure in network.exposures]
     if label not in available:
         raise ValueError(f"Unknown VNA exposure {label!r}. Available exposures: {available}.")
     return _ExposureRef(label)

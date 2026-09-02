@@ -1694,6 +1694,26 @@ class SolveProblem:
 
 
 @dataclass(frozen=True)
+class LinearResponseProblem:
+    """Passive-linear input-output request handed to a backend.
+
+    ``hamiltonian`` is the number-conserving mode matrix in angular units,
+    ``couplings`` stacks the channel rows of ``L = C a``, and ``scattering``
+    is the complete instantaneous SLH matrix including hidden vacuum and loss
+    channels. Frequencies remain ordinary GHz at the public boundary.
+    """
+
+    frequencies: Any
+    mode_labels: tuple[str, ...]
+    hamiltonian: Any
+    couplings: Any
+    scattering: Any
+    input_index: int
+    output_indices: tuple[int, ...]
+    reference_delays: tuple[Any, ...]
+
+
+@dataclass(frozen=True)
 class SteadyStateProblem:
     """Immutable static Lindblad request handed from a chip to its backend."""
 

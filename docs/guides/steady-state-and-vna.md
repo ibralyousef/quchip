@@ -135,9 +135,21 @@ operating point:
 S_ji(f) = d <b_out,j> / d beta_in,i  at beta_probe -> 0.
 ```
 
-The direct background is the resolved network `S`; the device response comes
-from `L` and the stationary Liouvillian. Exposure delays transform both ends
-between the chip boundary and the declared reference planes.
+For a passive-linear model without fixed pumps or stationary solver options,
+quchip lowers the declared Hamiltonian, loss channels, and `PortNetwork` to a
+mode-space transfer problem. Eight harmonic resonators therefore require an
+eight-dimensional linear solve, not a density matrix on their product Hilbert
+space. The same call falls back to the stationary Liouvillian when the model
+contains Kerr terms, finite-level saturation, pumps, time dependence, or
+operator forms that cannot be classified as passive and linear.
+`result.diagnostics` records `linear_response` or `stationary_resolvent` as the
+solver.
+
+The direct background remains the resolved network `S`, while `L` supplies the
+mode coupling and damping. Exposure delays transform both ends between the chip
+boundary and the declared reference planes. `SParameterResult` contains the
+scattering data and diagnostics; use `chip.steadystate()` when the stationary
+density matrix is itself the requested result.
 
 ## Finite fields and transient outputs
 

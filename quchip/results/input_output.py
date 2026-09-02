@@ -20,7 +20,6 @@ class SParameterResult:
     output_ports: tuple[str, ...]
     axes: tuple[tuple[str, Any], ...]
     shape: tuple[int, ...]
-    steady_states: tuple[Any, ...]
     diagnostics: tuple[Mapping[str, Any], ...]
     _response: Mapping[tuple[str, str], Any] = field(repr=False)
 

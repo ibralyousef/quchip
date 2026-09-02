@@ -47,6 +47,7 @@ from quchip.backend.containers import (
     EigensystemData,
     PreparedBatch,
     PreparedHamiltonian,
+    LinearResponseSolverResult,
     SolverResult,
     SteadyStateSolverResult,
     VmappedBatch,
@@ -707,6 +708,10 @@ class Backend(ABC):
     def steadystate(self, problem: Any) -> SteadyStateSolverResult:
         """Solve one static Lindblad problem in the backend's native representation."""
         raise NotImplementedError(f"{type(self).__name__} must implement steadystate()")
+
+    def linear_response(self, problem: Any) -> LinearResponseSolverResult:
+        """Solve one passive-linear input-output problem in the backend's native arrays."""
+        raise NotImplementedError(f"{type(self).__name__} must implement linear_response()")
 
     def stationary_resolvent(
         self,
