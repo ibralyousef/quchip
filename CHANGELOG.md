@@ -15,6 +15,10 @@ This file records notable user-visible changes to quchip.
 - Added external-plane input scheduling through `network.expose(...).input`; coherent amplitudes are in `sqrt(photons/ns)` and are not stored on `ResolvedSLH`.
 - Added complete transient field traces through `result.output(plane)`, with complex amplitude, arbitrary post-solve quadratures, normally ordered photon flux, and the Markov-boundary values before outbound reference sections derived from the same `b_out = S b_in + L` model. `VNA.sweep()` remains small signal, while `VNA.finite_power()` reports the stationary mean field.
 
+### Visualization
+
+- Added `plot_port_network(...)` for field-network schematics and `plot_sparameters(...)` for magnitude, dB-and-phase, and complex-plane views of small-signal scattering results.
+
 ### Resolved analysis and transformations
 
 - Added `EngineResult.dress(at_time=...)`. Static snapshots may omit the time; dynamic snapshots require it and return an instantaneous eigensystem rather than a Floquet spectrum. `Chip.dress()` keeps its exact intrinsic lab-static meaning.

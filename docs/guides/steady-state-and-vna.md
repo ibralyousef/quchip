@@ -232,6 +232,27 @@ wave factor `exp(+i 2π f τ)` per leg. `SParameterResult` contains the scatteri
 matrix, selected plane labels, and diagnostics; use `chip.steadystate()` when
 the stationary density matrix is itself the requested result.
 
+## Draw the network and the response
+
+```python
+from quchip.viz import plot_port_network, plot_sparameters
+
+network_figure = plot_port_network(chip)
+response_figure = plot_sparameters(result)
+slice_figure = plot_sparameters(
+    frequency_map,
+    pairs=[(output_port, input_port)],
+    select={"readout.freq": 2},
+)
+```
+
+`plot_port_network` draws the Markov core, reference sections, external planes,
+and hidden vacuum or load stubs; pass `show_hidden=False` to omit the stubs.
+`plot_sparameters` draws the selected small-signal response as dB and unwrapped
+phase by default; set `kind="magnitude"` for magnitude or `kind="iq"` for the
+complex plane. `quchip.viz` requires Matplotlib, which quchip installs as a
+core dependency.
+
 ## Finite fields and transient outputs
 
 Use `vna.finite_power(...)` for stationary finite-power spectroscopy, including

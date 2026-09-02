@@ -500,3 +500,126 @@ def test_wigner_from_density_matrix_matches_qutip_for_fock_state() -> None:
     expected = qutip.wigner(rho, xvec, xvec, g=np.sqrt(2))
 
     np.testing.assert_allclose(actual, expected, atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Port networks and S-parameters
+# ---------------------------------------------------------------------------
+
+
+def _fridge_chip() -> tuple[qc.Chip, qc.PortNetwork]:
+    resonator = qc.Resonator(freq=6.0, levels=4, label="r")
+    network = qc.PortNetwork(label="fridge")
+    port = network.port("coupler", target=resonator, rate=0.04)
+    circulator = network.circulator("circ")
+    isolator = network.isolator("iso")
+    loss = network.attenuator("cold_loss", eta=0.1)
+    cable = network.delay("cable", duration=3.2)
+    hemt = network.amplifier("hemt", gain=100.0, added_noise=2.0)
+    network.link(loss, circulator.side(1))
+    network.link(port, circulator.side(2))
+    network.link(circulator.side(3), isolator, cable, hemt)
+    network.expose("drive", at=loss.side(1))
+    network.expose("readout", at=hemt.side(2))
+    return qc.Chip([resonator], port_network=network), network
+
+
+def test_plot_port_network_draws_every_component_and_plane() -> None:
+    chip, network = _fridge_chip()
+
+    fig = qc.viz.plot_port_network(chip)
+    texts = {text.get_text() for text in fig.findobj(matplotlib.text.Text)}
+
+    assert isinstance(fig, Figure)
+    assert {"coupler", "circ", "iso", "cold_loss", "cable", "hemt", "drive", "readout"} <= texts
+    assert any("port -> r" in text for text in texts)
+    assert {"load", "vacuum_1", "vacuum_2"} <= texts
+    assert any("3.2" in text for text in texts)
+
+    quiet = qc.viz.plot_port_network(network, show_hidden=False)
+    quiet_texts = {text.get_text() for text in quiet.findobj(matplotlib.text.Text)}
+    assert not ({"load", "vacuum_1", "vacuum_2"} & quiet_texts)
+
+    _, ax = plt.subplots()
+    assert qc.viz.plot_port_network(chip, ax=ax) is ax.figure
+    plt.close("all")
+
+
+def test_plot_sparameters_supports_matrix_kinds_and_axis_selection() -> None:
+    resonator = qc.Resonator(freq=6.0, levels=6, label="r")
+    network = qc.PortNetwork(label="line")
+    network.port("in", target=resonator, rate=0.04)
+    network.port("out", target=resonator, rate=0.02)
+    chip = qc.Chip([resonator], port_network=network)
+    vna = qc.VNA(chip)
+    frequencies = np.linspace(5.95, 6.05, 21)
+    result = vna.sweep(frequencies)
+
+    fig = qc.viz.plot_sparameters(result)
+    assert isinstance(fig, Figure)
+    assert len(fig.axes) == 2
+    assert len(fig.axes[0].get_lines()) == 4
+    assert "dB" in fig.axes[0].get_ylabel()
+
+    magnitude = qc.viz.plot_sparameters(result, pairs=[("out", "in")], kind="magnitude")
+    assert len(magnitude.axes) == 1 and len(magnitude.axes[0].get_lines()) == 1
+    iq = qc.viz.plot_sparameters(result, kind="iq")
+    assert len(iq.axes[0].get_lines()) == 4
+
+    mapped = vna.sweep(frequencies, qc.Sweep([5.98, 6.0, 6.02], name="r.freq"))
+    selected = qc.viz.plot_sparameters(mapped, pairs=[("in", "in")], select={"r.freq": 2})
+    line = selected.axes[0].get_lines()[0]
+    np.testing.assert_allclose(line.get_ydata(), 20 * np.log10(np.abs(mapped.s("in", "in")[2])))
+
+    with pytest.raises(ValueError, match="kind"):
+        qc.viz.plot_sparameters(result, kind="smith")
+    with pytest.raises(TypeError, match="SParameterResult"):
+        qc.viz.plot_sparameters(vna.finite_power(6.0, 0.01, input="in"))
+    plt.close("all")
+
+
+def test_plot_sparameters_rejects_result_without_free_sweep_axis() -> None:
+    """A single-frequency result has nothing to plot against and says so."""
+    resonator = qc.Resonator(freq=6.0, levels=4, label="r")
+    network = qc.PortNetwork(label="line")
+    network.port("in", target=resonator, rate=0.02)
+    result = qc.VNA(qc.Chip([resonator], port_network=network)).sweep(6.0)
+    with pytest.raises(ValueError, match="sweep axis"):
+        qc.viz.plot_sparameters(result)
+
+
+def test_plot_sparameters_rejects_selecting_frequency() -> None:
+    """select= indexes only non-frequency axes; frequency stays the x axis."""
+    resonator = qc.Resonator(freq=6.0, levels=4, label="r")
+    network = qc.PortNetwork(label="line")
+    network.port("in", target=resonator, rate=0.02)
+    result = qc.VNA(qc.Chip([resonator], port_network=network)).sweep(
+        np.linspace(5.9, 6.1, 5), qc.Sweep(np.array([5.99, 6.01]), name="r.freq")
+    )
+    with pytest.raises(ValueError, match="frequency"):
+        qc.viz.plot_sparameters(result, select={"frequency": 1})
+
+
+def test_plot_port_network_draws_asymmetric_planes_with_two_arrows() -> None:
+    """A plane exposed with separate input and output terminals gets one arrow per leg."""
+    resonator = qc.Resonator(freq=6.0, levels=4, label="r")
+    network = qc.PortNetwork(label="line")
+    port = network.port("p", target=resonator, rate=0.02)
+    circ = network.circulator("circ")
+    pad = network.attenuator("pad", eta=0.5)
+    network.link(port, circ.side(2))
+    network.link(pad, circ.side(1))
+    network.expose("through", input=pad.side(1).input, output=circ.side(3).output)
+    fig = qc.viz.plot_port_network(network)
+    arrows = [a for a in fig.findobj(matplotlib.text.Annotation) if a.arrow_patch is not None]
+    styles = sorted(type(a.arrow_patch.get_arrowstyle()).__name__ for a in arrows)
+    assert styles.count("CurveB") == 2
+    assert styles.count("CurveAB") == 2
+
+    same_component = qc.PortNetwork(label="one")
+    circ = same_component.circulator("circ")
+    same_component.link(same_component.port("p", target=resonator, rate=0.02), circ.side(2))
+    same_component.expose("split", input=circ.side(1).input, output=circ.side(3).output)
+    fig = qc.viz.plot_port_network(same_component)
+    arrows = [a for a in fig.findobj(matplotlib.text.Annotation) if a.arrow_patch is not None]
+    assert sorted(type(a.arrow_patch.get_arrowstyle()).__name__ for a in arrows) == ["CurveAB", "CurveB", "CurveB"]
