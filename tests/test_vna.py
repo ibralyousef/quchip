@@ -231,13 +231,63 @@ def test_vna_probe_has_no_finite_amplitude_mode() -> None:
     assert "amplitude" not in inspect.signature(VNA.sweep).parameters
 
 
-def test_vna_rejects_sweep_axes_it_does_not_own() -> None:
-    """Ordinary chip parameters cannot be silently ignored as tone variations."""
+def test_chip_parameter_sweeps_are_vna_axes() -> None:
+    """Ordinary chip parameter sweeps rebind the chip per grid point beside tone axes."""
+    _, input_port, _, chip = _linear_resonator(kappa_in=0.04)
+    frequencies = np.array([5.98, 6.0, 6.02])
+    vna = VNA(chip, planes=[input_port])
+
+    result = vna.sweep(frequencies, Sweep([5.98, 6.02], name="r.freq"))
+
+    assert result.shape == (2, 3)
+    assert result.axis_names == ("r.freq", "frequency")
+    for row, freq in zip(result.s11, [5.98, 6.02], strict=True):
+        shifted = VNA(chip.with_params({"r.freq": freq}), planes=[input_port]).sweep(frequencies)
+        np.testing.assert_allclose(row, shifted.s11, atol=1e-12)
+
+
+def test_chip_paths_resembling_tone_keys_still_rebind() -> None:
+    """Chip bindings are classified by exact tone keys, not by a label prefix."""
+    resonator = Resonator(freq=6.0, levels=6, label="__vna_tone_0")
+    port = Port(resonator, rate=0.04, label="p")
+    chip = Chip([resonator], port_network=_network(port))
+
+    result = VNA(chip).sweep(np.array([5.9, 6.1]), Sweep([5.9, 6.1], name="__vna_tone_0.freq"))
+
+    np.testing.assert_allclose(np.abs(result.s11[0, 0]), np.abs(result.s11[1, 1]), atol=1e-8)
+    assert not np.allclose(result.s11[0, 0], result.s11[0, 1])
+
+
+def test_vna_rejects_unknown_paths_and_foreign_tone_axes() -> None:
+    """Unknown parameter paths and another VNA's tone axes fail loudly."""
     _, input_port, _, chip = _linear_resonator(kappa_in=0.04)
     vna = VNA(chip, planes=[input_port])
 
+    with pytest.raises(KeyError, match="r.frequency"):
+        vna.sweep([6.0], Sweep([5.9], name="r.frequency"))
+    other = VNA(chip, planes=[input_port]).pump(input_port, freq=5.0, amplitude=0.01)
     with pytest.raises(ValueError, match="this VNA"):
-        vna.sweep([6.0], Sweep([5.9, 6.0], name="r.freq"))
+        vna.sweep([6.0], other.vary("freq", [4.9]))
+
+
+def test_chip_and_pump_axes_zip_together() -> None:
+    """A zipped chip parameter and pump axis step through the grid element by element."""
+    readout = Resonator(freq=6.0, levels=4, label="readout")
+    auxiliary = Resonator(freq=5.0, levels=3, label="aux")
+    readout_port = Port(readout, rate=0.03, label="readout_port")
+    pump_port = Port(auxiliary, rate=0.04, label="pump_port")
+    chip = Chip([readout, auxiliary], port_network=_network(readout_port, pump_port))
+    vna = VNA(chip, planes=[readout_port])
+    pump = vna.pump(pump_port, freq=5.0, amplitude=0.02)
+
+    result = vna.sweep(
+        np.array([5.99, 6.0]),
+        vna.zip(pump.vary("amplitude", [0.01, 0.02]), Sweep([0.03, 0.05], name="port.readout_port.rate")),
+    )
+
+    assert result.shape == (2, 2)
+    assert result.axis_names == ("pump_port.amplitude/port.readout_port.rate", "frequency")
+    assert np.all(np.isfinite(result.s11))
 
 
 def test_vna_rejects_duplicate_public_axis_names() -> None:

@@ -26,6 +26,8 @@ from quchip.sweep import Sweep, ZippedSweep, _axis_metadata, _iter_axis_points
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar
 from quchip.utils.labeling import resolve_label
 
+_TONE_PREFIX = "__vna_tone_"
+
 
 @dataclass(frozen=True)
 class PortTone:
@@ -43,7 +45,7 @@ class PortTone:
             raise ValueError(f"A port tone can vary only 'freq' or 'amplitude', got {field!r}.")
         return _ToneAxis(
             values,
-            name=f"__vna_tone_{self._index}_{field}",
+            name=f"{_TONE_PREFIX}{self._index}_{field}",
             owner=self._owner,
             public_name=name or f"{self.port}.{field}",
         )
@@ -103,7 +105,9 @@ class VNA:
 
         The result contains every ``S(output, input)`` between the selected planes.
         Its ``matrix`` has shape ``(*sweep_axes, n_planes, n_planes)`` and is
-        indexed ``[..., output, input]``. At each frequency, the passive-linear route
+        indexed ``[..., output, input]``. Ordinary ``Sweep`` axes name paths in
+        ``chip.parameters`` and rebind the chip at each point; they may be mixed
+        with pump-tone axes. At each frequency, the passive-linear route
         uses one multi-right-hand-side mode-space solve. The stationary route solves
         one pumped operating point, then uses one shifted-Liouvillian factorization
         for every input plane.
@@ -131,31 +135,13 @@ class VNA:
                 matrix=xp.reshape(matrix, (*shape, len(labels), len(labels))),
             )
 
-        if not self._tones and not variations and options is None:
-            linear_problem = try_build_linear_response_problem(
-                self.chip, freq_values, plane_labels=labels
-            )
-            if linear_problem is not None:
-                solved = self.chip.backend.linear_response(linear_problem)
-                indices = list(linear_problem.plane_indices)
-                transfer = (
-                    linear_problem.outbound_transfer[:, indices][:, :, None]
-                    * linear_problem.inbound_transfer[:, indices][:, None, :]
-                )
-                return result(
-                    (
-                        {
-                            "solver": "linear_response",
-                            "mode_count": len(linear_problem.mode_labels),
-                            "residual": solved.residuals[index],
-                            "condition_number": solved.condition_numbers[index],
-                        }
-                        for index in range(len(freq_values))
-                    ),
-                    xp.asarray(transfer * solved.responses),
-                )
+        chip_points = [(self._tone_values(p), self._chip_at(p)) for _, p in variation_points]
+        if not self._tones and options is None:
+            linear = self._linear_sweep([chip for _, chip in chip_points], freq_values, labels)
+            if linear is not None:
+                return result(linear[1], xp.concatenate(linear[0]))
 
-        points = [(params, frequency) for _, params in variation_points for frequency in freq_values]
+        points = [(tones, chip, frequency) for tones, chip in chip_points for frequency in freq_values]
         iterator: Any = points
         if progress:
             from tqdm import tqdm
@@ -164,21 +150,20 @@ class VNA:
 
         matrices: list[Any] = []
         diagnostics: list[dict[str, Any]] = []
-        for params, frequency in iterator:
-            tones = self._tone_values(params)
+        for tones, chip, frequency in iterator:
             engine = resolve_stationary_engine(
-                self.chip,
+                chip,
                 tuple((label, tone_frequency) for label, tone_frequency, _ in tones)
                 + tuple((label, frequency) for label in labels),
             )
-            operating_engine = add_port_inputs(engine, self.chip.backend, tones)
-            operating = _solve_engine(self.chip, operating_engine, options)
+            operating_engine = add_port_inputs(engine, chip.backend, tones)
+            operating = _solve_engine(chip, operating_engine, options)
             matrices.append(
                 _small_signal_matrix(
                     operating_engine,
                     operating.state,
-                    self.chip.backend,
-                    port_operators(operating_engine, self.chip.backend),
+                    chip.backend,
+                    port_operators(operating_engine, chip.backend),
                     labels,
                     frequency,
                 )
@@ -199,15 +184,22 @@ class VNA:
         self, variations: tuple[Sweep | ZippedSweep, ...], *, frequency_axis: bool
     ) -> None:
         names = ["frequency"] if frequency_axis else []
+        chip_paths = set(self.chip.parameters)
         for variation in variations:
             members = variation.sweeps if isinstance(variation, ZippedSweep) else (variation,)
             for member in members:
-                if not isinstance(member, _ToneAxis) or member.owner is not self:
-                    raise ValueError(
-                        "VNA variations must come from tone.vary(...) on a tone created by this VNA."
+                if isinstance(member, _ToneAxis):
+                    if member.owner is not self:
+                        raise ValueError(
+                            "VNA tone variations must come from tone.vary(...) on a tone created by this VNA."
+                        )
+                elif member.name not in chip_paths:
+                    raise KeyError(
+                        f"Unknown Chip parameter path {member.name!r} in VNA sweep. "
+                        f"Available paths: {sorted(chip_paths)}"
                     )
                 if isinstance(variation, ZippedSweep):
-                    names.append(member.public_name)
+                    names.append(_public_name(member))
         names.extend(name for name, _ in _public_axes(variations))
         duplicates = sorted({name for name in names if names.count(name) > 1})
         if duplicates:
@@ -405,11 +397,51 @@ class VNA:
             incoming[channel.key] = outbound * incoming[channel.key]
         return driven_engine, state, operators, incoming
 
+    def _linear_sweep(
+        self, chips: list[Any], frequencies: Any, labels: tuple[str, ...]
+    ) -> tuple[list[Any], list[dict[str, Any]]] | None:
+        """Solve every chip point in mode space, or return ``None`` if any point is ineligible."""
+        matrices: list[Any] = []
+        diagnostics: list[dict[str, Any]] = []
+        for chip in chips:
+            problem = try_build_linear_response_problem(chip, frequencies, plane_labels=labels)
+            if problem is None:
+                return None
+            solved = chip.backend.linear_response(problem)
+            indices = list(problem.plane_indices)
+            transfer = (
+                problem.outbound_transfer[:, indices][:, :, None]
+                * problem.inbound_transfer[:, indices][:, None, :]
+            )
+            matrices.append(chip.backend.array_module.asarray(transfer * solved.responses))
+            diagnostics.extend(
+                {
+                    "solver": "linear_response",
+                    "mode_count": len(problem.mode_labels),
+                    "residual": solved.residuals[index],
+                    "condition_number": solved.condition_numbers[index],
+                }
+                for index in range(len(frequencies))
+            )
+        return matrices, diagnostics
+
+    def _chip_at(self, params: dict[str, Any]) -> Any:
+        """Return the chip after rebinding the ordinary sweep values in ``params``."""
+        bindings = {name: value for name, value in params.items() if name not in self._tone_keys()}
+        return self.chip.with_params(bindings) if bindings else self.chip
+
+    def _tone_keys(self) -> set[str]:
+        return {
+            f"{_TONE_PREFIX}{tone._index}_{field}"
+            for tone in self._tones
+            for field in ("freq", "amplitude")
+        }
+
     def _tone_values(self, params: dict[str, Any]) -> tuple[tuple[str, Any, Any], ...]:
         tones: list[tuple[str, Any, Any]] = []
         for tone in self._tones:
-            freq = params.get(f"__vna_tone_{tone._index}_freq", tone.freq)
-            amplitude = params.get(f"__vna_tone_{tone._index}_amplitude", tone.amplitude)
+            freq = params.get(f"{_TONE_PREFIX}{tone._index}_freq", tone.freq)
+            amplitude = params.get(f"{_TONE_PREFIX}{tone._index}_amplitude", tone.amplitude)
             tones.append((tone.port, freq, amplitude))
         return tuple(tones)
 
@@ -444,6 +476,10 @@ def _exposure_reference_frequency(chip: Any, label: str) -> Any:
             return 0.0 if frequency is None else frequency
     available = [channel.key for channel in resolved.slh.external_channels]
     raise ValueError(f"Unknown VNA exposure {label!r}. Available exposures: {available}.")
+
+
+def _public_name(sweep: Sweep) -> str:
+    return sweep.public_name if isinstance(sweep, _ToneAxis) else sweep.name
 
 
 def _public_axes(variations: tuple[Sweep | ZippedSweep, ...]) -> tuple[tuple[str, Any], ...]:

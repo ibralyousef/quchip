@@ -161,6 +161,21 @@ S_ji(f) = d <b_out,j> / d beta_in,i  at beta_probe -> 0.
 `result.matrix` has shape `(*sweep_axes, n_planes, n_planes)` and is indexed
 `[..., output, input]` in `result.planes` order.
 
+`VNA.sweep()` also accepts ordinary chip-parameter `Sweep` axes. Their names
+are parameter paths listed by `chip.parameters`, and the result axes follow
+the order passed before `frequency`. Each grid point rebinds the chip through
+the same immutable parameter machinery as `chip.with_params(...)` and
+`steadystate_batch`.
+
+```python
+from quchip import Sweep
+
+frequency_map = vna.sweep(
+    np.linspace(6.75, 6.85, 201),
+    Sweep(np.linspace(6.7, 6.9, 41), name="readout.freq"),
+)
+```
+
 For a passive-linear model without fixed pumps or stationary solver options,
 quchip lowers the declared Hamiltonian, loss channels, and `PortNetwork` to a
 mode-space transfer problem. Eight harmonic resonators therefore require an
@@ -235,6 +250,9 @@ map_2d = vna.sweep(
     pump.vary("freq", np.linspace(4.8, 5.2, 161)),
 )
 ```
+
+`vna.zip(...)` can also mix `pump.vary(...)` with a chip-parameter `Sweep`,
+stepping through both element by element.
 
 Use `vna.zip(...)` to pair pump frequency and amplitude point by point. A
 dispersive model such as `CrossKerr` stays static in separate probe and pump
