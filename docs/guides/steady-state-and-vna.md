@@ -222,6 +222,15 @@ S_ji(f) = d <b_out,j> / d beta_in,i  at beta_probe -> 0.
 `result.matrix` has shape `(*sweep_axes, n_planes, n_planes)` and is indexed
 `[..., output, input]` in `result.planes` order.
 
+Around a phase-sensitive operating point such as a pumped Kerr resonator or
+degenerate parametric amplifier, `T` can be nonzero; the passive-linear route
+returns zeros.
+
+```python
+t_matrix = result.conjugate_matrix
+t_out_in = result.t(output_port, input_port)
+```
+
 `VNA.sweep()` also accepts ordinary chip-parameter `Sweep` axes. Their names
 are parameter paths listed by `chip.parameters`, and the result axes follow
 the order passed before `frequency`. Each grid point rebinds the chip through
@@ -420,10 +429,11 @@ cross_g2 = vna.g2(
 )
 ```
 
-The spectrum contains the normally ordered fluctuation spectrum. Its
-`coherent_flux` field records the carrier separately because the carrier is a
-delta peak rather than a sampled spectral density. `added_noise_spectrum`
-carries the amplifier chain's added noise density. `g1` and `g2` use the full
+`signal_fluctuation_spectrum` contains the normally ordered signal spectrum,
+and `total_fluctuation_spectrum` adds the amplifier chain's
+`added_noise_spectrum`. The `signal_coherent_flux` field records the carrier
+separately because the carrier is a delta peak rather than a sampled spectral
+density. `g1` and `g2` use the full
 output field, including fixed coherent input at that port. These three
 backend-neutral routines currently form a dense Liouvillian and therefore cap
 the total Hilbert dimension at 16. Backend-native correlation tools remain an

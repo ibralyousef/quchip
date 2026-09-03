@@ -127,21 +127,24 @@ class VNA:
         if freq_is_axis:
             axes += (("frequency", freq_values),)
 
-        def result(diagnostics: Any, matrix: Any) -> SParameterResult:
+        def result(diagnostics: Any, matrix: Any, conjugate: Any) -> SParameterResult:
+            block = (*shape, len(labels), len(labels))
             return SParameterResult(
                 frequencies=freq_values if freq_is_axis else freq_values[0],
                 planes=labels,
                 axes=axes,
                 shape=shape,
                 diagnostics=tuple(diagnostics),
-                matrix=xp.reshape(matrix, (*shape, len(labels), len(labels))),
+                matrix=xp.reshape(matrix, block),
+                conjugate_matrix=xp.reshape(conjugate, block),
             )
 
         chip_points = [(self._tone_values(p), self._chip_at(p)) for _, p in variation_points]
         if not self._tones and options is None:
             linear = self._linear_sweep([chip for _, chip in chip_points], freq_values, labels)
             if linear is not None:
-                return result(linear[1], xp.concatenate(linear[0]))
+                matrix = xp.concatenate(linear[0])
+                return result(linear[1], matrix, xp.zeros_like(matrix))
 
         points = [(tones, chip, frequency) for tones, chip in chip_points for frequency in freq_values]
         iterator: Any = points
@@ -150,13 +153,13 @@ class VNA:
 
             iterator = tqdm(points, desc="VNA")
 
-        matrices: list[Any] = []
+        blocks: list[tuple[Any, Any]] = []
         diagnostics: list[dict[str, Any]] = []
         for tones, chip, frequency in iterator:
             operating_engine, operating, point_diagnostics = _operating_point(
                 chip, tones, frequency, labels, options
             )
-            matrices.append(
+            blocks.append(
                 _small_signal_matrix(
                     operating_engine,
                     operating.state,
@@ -168,7 +171,7 @@ class VNA:
             )
             diagnostics.append(point_diagnostics)
 
-        return result(diagnostics, xp.stack(matrices))
+        return result(diagnostics, *(xp.stack(part) for part in zip(*blocks, strict=True)))
 
     def finite_power(
         self,
@@ -337,16 +340,17 @@ class VNA:
         sideband = carrier + xp.asarray(frequency_values)
         offset_gain = xp.abs(carrier_transfer(channel.reference.outbound, sideband, xp)) ** 2
         added_noise = noise_density(channel.reference.outbound, sideband, xp)
-        spectra = 2.0 * xp.real(response) * offset_gain + added_noise
+        signal = 2.0 * xp.real(response) * offset_gain
         return OutputSpectrumResult(
             port=output_port,
             frequencies=frequency_values,
-            fluctuation_spectrum=xp.asarray(spectra),
-            output_photon_flux=intensity,
-            coherent_flux=coherent_flux,
-            incoherent_flux=intensity - coherent_flux,
-            steady_state=state,
+            total_fluctuation_spectrum=xp.asarray(signal + added_noise),
+            signal_fluctuation_spectrum=xp.asarray(signal),
             added_noise_spectrum=added_noise,
+            signal_photon_flux=intensity,
+            signal_coherent_flux=coherent_flux,
+            signal_incoherent_flux=intensity - coherent_flux,
+            steady_state=state,
         )
 
     def g1(
@@ -649,11 +653,13 @@ def _small_signal_matrix(
     port_operators: dict[str, CanonicalOperator],
     labels: tuple[str, ...],
     frequency: Any,
-) -> Any:
-    """Return the selected-plane ``S_ji(f)`` matrix from one stationary resolvent.
+) -> tuple[Any, Any]:
+    """Return the selected-plane ``S_ji(f)`` and phase-conjugating ``T_ji(f)`` matrices.
 
-    Rows are output planes and columns are input planes. The resolvent uses one
-    shifted-Liouvillian factorization for all input columns.
+    Rows are output planes and columns are input planes. Around a phase-sensitive
+    operating point the linear response is ``delta <b_out> = S delta beta + T
+    conj(delta beta)``; one shifted-Liouvillian factorization serves both source
+    sets for all input columns.
     """
     xp = backend.array_module
     rho = xp.asarray(backend.to_array(state), dtype=complex)
@@ -666,19 +672,15 @@ def _small_signal_matrix(
     )
     scattering = xp.asarray(engine.slh.S)
     sources = []
-    for label, index in zip(labels, indices, strict=True):
+    for column, index in enumerate(indices):
         input_operator = xp.tensordot(xp.conj(scattering[:, index]), operators, axes=1)
         input_dag = xp.conj(xp.swapaxes(input_operator, -1, -2))
-        sources.append(
-            (
-                label,
-                _canonical_matrix(
-                    input_dag @ rho - rho @ input_dag,
-                    template,
-                    tag=f"linear-response-source:{label}",
-                ),
-            )
+        normal_source = _canonical_matrix(input_dag @ rho - rho @ input_dag, template, tag=f"normal-source:{column}")
+        conjugate_source = _canonical_matrix(
+            rho @ input_operator - input_operator @ rho, template, tag=f"conjugate-source:{column}"
         )
+        sources.append((f"normal:{column}", normal_source))
+        sources.append((f"conjugate:{column}", conjugate_source))
     response = backend.stationary_resolvent(
         engine,
         tuple(sources),
@@ -687,18 +689,17 @@ def _small_signal_matrix(
     )
     inbound = xp.stack([cw_transfer(external[i].reference.inbound, frequency, xp) for i in indices])
     outbound = xp.stack([cw_transfer(external[i].reference.outbound, frequency, xp) for i in indices])
-    boundary = xp.stack(
-        [
-            xp.stack(
-                [
-                    scattering[out_index, in_index] + response[(in_label, out_label)][0]
-                    for in_index, in_label in zip(indices, labels, strict=True)
-                ]
-            )
-            for out_index, out_label in zip(indices, labels, strict=True)
-        ]
+
+    def gather(kind: str) -> Any:
+        columns = range(len(labels))
+        return xp.stack([xp.stack([response[(f"{kind}:{c}", out_label)][0] for c in columns]) for out_label in labels])
+
+    direct = xp.stack([xp.stack([scattering[o, i] for i in indices]) for o in indices])
+    gain = outbound[:, None]
+    return (
+        gain * inbound[None, :] * (direct + gather("normal")),
+        gain * xp.conj(inbound)[None, :] * gather("conjugate"),
     )
-    return outbound[:, None] * inbound[None, :] * boundary
 
 
 def _output_carrier(engine: EngineResult, key: str, tones: Any) -> Any:

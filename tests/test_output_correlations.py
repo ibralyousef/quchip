@@ -62,9 +62,9 @@ def test_vacuum_output_has_zero_fluctuation_spectrum() -> None:
 
     result = vna.output_spectrum(port, frequencies=frequencies)
 
-    np.testing.assert_allclose(result.fluctuation_spectrum, 0.0, atol=1e-10)
-    np.testing.assert_allclose(result.coherent_flux, 0.0, atol=1e-12)
-    np.testing.assert_allclose(result.output_photon_flux, 0.0, atol=1e-12)
+    np.testing.assert_allclose(result.total_fluctuation_spectrum, 0.0, atol=1e-10)
+    np.testing.assert_allclose(result.signal_coherent_flux, 0.0, atol=1e-12)
+    np.testing.assert_allclose(result.signal_photon_flux, 0.0, atol=1e-12)
     assert result.fourier_convention == "2 Re integral_0^inf d tau exp(+i 2 pi f tau) C(tau)"
 
 
@@ -109,7 +109,7 @@ def test_qutip_and_dynamiqs_stationary_output_analysis_agree() -> None:
             planes=[port],
         )
         spectrum = vna.output_spectrum(port, frequencies=[-0.05, 0.0, 0.05])
-        return spectrum.fluctuation_spectrum, vna.g1(port, [0.0, 2.0]).values, vna.g2(port, [0.0, 2.0]).values
+        return spectrum.total_fluctuation_spectrum, vna.g1(port, [0.0, 2.0]).values, vna.g2(port, [0.0, 2.0]).values
 
     qutip_values = outputs("qutip")
     dynamiqs_values = outputs("dynamiqs")
@@ -129,4 +129,4 @@ def test_qutip_output_analysis_is_not_capped_by_engine_dense_dimension() -> None
 
     result = vna.output_spectrum(port, frequencies=[0.0])
 
-    np.testing.assert_allclose(result.fluctuation_spectrum, 0.0, atol=1e-10)
+    np.testing.assert_allclose(result.total_fluctuation_spectrum, 0.0, atol=1e-10)

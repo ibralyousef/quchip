@@ -65,6 +65,11 @@ class SLHComponent:
     def side(self, name: str | int) -> "FieldSide":
         """Return the physical side whose input and output terminals share ``name``."""
         label = str(name)
+        if not self.sides:
+            raise ValueError(
+                f"Component {self.label!r} is directional and has no physical sides; use "
+                "input_terminal()/output_terminal() or cascade()."
+            )
         if label not in self.sides:
             raise KeyError(f"No side {label!r} on component {self.label!r}; available: {list(self.sides)}")
         return FieldSide(self.input_terminal(label), self.output_terminal(label))
@@ -469,7 +474,13 @@ class PortNetwork:
         return component
 
     def beam_splitter(self, label: str, *, eta: Any = 0.5) -> SLHComponent:
-        """Add a reciprocal two-channel splitter parameterized by power transmission."""
+        """Add a directional two-input/two-output splitter.
+
+        ``eta`` is the power from input ``k`` to output ``k``. With
+        ``t = sqrt(eta)`` and ``r = sqrt(1 - eta)``, the scattering matrix is
+        ``[[t, r], [-r, t]]``. This component has no physical sides; use
+        ``input_terminal()``, ``output_terminal()``, or ``cascade()``.
+        """
         matrix = self._transmission_matrix(eta)
         component = self.component(label, scattering=matrix, terminals=("left", "right"))
         self._component_kinds[label] = "beam_splitter"
@@ -477,7 +488,12 @@ class PortNetwork:
         return component
 
     def hybrid90(self, label: str) -> SLHComponent:
-        """Add an ideal reciprocal 90-degree hybrid."""
+        """Add a directional two-input/two-output ideal 90-degree hybrid.
+
+        The scattering matrix is ``[[1, 1j], [1j, 1]] / sqrt(2)``. This
+        component has no physical sides; use ``input_terminal()``,
+        ``output_terminal()``, or ``cascade()``.
+        """
         component = self.component(
             label,
             scattering=np.asarray([[1.0, 1j], [1j, 1.0]], dtype=complex) / np.sqrt(2.0),
@@ -1700,9 +1716,10 @@ class PortNetwork:
             for source in sources[1:]
         ):
             raise ValueError(
-                f"PortNetwork cannot statically compose {boundary} from ports {list(sources)} "
-                "with different rotating-frame frequencies. Use the lab/common frame; "
-                "time-dependent collapse channels are not implemented."
+                f"PortNetwork cannot statically compose {boundary} from ports {list(sources)}: their "
+                "rotating-frame frequencies are not statically known to be equal (traced frequencies must "
+                "share the same traced value). Use the lab/common frame; time-dependent collapse channels "
+                "are not implemented."
             )
         return reference
 
@@ -1793,6 +1810,12 @@ class PortNetwork:
 
     @staticmethod
     def _transmission_matrix(eta: Any) -> Any:
+        """Return ``[[t, r], [-r, t]]`` for the directional splitter.
+
+        Here ``t = sqrt(eta)`` and ``r = sqrt(1 - eta)``. Rows select outputs
+        and columns select inputs, so ``eta`` is the power from input ``k`` to
+        output ``k``.
+        """
         xp = select_array_module(contains_tracer(eta))
         transmission = xp.sqrt(xp.asarray(eta))
         loss = xp.sqrt(1.0 - xp.asarray(eta))

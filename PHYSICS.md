@@ -218,9 +218,14 @@ values at that point.
 
 Concrete scattering must be unitary. Loss is represented by an explicit
 unitary dilation: a two-sided reciprocal attenuator with power transmission
-`eta` has amplitude transmission `sqrt(eta)` in both directions and couples
-each direction to one of two hidden vacuum channels with amplitude
-`sqrt(1-eta)`. Network exposures define the external channel order. Their
+`eta` from side 1 to side 2 has amplitude transmission `sqrt(eta)` in both
+directions and couples each direction to one of two hidden vacuum channels
+with amplitude `sqrt(1-eta)`. A beam splitter is instead a directional
+two-input/two-output device: `eta` is the input-k to output-k power, and its
+scattering matrix is `[[sqrt(eta), sqrt(1-eta)], [-sqrt(1-eta), sqrt(eta)]]`.
+Beam splitters and 90-degree hybrids have no physical sides; connect their
+input and output terminals directly or with `network.cascade(...)`. Network
+exposures define the external channel order. Their
 adjacent reference sections move the incident and reported reference planes;
 the compiler peels them from each leg before forming the instantaneous `S`,
 `L`, and `H`. A section traversed on a reflection line contributes once inbound
@@ -282,11 +287,12 @@ quantum limit. Two amplifiers in series obey the input-referred Friis relation
 `n_total = n1 + n2/G1`.
 
 Continuous-wave means and small-signal entries, including VNA, acquire
-`sqrt(G)`, so `|S|` may exceed one. `output_spectrum` adds the
-accumulated density `N` to `fluctuation_spectrum` and returns it separately as
-`added_noise_spectrum`. Its `coherent_flux`, `incoherent_flux`, and
-`output_photon_flux` fields scale the signal by `G` but exclude integrated
-amplifier noise, which requires a detection bandwidth. Transient
+`sqrt(G)`, so `|S|` may exceed one. `output_spectrum` returns the amplified
+signal density as `signal_fluctuation_spectrum`, the accumulated density `N`
+as `added_noise_spectrum`, and their sum as `total_fluctuation_spectrum`. Its
+`signal_coherent_flux`, `signal_incoherent_flux`, and `signal_photon_flux`
+fields scale the signal by `G` but exclude amplifier noise, which cannot be
+converted to flux without a detection bandwidth. Transient
 `result.output(plane)` likewise scales amplitude by `sqrt(G)` and photon flux
 by `G`, with no added-noise term. Normalized `g1` and `g2` through an amplifier
 raise; request them at a plane before the amplifier.
@@ -540,6 +546,13 @@ around the fixed-tone state,
 ```text
 S_ji(f) = d <b_out,j> / d beta_in,i  at beta_probe -> 0.
 ```
+
+Around a phase-sensitive operating point, the full response is
+`delta <b_out> = S delta beta + T conj(delta beta)`. `result.conjugate_matrix` stores
+`T` with the same `[..., output, input]` layout as `result.matrix`, and
+`result.t(output, input)` selects one entry. The stationary route obtains `S`
+and `T` from the same shifted-Liouvillian factorization; the passive-linear
+route reports zero for `T`.
 
 The direct term comes from the resolved scalar `S`; the system term comes from
 the stationary response of `L` under the same coherent-input Hamiltonian.

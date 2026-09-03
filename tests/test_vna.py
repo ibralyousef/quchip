@@ -248,7 +248,7 @@ def test_output_spectrum_is_filtered_at_the_offset_frequency() -> None:
     filtered = build(True).output_spectrum("readout", frequencies=offsets)
     plain = build(False).output_spectrum("readout", frequencies=offsets)
     gain = np.abs(_lowpass(6.0 + offsets, cutoff=6.02, order=1)) ** 2
-    np.testing.assert_allclose(filtered.fluctuation_spectrum, gain * plain.fluctuation_spectrum, rtol=1e-8)
+    np.testing.assert_allclose(filtered.total_fluctuation_spectrum, gain * plain.total_fluctuation_spectrum, rtol=1e-8)
 
 
 def test_output_notch_filter_keeps_the_sideband_spectrum() -> None:
@@ -279,9 +279,9 @@ def test_output_notch_filter_keeps_the_sideband_spectrum() -> None:
     filtered = build(True).output_spectrum("readout", frequencies=offsets)
     plain = build(False).output_spectrum("readout", frequencies=offsets)
     gain = np.abs(notch(6.0 + offsets, center=6.0, width=0.01)) ** 2
-    np.testing.assert_allclose(filtered.fluctuation_spectrum, gain * plain.fluctuation_spectrum, atol=1e-12)
-    assert filtered.fluctuation_spectrum[1] == pytest.approx(0.0, abs=1e-12)
-    assert filtered.fluctuation_spectrum[2] > 0.0
+    np.testing.assert_allclose(filtered.total_fluctuation_spectrum, gain * plain.total_fluctuation_spectrum, atol=1e-12)
+    assert filtered.total_fluctuation_spectrum[1] == pytest.approx(0.0, abs=1e-12)
+    assert filtered.total_fluctuation_spectrum[2] > 0.0
 
 
 def test_coupling_free_output_takes_its_carrier_from_the_feeding_tone() -> None:
@@ -310,14 +310,15 @@ def test_coupling_free_output_takes_its_carrier_from_the_feeding_tone() -> None:
         return vna
 
     spectrum = build(True).output_spectrum("drive", frequencies=np.array([0.0]))
-    assert spectrum.coherent_flux == pytest.approx(abs(tilt(6.0, slope=0.7)) ** 2 * 0.03**2)
+    assert spectrum.signal_coherent_flux == pytest.approx(abs(tilt(6.0, slope=0.7)) ** 2 * 0.03**2)
     with pytest.raises(ValueError, match="carrier"):
         build(False).output_spectrum("drive", frequencies=np.array([0.0]))
     delayed = build(True, delay_only=True).output_spectrum("drive", frequencies=np.array([0.0]))
-    assert delayed.coherent_flux == pytest.approx(0.03**2)
+    assert delayed.signal_coherent_flux == pytest.approx(0.03**2)
     with pytest.raises(ValueError, match="carrier"):
         build(False, delay_only=True).output_spectrum("drive", frequencies=np.array([0.0]))
-    assert build(False).output_spectrum("readout", frequencies=np.array([0.0])).coherent_flux == pytest.approx(0.0)
+    quiet = build(False).output_spectrum("readout", frequencies=np.array([0.0]))
+    assert quiet.signal_coherent_flux == pytest.approx(0.0)
 
 
 def test_distinct_tones_stay_valid_with_traced_network_scattering() -> None:
@@ -399,8 +400,10 @@ def test_amplifier_adds_gain_to_scattering_and_noise_to_spectra() -> None:
     quiet = reference.output_spectrum("readout", frequencies=offsets)
     noise = gain * added + (gain - 1.0) / 2.0
     np.testing.assert_allclose(loud.added_noise_spectrum, noise)
-    np.testing.assert_allclose(loud.fluctuation_spectrum, gain * quiet.fluctuation_spectrum + noise, rtol=1e-8)
-    np.testing.assert_allclose(loud.coherent_flux, gain * quiet.coherent_flux, rtol=1e-8)
+    np.testing.assert_allclose(
+        loud.total_fluctuation_spectrum, gain * quiet.total_fluctuation_spectrum + noise, rtol=1e-8
+    )
+    np.testing.assert_allclose(loud.signal_coherent_flux, gain * quiet.signal_coherent_flux, rtol=1e-8)
     with pytest.raises(NotImplementedError, match="amplifier"):
         vna.g1("readout", delays=np.array([0.0, 1.0]))
 
@@ -1034,3 +1037,51 @@ def test_nonlinear_stationary_state_matches_long_time_master_equation() -> None:
     ).states[-1]
 
     np.testing.assert_allclose(vna._stationary_output(port.label, None)[1].state.full(), evolved.full(), atol=2e-7)
+
+
+def test_pumped_vna_reports_phase_conjugate_response() -> None:
+    """Around a pumped Kerr operating point, S and T reproduce the real and imaginary probe derivatives."""
+    from quchip.devices.kerr_cavity import KerrCavity
+
+    cavity = KerrCavity(freq=6.0, kerr=0.02, levels=12, label="k")
+    network = PortNetwork(label="combiner")
+    port = network.port("p", target=cavity, rate=0.05)
+    splitter = network.beam_splitter("bs", eta=0.5)
+    network.cascade(splitter.output_terminal("left"), port)
+    network.expose("pump", input=splitter.input_terminal("left"), output=splitter.output_terminal("right"))
+    network.expose("probe", input=splitter.input_terminal("right"), output=port.output)
+    vna = VNA(Chip([cavity], port_network=network), planes=["probe"])
+    vna.pump("pump", freq=6.0, amplitude=0.3)
+
+    small_signal = vna.sweep([6.0])
+    s_value = complex(np.asarray(small_signal.s("probe", "probe"))[0])
+    t_value = complex(np.asarray(small_signal.t("probe", "probe"))[0])
+    assert abs(t_value) > 1e-3
+
+    step = 1e-4
+    means = np.asarray(vna.finite_power([6.0], [step, -step, 1j * step, -1j * step], input="probe").mean("probe"))
+    real_slope = (means[0, 0] - means[1, 0]) / (2 * step)
+    imag_slope = (means[2, 0] - means[3, 0]) / (2j * step)
+    np.testing.assert_allclose(real_slope, s_value + t_value, atol=1e-5)
+    np.testing.assert_allclose(imag_slope, s_value - t_value, atol=1e-5)
+
+    linear = Resonator(freq=6.0, levels=4, label="r")
+    passive = VNA(Chip([linear], port_network=PortNetwork.from_ports([Port(linear, rate=0.05, label="p")])))
+    np.testing.assert_allclose(passive.sweep([6.0]).conjugate_matrix, 0.0)
+
+
+def test_stationary_route_keeps_plane_labels_out_of_source_keys() -> None:
+    """Plane labels that look like internal source keys do not collide in the stationary solve."""
+    resonator = Resonator(freq=6.0, levels=4, label="r")
+    network = PortNetwork(label="odd")
+    network.port("x", target=resonator, rate=0.04)
+    network.port("conjugate:x", target=resonator, rate=0.02)
+    chip = Chip([resonator], port_network=network)
+    frequencies = np.linspace(5.98, 6.02, 5)
+
+    passive = VNA(chip).sweep(frequencies)
+    stationary = VNA(chip).sweep(frequencies, options={})
+
+    assert {item["solver"] for item in stationary.diagnostics} == {"stationary_resolvent"}
+    np.testing.assert_allclose(stationary.matrix, passive.matrix, atol=1e-8)
+    np.testing.assert_allclose(stationary.conjugate_matrix, 0.0, atol=1e-10)

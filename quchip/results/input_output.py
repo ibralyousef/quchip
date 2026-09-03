@@ -17,9 +17,15 @@ from quchip.utils.labeling import resolve_label
 class SParameterResult:
     """Complete selected-plane small-signal scattering over a sweep grid.
 
-    ``matrix`` has shape ``(*shape, n_planes, n_planes)`` and is indexed
-    ``[..., output, input]`` in ``planes`` order. ``numpy.asarray(result)``
-    returns ``matrix``.
+    Around a phase-sensitive operating point, the response is
+    ``delta <b_out> = S delta beta + T conj(delta beta)``. ``matrix`` stores ``S``
+    and ``conjugate_matrix`` stores ``T``; both have shape ``(*shape, n_planes,
+    n_planes)`` and use ``[..., output, input]`` indexing in ``planes`` order.
+    ``s(output, input)`` and ``t(output, input)`` select individual entries.
+
+    The stationary route computes both matrices from one shifted-Liouvillian
+    factorization. The passive-linear route reports zero for ``T``.
+    ``numpy.asarray(result)`` returns ``matrix``.
     """
 
     frequencies: Any
@@ -28,6 +34,7 @@ class SParameterResult:
     shape: tuple[int, ...]
     diagnostics: tuple[Mapping[str, Any], ...]
     matrix: Any
+    conjugate_matrix: Any
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -44,6 +51,10 @@ class SParameterResult:
     def s(self, output: Any, input: Any) -> Any:
         """Return ``S(output, input)`` over the sweep grid for two selected planes."""
         return self.matrix[..., self._index(output), self._index(input)]
+
+    def t(self, output: Any, input: Any) -> Any:
+        """Return the phase-conjugating ``T(output, input)`` over the sweep grid."""
+        return self.conjugate_matrix[..., self._index(output), self._index(input)]
 
     @property
     def s11(self) -> Any:
@@ -131,22 +142,27 @@ class MeanFieldResponseResult:
 
 @dataclass(frozen=True)
 class OutputSpectrumResult:
-    """Normally ordered stationary output-field fluctuation spectrum."""
+    """Stationary output-field fluctuation spectra and signal photon fluxes.
+
+    ``signal_fluctuation_spectrum`` is the normally ordered signal spectral
+    density. ``added_noise_spectrum`` is the amplifier added-noise density,
+    and ``total_fluctuation_spectrum`` is their sum. ``signal_photon_flux``
+    is the signal's mean normally ordered flux, split into
+    ``signal_coherent_flux`` and ``signal_incoherent_flux``. Added noise is
+    not included in these fluxes because converting a spectral density to
+    flux requires a detection bandwidth.
+    """
 
     port: str
     frequencies: Any
-    fluctuation_spectrum: Any
-    output_photon_flux: Any
-    coherent_flux: Any
-    incoherent_flux: Any
-    steady_state: Any
+    total_fluctuation_spectrum: Any
+    signal_fluctuation_spectrum: Any
     added_noise_spectrum: Any
+    signal_photon_flux: Any
+    signal_coherent_flux: Any
+    signal_incoherent_flux: Any
+    steady_state: Any
     fourier_convention: str = "2 Re integral_0^inf d tau exp(+i 2 pi f tau) C(tau)"
-
-    @property
-    def total_flux(self) -> Any:
-        """Mean normally ordered output photon flux."""
-        return self.output_photon_flux
 
 
 @dataclass(frozen=True)

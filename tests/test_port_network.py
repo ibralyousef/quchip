@@ -130,7 +130,7 @@ def test_cascade_rejects_mixed_rotating_frame_frequencies() -> None:
         frame={"a": 5.0, "b": 6.0},
     )
 
-    with pytest.raises(ValueError, match="different rotating-frame frequencies"):
+    with pytest.raises(ValueError, match="not statically known to be equal"):
         chip.resolve()
 
 
@@ -858,3 +858,13 @@ def test_include_keeps_filter_callables_by_reference() -> None:
     rebound = chip.with_params({"network.component.f/lp.cutoff": 4.0})
     assert rebound.port_network is not None
     assert rebound.port_network.parameters["component.f/lp.cutoff"] == 4.0
+
+
+def test_directional_component_side_error_is_actionable() -> None:
+    """A directional splitter has no physical sides and says which accessors to use instead."""
+    network = PortNetwork(label="line")
+    splitter = network.beam_splitter("bs", eta=0.5)
+    with pytest.raises(ValueError, match="directional.*input_terminal"):
+        splitter.side("left")
+    with pytest.raises(ValueError, match="directional"):
+        network.link(network.port("p", target=Resonator(freq=5.0, levels=2, label="r"), rate=0.02), splitter)
