@@ -192,8 +192,9 @@ Source: [`quchip/chip/port_network.py`](quchip/chip/port_network.py),
 [`quchip/engine/ir.py`](quchip/engine/ir.py)
 
 A `PortNetwork` composes accessible ports and instantaneous scalar scattering
-before the engine lowers the resolved SLH value. For a series connection with
-`G2` after `G1`, quchip uses
+before the engine lowers the resolved SLH value. An included block is a plain
+copy of template components and connections under a label prefix and adds no
+physics of its own. For a series connection with `G2` after `G1`, quchip uses
 
 ```text
 S = S2 S1

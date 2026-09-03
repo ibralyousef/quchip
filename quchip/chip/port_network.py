@@ -211,6 +211,50 @@ def _strongly_connected(nodes: Mapping[Any, Any], successors: Callable[[Any], li
     return components
 
 
+@dataclass(frozen=True)
+class IncludedNetwork:
+    """Access one prefixed copy of a template network inside a host.
+
+    ``component(name)`` returns a copied component. Template exposures made with
+    ``expose(..., at=...)`` are available through ``side(name)``; asymmetric
+    exposures use ``input(name)`` and ``output(name)``.
+    """
+
+    prefix: str
+    _host: "PortNetwork" = field(repr=False, compare=False)
+    _interfaces: Mapping[str, tuple[TerminalKey, TerminalKey]] = field(repr=False, compare=False)
+
+    def component(self, name: str) -> SLHComponent:
+        """Return the copied component that was called ``name`` in the template."""
+        label = f"{self.prefix}/{name}"
+        if label not in self._host._components:
+            raise KeyError(f"No component {name!r} in block {self.prefix!r}.")
+        return self._host._components[label]
+
+    def input(self, name: str) -> FieldTerminal:
+        """Return the input terminal of the template exposure ``name``."""
+        key = self._interface(name)[0]
+        return self._host._components[key[0]].input_terminal(key[1])
+
+    def output(self, name: str) -> FieldTerminal:
+        """Return the output terminal of the template exposure ``name``."""
+        key = self._interface(name)[1]
+        return self._host._components[key[0]].output_terminal(key[1])
+
+    def side(self, name: str) -> FieldSide:
+        """Return the physical side behind a template exposure made with ``expose(..., at=)``."""
+        input_key, output_key = self._interface(name)
+        component = self._host._components[input_key[0]]
+        if input_key != output_key or input_key[1] not in component.sides:
+            raise ValueError(f"Interface {name!r} of block {self.prefix!r} is asymmetric; use input() and output().")
+        return component.side(input_key[1])
+
+    def _interface(self, name: str) -> tuple[TerminalKey, TerminalKey]:
+        if name not in self._interfaces:
+            raise KeyError(f"No interface {name!r} in block {self.prefix!r}; available: {list(self._interfaces)}")
+        return self._interfaces[name]
+
+
 _SERIALIZED_FACTORIES = frozenset(
     {
         "through",
@@ -966,6 +1010,85 @@ class PortNetwork:
             )
         return self._copy_graph({}, keep)
 
+    def include(self, template: "PortNetwork", *, prefix: str) -> IncludedNetwork:
+        """Copy a reusable network template into this network under ``prefix``.
+
+        Components and connections are copied with labels ``prefix/label``. Tracked
+        parameters therefore use paths such as
+        ``network.component.prefix/label.name``. Filter callables are retained, and
+        the template remains unchanged so it can be included again under another
+        prefix.
+
+        The template's exposures become interfaces rather than host planes. Exposures
+        made with ``expose(..., at=...)`` are available through ``side(name)``;
+        asymmetric exposures use ``input(name)`` and ``output(name)``. Wire the
+        returned interfaces with :meth:`link`, :meth:`cascade`, or :meth:`expose`.
+
+        Parameters
+        ----------
+        template : PortNetwork
+            A network without quantum ports or authored boundary scattering.
+        prefix : str
+            A label prefix for the copied components, unique within this network.
+
+        Returns
+        -------
+        IncludedNetwork
+            Accessors for the copied components and interfaces.
+
+        Raises
+        ------
+        ValueError
+            The template owns ports or boundary scattering, or ``prefix`` is already
+            in use.
+        """
+        if template is self:
+            raise ValueError("A PortNetwork cannot include itself.")
+        if template._ports:
+            raise ValueError("Included networks cannot own quantum ports; declare ports on the host network.")
+        if template._authored_scattering is not None:
+            raise ValueError("Included networks cannot author boundary scattering; declare it on the host network.")
+        if any(label.startswith(f"{prefix}/") for label in self._components):
+            raise ValueError(f"Prefix {prefix!r} is already used in this PortNetwork.")
+
+        def rename(key: TerminalKey) -> TerminalKey:
+            return (f"{prefix}/{key[0]}", key[1])
+
+        for component in template.components:
+            self._add_component(
+                template._clone_component(component, self._token, label=f"{prefix}/{component.label}")
+            )
+        self._component_kinds.update({f"{prefix}/{k}": v for k, v in template._component_kinds.items()})
+        self._component_parameters.update({f"{prefix}/{k}": dict(v) for k, v in template._component_parameters.items()})
+        self._component_transfers.update({f"{prefix}/{k}": v for k, v in template._component_transfers.items()})
+        for input_key, output_key in template._connections.items():
+            new_input, new_output = rename(input_key), rename(output_key)
+            self._connections[new_input] = new_output
+            self._used_outputs[new_output] = new_input
+        interfaces = {
+            exposure.label: (rename(exposure._input_key), rename(exposure._output_key))
+            for exposure in template._exposures
+        }
+        return IncludedNetwork(prefix, self, MappingProxyType(interfaces))
+
+    @staticmethod
+    def _clone_component(component: SLHComponent, token: object, *, label: str | None = None) -> SLHComponent:
+        """Return a portless component copy bound to ``token``, optionally relabelled."""
+        new_label = component.label if label is None else label
+        return SLHComponent(
+            label=new_label,
+            input_names=component.input_names,
+            output_names=component.output_names,
+            scattering=PortNetwork._copy_value(component.scattering),
+            _network_token=token,
+            sides=component.sides,
+            _local_ports=component._local_ports,
+            _hidden_pairs=tuple(
+                (first, second, f"hidden.{new_label}.{first}") for first, second, _ in component._hidden_pairs
+            ),
+            _row_inputs=component._row_inputs,
+        )
+
     def _copy_with_port_replacements(
         self,
         replacements: Mapping[str, Port],
@@ -1021,19 +1144,7 @@ class PortNetwork:
                 assert local_port is not None
                 copied._add_port(replacements.get(local_port.label, local_port).copy())
             else:
-                copied._add_component(
-                    SLHComponent(
-                        label=component.label,
-                        input_names=component.input_names,
-                        output_names=component.output_names,
-                        scattering=self._copy_value(component.scattering),
-                        _network_token=copied._token,
-                        sides=component.sides,
-                        _local_ports=component._local_ports,
-                        _hidden_pairs=component._hidden_pairs,
-                        _row_inputs=component._row_inputs,
-                    )
-                )
+                copied._add_component(self._clone_component(component, copied._token))
         copied._connections = {
             input_key: output_key for input_key, output_key in self._connections.items() if input_key[0] in kept
         }
@@ -1723,7 +1834,7 @@ class PortNetwork:
 
     def _terminal_is_exposed(self, terminal: FieldTerminal) -> bool:
         return any(
-            terminal.key in (exposure._input_key, exposure._output_key)
+            terminal.key == (exposure._input_key if terminal.direction == "input" else exposure._output_key)
             for exposure in self._exposures
         )
 

@@ -257,6 +257,40 @@ wave factor `exp(+i 2π f τ)` per leg. `SParameterResult` contains the scatteri
 matrix, selected plane labels, and diagnostics; use `chip.steadystate()` when
 the stationary density matrix is itself the requested result.
 
+## Reuse a signal chain
+
+Build a portless signal chain once, then include a copy for each resonator:
+
+```python
+readout_line = PortNetwork(label="readout_line")
+loss = readout_line.attenuator("att", eta=0.5)
+isolator = readout_line.isolator("iso")
+cable = readout_line.delay("cable", duration=2.0)
+hemt = readout_line.amplifier("hemt", gain=100.0, added_noise=2.0)
+readout_line.link(loss, isolator, cable, hemt)
+readout_line.expose("chip", at=loss.side(1))
+readout_line.expose("room", at=hemt.side(2))
+
+fridge = PortNetwork(label="fridge")
+for resonator, prefix in ((r_a, "r1"), (r_b, "r2")):
+    port = fridge.port(f"{prefix}_port", target=resonator, rate=0.02)
+    block = fridge.include(readout_line, prefix=prefix)
+    fridge.link(port, block.side("chip"))
+    fridge.expose(f"{prefix}_out", at=block.side("room"))
+
+two_resonator_chip = Chip([r_a, r_b], port_network=fridge)
+```
+
+`include` copies the template's components, connections, tracked parameters,
+and filter callables under the prefix, leaving the template unchanged; copied
+parameters use paths such as `network.component.r1/att.eta`. Template exposures
+become block interfaces: use `block.side(name)` for an exposure made with
+`expose(name, at=side)`, `block.input(name)` and `block.output(name)` for an
+asymmetric exposure, and `block.component(name)` for a copied component, then
+wire them with `link`, `cascade`, or `expose`. Templates with quantum ports or
+boundary scattering and prefixes already used in the host are rejected;
+`side()` also rejects an asymmetric interface.
+
 ## Draw the network and the response
 
 ```python

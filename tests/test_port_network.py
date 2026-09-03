@@ -740,3 +740,121 @@ def test_restrict_rejects_subgraphs_spanning_other_ports() -> None:
         network.restrict(["pa"])
     with pytest.raises(KeyError):
         network.restrict(["missing"])
+
+
+def _readout_line() -> PortNetwork:
+    """A reusable fridge output line: cold attenuator, isolator, cable, amplifier."""
+    line = PortNetwork(label="readout_line")
+    loss = line.attenuator("att", eta=0.5)
+    isolator = line.isolator("iso")
+    cable = line.delay("cable", duration=2.0)
+    hemt = line.amplifier("hemt", gain=100.0, added_noise=2.0)
+    line.link(loss, isolator, cable, hemt)
+    line.expose("chip", at=loss.side(1))
+    line.expose("room", at=hemt.side(2))
+    return line
+
+
+def test_include_instantiates_a_block_per_line_with_prefixed_labels() -> None:
+    """One block definition wires two resonators through identical prefixed copies."""
+    first = Resonator(freq=5.0, levels=2, label="a")
+    second = Resonator(freq=5.4, levels=2, label="b")
+    template = _readout_line()
+    network = PortNetwork(label="fridge")
+    for resonator, prefix in ((first, "r1"), (second, "r2")):
+        port = network.port(f"{prefix}_port", target=resonator, rate=0.02)
+        line = network.include(template, prefix=prefix)
+        network.link(port, line.side("chip"))
+        network.expose(f"{prefix}_out", at=line.side("room"))
+    chip = Chip([first, second], port_network=network)
+
+    labels = {component.label for component in network.components}
+    assert {"r1/att", "r1/iso", "r1/cable", "r1/hemt", "r2/att", "r2/hemt"} <= labels
+    assert {"component.r1/att.eta", "component.r2/cable.duration"} <= set(network.parameters)
+    assert len(template.components) == 4
+    assert [exposure.label for exposure in template.exposures] == ["chip", "room"]
+
+    resolved = chip.resolve().slh
+    keys = [channel.key for channel in resolved.channels]
+    assert keys[:2] == ["r1_out", "r2_out"]
+    assert [element.label for element in resolved.external_channels[0].reference.outbound] == ["r1/cable", "r1/hemt"]
+
+    by_hand = PortNetwork(label="one")
+    port = by_hand.port("r1_port", target=Resonator(freq=5.0, levels=2, label="a"), rate=0.02)
+    loss = by_hand.attenuator("att", eta=0.5)
+    hemt = by_hand.amplifier("hemt", gain=100.0, added_noise=2.0)
+    by_hand.link(port, loss, by_hand.isolator("iso"), by_hand.delay("cable", duration=2.0), hemt)
+    by_hand.expose("r1_out", at=hemt.side(2))
+    lone = Chip([Resonator(freq=5.0, levels=2, label="a")], port_network=by_hand).resolve().slh
+    np.testing.assert_allclose(resolved.S[0, 0], lone.S[0, 0])
+    np.testing.assert_allclose(resolved.L[0].to_dense(), np.kron(lone.L[0].to_dense(), np.eye(2)))
+    rebound = chip.with_params({"network.component.r1/att.eta": 0.25})
+    assert rebound.port_network is not None and rebound.port_network.parameters["component.r1/att.eta"] == 0.25
+
+
+def test_include_interfaces_and_rejections() -> None:
+    """Asymmetric interfaces use input()/output(); templates with ports or boundary scattering are refused."""
+    template = PortNetwork(label="splitter_block")
+    splitter = template.beam_splitter("bs", eta=0.5)
+    phase = template.phase_shift("phi", phase=0.2)
+    template.cascade(splitter.output_terminal("left"), phase)
+    template.expose("in", input=splitter.input_terminal("left"), output=phase.output)
+    template.expose("aux", input=splitter.input_terminal("right"), output=splitter.output_terminal("right"))
+
+    resonator = Resonator(freq=5.0, levels=2, label="r")
+    network = PortNetwork(label="host")
+    port = network.port("p", target=resonator, rate=0.02)
+    block = network.include(template, prefix="b")
+    network.cascade(port, block.input("in"))
+    network.expose("through", input=block.input("aux"), output=block.output("in"))
+    network.expose("side", input=port.input, output=block.output("aux"))
+    resolved = Chip([resonator], port_network=network).resolve().slh
+    assert [channel.key for channel in resolved.channels] == ["through", "side"]
+    assert block.component("phi").label == "b/phi"
+    with pytest.raises(ValueError, match="input\\(\\)|output\\(\\)"):
+        block.side("in")
+    with pytest.raises(KeyError):
+        block.side("missing")
+
+    with_ports = PortNetwork(label="with_ports")
+    with_ports.port("q", target=resonator, rate=0.01)
+    with pytest.raises(ValueError, match="ports"):
+        network.include(with_ports, prefix="x")
+    with_boundary = PortNetwork(label="boundary", scattering={("a", "a"): -1.0})
+    passthrough = with_boundary.through("t")
+    with_boundary.expose("a", input=passthrough, output=passthrough)
+    with pytest.raises(ValueError, match="scattering"):
+        network.include(with_boundary, prefix="y")
+    with pytest.raises(ValueError, match="[Pp]refix"):
+        network.include(template, prefix="b")
+    before = template.to_dict()
+    with pytest.raises(ValueError, match="include itself"):
+        template.include(template, prefix="again")
+    assert template.to_dict() == before
+
+
+def test_include_keeps_filter_callables_by_reference() -> None:
+    """Filters inside a block stay callable and sweepable under their prefixed parameter path."""
+
+    def lowpass(frequency, cutoff):
+        return 1.0 / (1.0 + 1j * frequency / cutoff)
+
+    template = PortNetwork(label="filtered")
+    stage = template.filter("lp", transfer=lowpass, cutoff=8.0)
+    template.expose("chip", at=stage.side(1))
+    template.expose("room", at=stage.side(2))
+    resonator = Resonator(freq=5.0, levels=2, label="r")
+    network = PortNetwork(label="host")
+    port = network.port("p", target=resonator, rate=0.02)
+    block = network.include(template, prefix="f")
+    network.link(port, block.side("chip"))
+    network.expose("out", at=block.side("room"))
+    chip = Chip([resonator], port_network=network)
+
+    resolved = chip.resolve().slh
+    element = resolved.external_channels[0].reference.outbound[0]
+    assert element.label == "f/lp"
+    np.testing.assert_allclose(element.transfer(8.0, **dict(element.parameters)), lowpass(8.0, 8.0))
+    rebound = chip.with_params({"network.component.f/lp.cutoff": 4.0})
+    assert rebound.port_network is not None
+    assert rebound.port_network.parameters["component.f/lp.cutoff"] == 4.0
