@@ -59,9 +59,14 @@ from quchip.engine.ir import (
     StaticTerm,
 )
 from quchip.engine.basis import BasisRecord
+from quchip.engine.frames import FramePlan, FrameResidual, FrameTone, plan_frame
 from quchip.engine.slh import concatenate, feedback_reduce, series_product
 
 __all__ = [
+    "FramePlan",
+    "FrameResidual",
+    "FrameTone",
+    "plan_frame",
     "simulate",
     "steadystate",
     "steadystate_batch",

@@ -372,6 +372,7 @@ The public frame spec is one of:
 
 - `"lab"`
 - `"rotating"`
+- `"auto"`
 - a shared float
 - a per-device dict
 
@@ -403,7 +404,81 @@ That second term is why the assembler subtracts `omega_ref,i * n_i` from `H0`.
 
 So `"rotating"` is not a special solver mode. It is just a specific choice of `omega_ref,i`.
 
-### 4.4 `reference_freq` — the readout / LO reference
+### 4.4 What `"auto"` chooses
+
+`"auto"` is opt-in. The chip default remains `"lab"`, and `"rotating"` keeps
+the meaning above. `Chip.resolve(frame="auto", approximation=...)` uses the
+requested approximation. With `Exact()` and no tones, it selects the lab frame
+because every retained band is static there.
+
+The frame planner chooses one frequency `omega_d` per device. A retained
+coupling band with excitation-change vector `k` is static when
+
+```text
+Σ_d k_d omega_d = 0
+```
+
+A band of a scheduled drive or port coupling at frequency `f` is static when
+
+```text
+Σ_d k_d omega_d = f
+```
+
+For example, a two-photon cavity pump at 10.2 GHz imposes
+`2 omega_cavity = 10.2 GHz` and pins the cavity frame to 5.1 GHz. Network
+cascades add coupling constraints. Dispersive and cross-Kerr terms have a zero
+charge vector, so they do not constrain the frame.
+
+Drive constraints come from signals delivered by the control equipment after
+gain, attenuation, delay, and crosstalk. Each nonzero carrier band constrains
+every retained operator band of its destination drive. A crosstalk destination
+gets its own tone, and gain changes its weight. A zero-frequency carrier band
+adds no constraint.
+
+For a coherent field `beta` entering a network exposure, each reached channel
+has `c = S beta` and drives
+
+```text
+i(c* L - c L†)
+```
+
+The instantaneous operator-band amplitude is `|c| |L_band| / 2π` in ordinary
+GHz. Equivalently, the frame record stores `|S| |L_band| / 2π` and the weight
+integrates `|beta|²`.
+
+When all constraints cannot hold at once, the planner keeps the consistent
+subset with the largest integrated strength. A scheduled tone band has weight
+`|h_band|² ∫|envelope|² dt`. Each signal is integrated over its own nonzero
+extent inside the outer weighting window. That window is
+`[tlist[0], tlist[-1]]` when a problem is built, or `[0, last pulse end]`
+otherwise. A short pulse deep inside a long solve therefore keeps its full
+energy, while the solve window clips any portion outside it. A static coupling
+band has weight `|h_band|² T`, where `T` is the outer window's length. An
+unknown traced window leaves static-coupling weights unknown. If identical
+constraints are merged, any unknown contribution keeps the combined weight
+unknown, and equal or unknown weights fall back to declaration order. The
+other bands remain time-dependent.
+`resolved.resolved_frame.plan.residuals` records each one's source, devices,
+oscillation frequency, and weight.
+
+The planner fixes free frequencies from `reference_freq` in device declaration
+order. An undriven exchange-coupled cluster therefore rotates together at one
+member's reference frequency. An isolated mode keeps its own reference
+frequency. `chip.describe()` and `sequence.describe()` show the selected
+frequencies, accepted tones, pins, and residuals. Traced JAX tone frequencies
+pass through the plan without conversion to Python scalars.
+
+Stationary analyses such as VNA sweeps and steady states use a strict order.
+Cascade constraints are mandatory first, followed by exchange coupling bands
+with nonzero charge vectors summing to zero, then tones. A conflicting tone
+raises the port form of the existing distinct-stationary-tone error when an
+accepted tone already addresses the same devices, or the exchange-connected
+form otherwise.
+Only non-exchange coupling bands, such as counter-rotating bands retained under
+`Exact()`, may remain time-dependent; they then trigger the existing
+dynamic-Hamiltonian-terms error.
+
+### 4.5 `reference_freq` — the readout / LO reference
 
 Source: [`quchip/devices/base.py`](quchip/devices/base.py)
 

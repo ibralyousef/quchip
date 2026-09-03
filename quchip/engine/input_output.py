@@ -10,10 +10,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from quchip.chip.partition import connected_components
+from quchip.engine.frames import FrameConflict, plan_frame, planning_resolution, same_frequency, stationary_tones
 from quchip.engine.ir import CanonicalOperator, EngineResult, StaticTerm
 from quchip.engine.reference import cw_transfer
-from quchip.utils.jax_utils import maybe_concrete_scalar
 
 
 def resolve_stationary_engine(
@@ -24,80 +23,24 @@ def resolve_stationary_engine(
     if not port_frequencies:
         raise ValueError("Stationary port analysis requires at least one tone frequency.")
 
-    reference = port_frequencies[0][1]
-    one_carrier = all(
-        same_frequency(reference, frequency)
-        for _, frequency in port_frequencies[1:]
-    )
-    if one_carrier:
-        engine = chip.resolve(frame=reference)
-        _validate_port_frequencies(engine, port_frequencies)
-        if engine.dynamic_terms:
-            raise ValueError(
-                "The selected tones leave dynamic Hamiltonian terms after frame and approximation resolution. "
-                "Use QuantumSequence for time evolution; periodic/Floquet steady states are not supported."
-            )
-        return engine
-
-    device_frequencies: dict[str, Any] = {}
-    for port_label, frequency in port_frequencies:
-        targets = _tone_targets(chip, port_label)
-        for target in targets:
-            assigned = device_frequencies.get(target)
-            if assigned is not None and not same_frequency(assigned, frequency):
-                raise ValueError(
-                    f"Ports address {target!r} with distinct stationary tones. "
-                    "Use QuantumSequence for time evolution; periodic/Floquet steady states are not supported."
-                )
-            device_frequencies[target] = frequency
-
-    exchange_edges = (
-        (coupling.device_a_label, coupling.device_b_label)
-        for coupling in chip.couplings
-        if getattr(coupling, "folds_exchange", False)
-    )
-    labels = tuple(device.label for device in chip.devices)
-    for component in connected_components(labels, exchange_edges):
-        assigned = [device_frequencies[label] for label in component if label in device_frequencies]
-        if not assigned:
-            continue
-        reference = assigned[0]
-        if any(not same_frequency(reference, frequency) for frequency in assigned[1:]):
-            raise ValueError(
-                f"Exchange-connected devices {component!r} are addressed by distinct stationary tones. "
-                "Use QuantumSequence for time evolution; periodic/Floquet steady states are not supported."
-            )
-        device_frequencies.update({label: reference for label in component})
-
-    engine = chip.resolve(frame=device_frequencies)
+    tail = "Use QuantumSequence for time evolution; periodic/Floquet steady states are not supported."
+    resolution = planning_resolution(chip)
+    tones = stationary_tones(chip, port_frequencies, resolution=resolution)
+    try:
+        plan = plan_frame(chip, tones, approximation=chip.approximation, strict=True, local_resolution=resolution)
+    except FrameConflict as conflict:
+        if conflict.kind == "port":
+            raise ValueError(f"Ports address {conflict.devices[0]!r} with distinct stationary tones. {tail}") from None
+        raise ValueError(
+            f"Exchange-connected devices {list(conflict.cluster)!r} are addressed by distinct stationary tones. {tail}"
+        ) from None
+    engine = chip.resolve(frame=plan)
     if engine.dynamic_terms:
         raise ValueError(
-            "The selected tones leave dynamic Hamiltonian terms after frame and approximation resolution. "
-            "Use QuantumSequence for time evolution; periodic/Floquet steady states are not supported."
+            f"The selected tones leave dynamic Hamiltonian terms after frame and approximation resolution. {tail}"
         )
     _validate_port_frequencies(engine, port_frequencies)
     return engine
-
-
-def _tone_targets(chip: Any, exposure: str) -> tuple[str, ...]:
-    """Return the devices whose ports a tone entering ``exposure`` structurally reaches."""
-    from quchip.chip.port_network import PortNetwork
-
-    network = chip.port_network
-    if network is None:
-        return chip.port(exposure).resolve_targets(chip)
-    exposures, _, coupling_maps, _, _, support = network._compile()
-    labels = [item.label for item in exposures]
-    if exposure not in labels:
-        raise ValueError(f"Unknown resolved port {exposure!r}.")
-    column = labels.index(exposure)
-    targets: list[str] = []
-    for row, mapping in enumerate(coupling_maps):
-        if not support[row, column]:
-            continue
-        for source in PortNetwork._active_mapping_sources(mapping):
-            targets.extend(chip.port(source).resolve_targets(chip))
-    return tuple(dict.fromkeys(targets))
 
 
 def port_operators(engine: EngineResult, backend: Any) -> dict[str, CanonicalOperator]:
@@ -180,16 +123,3 @@ def _validate_port_frequencies(
                     f"{channel.key!r}, which is stationary at {resolved!r} GHz. "
                     "Use QuantumSequence for time evolution."
                 )
-
-
-def same_frequency(first: Any, second: Any) -> bool:
-    """Compare concrete frequencies without forcing traced values to Python."""
-    if first is second:
-        return True
-    first_value = maybe_concrete_scalar(first)
-    second_value = maybe_concrete_scalar(second)
-    return (
-        first_value is not None
-        and second_value is not None
-        and first_value == second_value
-    )

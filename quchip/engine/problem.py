@@ -30,6 +30,7 @@ from quchip.engine.ir import (
     _aggregate_batch_metadata,
 )
 from quchip.engine.assembly import build_engine_result
+from quchip.engine.frames import resolve_for_operations
 from quchip.engine.observables import decompose_eops
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar
 
@@ -142,12 +143,16 @@ def prepare_solve_problem_context(
     e_ops: dict | None = None,
     drive_ops: list[ControlOp] | None = None,
     approximation: Approximation | None = None,
+    frame: Any = None,
 ) -> SolveProblemContext:
     """Resolve the frame and retain authored observables and state specifications.
 
     Observables and states are materialized only after assembly resolves every
     local solver basis. The default ground state remains lazy, so callers that
     provide an explicit state do not pay for unused state construction.
+
+    ``frame`` overrides the chip's declared frame. For ``"auto"``, the solve
+    window ``tlist[-1] - tlist[0]`` supplies the duration used for weights.
 
     ``tlist`` is validated by :func:`_validate_tlist`. When *drive_ops* is
     given, each entry's pulse window is checked against ``tlist`` via
@@ -167,7 +172,13 @@ def prepare_solve_problem_context(
 
     if e_ops is not None and not isinstance(e_ops, dict):
         raise TypeError("e_ops must be dict or None")
-    base_result = chip.resolve(approximation=approximation)
+    base_result = resolve_for_operations(
+        chip,
+        drive_ops or [],
+        frame=frame,
+        approximation=approximation,
+        solve_window=(tlist_arr[0], tlist_arr[-1]),
+    )
     return SolveProblemContext(
         chip=chip,
         tlist=tlist_arr,
@@ -334,6 +345,7 @@ def build_solve_problem(
     e_ops: dict | None = None,
     initial_state: Any | None = None,
     approximation: Approximation | None = None,
+    frame: Any = None,
 ) -> SolveProblem:
     """Resolve, assemble, and package a frozen :class:`SolveProblem`.
 
@@ -341,6 +353,10 @@ def build_solve_problem(
     :func:`build_engine_result`. For many variants sharing one
     chip configuration, prefer that two-step form with
     :func:`build_solve_batch_from_results`.
+
+    ``frame`` overrides the chip's declared frame and follows the same
+    operation-aware ``"auto"`` resolution as
+    :func:`prepare_solve_problem_context`.
     """
     context = prepare_solve_problem_context(
         chip,
@@ -350,6 +366,7 @@ def build_solve_problem(
         e_ops=e_ops,
         drive_ops=drive_ops,
         approximation=approximation,
+        frame=frame,
     )
     engine_result = build_engine_result(
         chip,

@@ -162,6 +162,28 @@ class DynamiqsBackend(Backend):
     # Operator / state factories
     # ------------------------------------------------------------------
 
+    def eager_operators(self) -> Any:
+        """Use dense dynamiqs operators during JAX compile-time evaluation.
+
+        Sparse-diagonal validation cannot run inside
+        ``jax.ensure_compile_time_eval``. This context restores the previous
+        global layout on exit.
+        """
+        from contextlib import contextmanager
+
+        from dynamiqs.qarrays.layout import get_layout, set_global_layout
+
+        @contextmanager
+        def dense_layout() -> Any:
+            previous = get_layout()
+            dq.set_layout("dense")
+            try:
+                yield
+            finally:
+                set_global_layout(previous)
+
+        return dense_layout()
+
     def destroy(self, n: int) -> Operator:
         """Return the annihilation operator for an *n*-level Fock space (``dynamiqs.destroy``)."""
         return dq.destroy(n)

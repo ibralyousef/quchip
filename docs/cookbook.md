@@ -54,8 +54,9 @@ description = chip.describe()
 authored_latex = chip.unresolved_hamiltonian().latex()
 canonical_latex = chip.hamiltonian().latex()
 
-resolved = chip.resolve(frame="rotating")
+resolved = chip.resolve(frame="auto")
 frame = resolved.resolved_frame
+frame_plan = frame.plan
 approximation = resolved.approximation
 dropped_terms = resolved.dropped_terms_summary()
 ```

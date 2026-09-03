@@ -122,7 +122,7 @@ from quchip.engine.bands import (
     decompose_canonical_bands,
     decompose_two_body_canonical_bands,
     embed_on_support,
-    embed_single_mode_bands,
+    local_mode_bands,
     prune_zero_diagonals,
 )
 
@@ -210,6 +210,7 @@ def _resolve_local_system(chip: "Chip", backend: Backend) -> _LocalResolution:
 def _prepare_engine_assembly(
     chip: "Chip",
     frame_spec: Any,
+    approximation: Approximation | None = None,
 ) -> tuple[_LocalResolution, ResolvedFrame]:
     """Resolve local bases once, then use that static contract to resolve the frame."""
     from quchip.engine.frames import resolve_frame
@@ -231,6 +232,8 @@ def _prepare_engine_assembly(
         chip,
         frame_spec,
         reference_frequencies=references,
+        local_resolution=resolution,
+        approximation=approximation,
     )
 
 
@@ -485,6 +488,14 @@ def _concrete_port_resolution(
     )
 
 
+def _port_bands(
+    chip: "Chip", port: Any, backend: Backend, resolution: _LocalResolution
+) -> dict[tuple[int, ...], CanonicalOperator]:
+    """Excitation-change bands of one explicit port operator in its semantic product basis."""
+    canonical = _concrete_port_resolution(chip, port, backend, resolution)
+    return _decompose_product_canonical_bands(canonical, canonical.dims)
+
+
 def _frequency_groups(frequencies: tuple[Any, ...]) -> tuple[tuple[int, ...], ...]:
     """Group frame frequencies whose equality is safe to establish in Python."""
     groups: list[list[int]] = []
@@ -515,8 +526,7 @@ def _port_frame_frequency(
     frequencies = tuple(resolved_frame.frequencies[label] for label in labels)
     if all(maybe_concrete_scalar(frequency) == 0.0 for frequency in frequencies):
         return 0.0
-    canonical = _concrete_port_resolution(chip, port, backend, resolution)
-    bands = _decompose_product_canonical_bands(canonical, canonical.dims)
+    bands = _port_bands(chip, port, backend, resolution)
     if not bands:
         raise ValueError(f"Port {port.label!r} requires a nonzero coupling operator.")
 
@@ -581,6 +591,89 @@ def _dynamic_term(
 
 
 # -- Coupling terms ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BandRecord:
+    """One excitation-change band of an authored operator, with its charge vector.
+
+    ``charges[i]`` is the photon-number change the band applies to
+    ``devices[i]``; ``amplitude`` is the band's largest concrete matrix element
+    or ``None`` when traced. Frame planning and assembly read the same records.
+    """
+
+    devices: tuple[str, ...]
+    charges: tuple[int, ...]
+    amplitude: float | None
+    source: str
+
+
+def _concrete_amplitude(values: Any) -> float | None:
+    if contains_tracer(values):
+        return None
+    try:
+        return float(np.max(np.abs(np.asarray(values))))
+    except (TypeError, ValueError):
+        return None
+
+
+def _coupling_bands(
+    chip: "Chip",
+    coupling: Any,
+    h_full: Operator,
+    bases: Mapping[str, BasisRecord],
+    backend: Backend,
+    *,
+    tag: str = "coupling_local",
+) -> dict[tuple[int, int], CanonicalOperator]:
+    """Band-decompose one projected coupling by excitation change on each endpoint."""
+    pair = (coupling.device_a_label, coupling.device_b_label)
+    idx_a = chip.device_index(pair[0])
+    idx_b = chip.device_index(pair[1])
+    d_a = bases[pair[0]].resolved_dim
+    d_b = bases[pair[1]].resolved_dim
+    canonical = backend.to_canonical_operator(h_full).with_metadata(dims=(d_a, d_b), subsystem_labels=pair, tag=tag)
+    return decompose_two_body_canonical_bands(
+        canonical,
+        [d_a, d_b],
+        semantic_to_solver=_support_semantic_transform(chip, (idx_a, idx_b), bases),
+    )
+
+
+def coupling_band_records(chip: "Chip", resolution: _LocalResolution, backend: Backend) -> list[BandRecord]:
+    """Return every nonzero coupling band on the chip as a :class:`BandRecord`."""
+    records: list[BandRecord] = []
+    for coupling in chip.couplings:
+        pair = (coupling.device_a_label, coupling.device_b_label)
+        support = (chip.device_index(pair[0]), chip.device_index(pair[1]))
+        h_full = _project_on_support(chip, coupling.interaction_hamiltonian(), support, resolution.bases, backend)
+        if _is_concrete_zero_array(backend.to_array(h_full)):
+            continue
+        for charges, band in _coupling_bands(chip, coupling, h_full, resolution.bases, backend).items():
+            records.append(BandRecord(pair, charges, _concrete_amplitude(band.values), coupling.label))
+    return records
+
+
+def port_band_records(chip: "Chip", port: Any, resolution: _LocalResolution, backend: Backend) -> list[BandRecord]:
+    """Return the excitation-change bands of one quantum port's coupling ``sqrt(kappa) A``."""
+    labels = tuple(port.resolve_targets(chip))
+    rate = maybe_concrete_scalar(port.rate_value(chip))
+    scale = None if rate is None else float(np.sqrt(abs(rate)))
+    if port.operator is None:
+        return [BandRecord(labels, (-1,), scale, port.label)]
+    records: list[BandRecord] = []
+    for charges, band in _port_bands(chip, port, backend, resolution).items():
+        amplitude = _concrete_amplitude(band.values)
+        scaled = None if scale is None or amplitude is None else scale * amplitude
+        records.append(BandRecord(labels, tuple(int(c) for c in charges), scaled, port.label))
+    return records
+
+
+def _keeps_drive_band(drive: BaseDrive, approximation: Approximation, charges: tuple[int, ...]) -> bool:
+    """Single-device drive bands survive unless an explicit ``keep_bands`` excludes them; pumps follow the strategy."""
+    if isinstance(drive, CouplingDrive) or (isinstance(approximation, RWA) and approximation.keep_bands is not None):
+        return approximation.keeps_operator_band(charges)
+    return True
 
 
 def _resolve_coupling_terms(
@@ -652,22 +745,7 @@ def _resolve_coupling_terms(
                 supports.append(pair)
                 continue
 
-        d_a = resolution.bases[pair[0]].resolved_dim
-        d_b = resolution.bases[pair[1]].resolved_dim
-        canonical = backend.to_canonical_operator(h_full).with_metadata(
-            dims=(d_a, d_b),
-            subsystem_labels=pair,
-            tag="coupling_local",
-        )
-        sub_bands = decompose_two_body_canonical_bands(
-            canonical,
-            [d_a, d_b],
-            semantic_to_solver=_support_semantic_transform(
-                chip,
-                (idx_a, idx_b),
-                resolution.bases,
-            ),
-        )
+        sub_bands = _coupling_bands(chip, coupling, h_full, resolution.bases, backend)
         retained: list[Operator] = []
         for (delta_a, delta_b), band_canonical in sub_bands.items():
             osc_freq = delta_a * omega_a + delta_b * omega_b
@@ -977,6 +1055,69 @@ class _ResolvedDriveBand:
     target_label: str
 
 
+def drive_bands(
+    chip: "Chip",
+    drive: BaseDrive,
+    target: Any,
+    bases: Mapping[str, BasisRecord],
+    dims: tuple[int, ...],
+    backend: Backend,
+    approximation: Approximation,
+) -> list[tuple[BandRecord, Operator, int]]:
+    """Retained bands of one drive's authored Hamiltonian: ``(record, embedded operator, term index)``."""
+    probe = AnalyticSignal(program=Constant(1.0 + 0.0j))
+    with _backend_context(backend):
+        authored_terms = split_dynamic_hamiltonian(drive.hamiltonian(target, probe))
+    bands: list[tuple[BandRecord, Operator, int]] = []
+
+    if not isinstance(drive, CouplingDrive):
+        device = target
+        index = chip.device_index(device.label)
+        for term_index, (_scalar, operator) in enumerate(authored_terms):
+            authored = as_operator_expr(
+                operator,
+                labels=(device.label,),
+                dims=(device.local_space().dimension,),
+                name=rf"\hat H_{{{drive.label},{term_index}}}",
+                owner=drive,
+                scope=f"drive.{drive.label}",
+            )
+            local = _project_on_support(chip, authored, (index,), bases, backend)
+            for weight, band_op in local_mode_bands(
+                backend,
+                local,
+                dim=bases[device.label].resolved_dim,
+                label=device.label,
+                semantic_to_solver=semantic_to_solver_transform(device, bases[device.label]),
+            ):
+                amplitude = _concrete_amplitude(backend.to_array(band_op))
+                record = BandRecord((device.label,), (weight,), amplitude, drive.label)
+                if _keeps_drive_band(drive, approximation, record.charges):
+                    bands.append((record, backend.embed(band_op, index, dims), term_index))
+        return bands
+
+    coupling = target
+    pair = (coupling.device_a_label, coupling.device_b_label)
+    idx_a, idx_b = chip.device_index(pair[0]), chip.device_index(pair[1])
+    for term_index, (_scalar, operator) in enumerate(authored_terms):
+        authored = as_operator_expr(
+            operator,
+            labels=pair,
+            dims=(chip.devices[idx_a].local_space().dimension, chip.devices[idx_b].local_space().dimension),
+            name=rf"\hat P_{{{coupling.label},{term_index}}}",
+            owner=coupling,
+            scope=coupling.label,
+        )
+        local_op = _project_on_support(chip, authored, (idx_a, idx_b), bases, backend)
+        for charges, band in _coupling_bands(chip, coupling, local_op, bases, backend, tag="edge_pump_local").items():
+            record = BandRecord(pair, charges, _concrete_amplitude(band.values), drive.label)
+            if not _keeps_drive_band(drive, approximation, record.charges):
+                continue
+            embedded = backend.embed_two_body(backend.from_canonical_operator(band), idx_a, idx_b, dims)
+            bands.append((record, embedded, term_index))
+    return bands
+
+
 def _resolved_drive_bands(
     chip: "Chip",
     drive: BaseDrive,
@@ -988,103 +1129,30 @@ def _resolved_drive_bands(
     backend: Backend,
     approximation: Approximation,
 ) -> list[_ResolvedDriveBand]:
-    """Normalize authored drive Hamiltonian operators by target support."""
-    probe = AnalyticSignal(program=Constant(1.0 + 0.0j))
-    with _backend_context(backend):
-        authored_terms = split_dynamic_hamiltonian(drive.hamiltonian(target, probe))
-
-    if not isinstance(drive, CouplingDrive):
-        device = target
-        index = chip.device_index(device.label)
-        frame_frequency = resolved_frame.frequencies.get(device.label, 0.0)
-        resolved: list[_ResolvedDriveBand] = []
-        for term_index, (_scalar, operator) in enumerate(authored_terms):
-            authored = as_operator_expr(
-                operator,
-                labels=(device.label,),
-                dims=(device.local_space().dimension,),
-                name=rf"\hat H_{{{drive.label},{term_index}}}",
-                owner=drive,
-                scope=f"drive.{drive.label}",
-            )
-            local = _project_on_support(chip, authored, (index,), bases, backend)
-            for weight, embedded in embed_single_mode_bands(
-                backend,
-                local,
-                device_index=index,
-                dim=bases[device.label].resolved_dim,
-                label=device.label,
-                dims=dims,
-                semantic_to_solver=semantic_to_solver_transform(
-                    device,
-                    bases[device.label],
-                ),
-            ):
-                if isinstance(approximation, RWA) and approximation.keep_bands is not None:
-                    if not approximation.keeps_operator_band((weight,)):
-                        continue
-                resolved.append(
-                    _ResolvedDriveBand(
-                        operator=embedded,
-                        hamiltonian_term_index=term_index,
-                        weight=weight,
-                        frame_frequency=frame_frequency,
-                        filter_signal_bands=approximation.filters_terms,
-                        origin="drive",
-                        tag="drive",
-                        target_label=device.label,
-                    )
-                )
-        return resolved
-
-    coupling = target
-    idx_a = chip.device_index(coupling.device_a_label)
-    idx_b = chip.device_index(coupling.device_b_label)
-    d_a = bases[coupling.device_a_label].resolved_dim
-    d_b = bases[coupling.device_b_label].resolved_dim
-    omega_a = resolved_frame.frequencies.get(coupling.device_a_label, 0.0)
-    omega_b = resolved_frame.frequencies.get(coupling.device_b_label, 0.0)
-    resolved = []
-    for term_index, (_scalar, operator) in enumerate(authored_terms):
-        authored = as_operator_expr(
-            operator,
-            labels=(coupling.device_a_label, coupling.device_b_label),
-            dims=(
-                chip.devices[idx_a].local_space().dimension,
-                chip.devices[idx_b].local_space().dimension,
-            ),
-            name=rf"\hat P_{{{coupling.label},{term_index}}}",
-            owner=coupling,
-            scope=coupling.label,
+    """Attach frame carriers to the retained bands of one drive's authored Hamiltonian."""
+    single = not isinstance(drive, CouplingDrive)
+    frequencies = resolved_frame.frequencies
+    origin: TermOrigin = "drive" if single else "coupling"
+    tag = "drive" if single else "edge_pump"
+    resolved: list[_ResolvedDriveBand] = []
+    for record, embedded, term_index in drive_bands(chip, drive, target, bases, dims, backend, approximation):
+        carrier = (
+            frequencies.get(target.label, 0.0)
+            if single
+            else sum(charge * frequencies.get(label, 0.0) for label, charge in zip(record.devices, record.charges))
         )
-        local_op = _project_on_support(chip, authored, (idx_a, idx_b), bases, backend)
-        canonical = backend.to_canonical_operator(local_op).with_metadata(
-            dims=(d_a, d_b),
-            subsystem_labels=(coupling.device_a_label, coupling.device_b_label),
-            tag="edge_pump_local",
-        )
-        for (delta_a, delta_b), band_canonical in decompose_two_body_canonical_bands(
-            canonical,
-            [d_a, d_b],
-            semantic_to_solver=_support_semantic_transform(chip, (idx_a, idx_b), bases),
-        ).items():
-            if not approximation.keeps_operator_band((delta_a, delta_b)):
-                continue
-            osc_freq = delta_a * omega_a + delta_b * omega_b
-            band_op = backend.from_canonical_operator(band_canonical)
-            embedded = backend.embed_two_body(band_op, idx_a, idx_b, dims)
-            resolved.append(
-                _ResolvedDriveBand(
-                    operator=embedded,
-                    hamiltonian_term_index=term_index,
-                    weight=1,
-                    frame_frequency=osc_freq,
-                    filter_signal_bands=False,
-                    origin="coupling",
-                    tag="edge_pump",
-                    target_label=coupling.label,
-                )
+        resolved.append(
+            _ResolvedDriveBand(
+                operator=embedded,
+                hamiltonian_term_index=term_index,
+                weight=record.charges[0] if single else 1,
+                frame_frequency=carrier,
+                filter_signal_bands=single and approximation.filters_terms,
+                origin=origin,
+                tag=tag,
+                target_label=target.label,
             )
+        )
     return resolved
 
 

@@ -49,6 +49,7 @@ from quchip.utils.constants import TWO_PI
 
 if TYPE_CHECKING:
     from quchip.control.envelopes import Envelope
+    from quchip.engine.frames import FramePlan
     from quchip.declarative.dynamics import TimeCoefficient
     from quchip.declarative.expr import PhysicsExpr
     from quchip.devices.base import BaseDevice
@@ -1638,7 +1639,7 @@ class HamiltonianTemplate:
 ScalarLike = int | float
 
 if TYPE_CHECKING:
-    FrameSpec: TypeAlias = Literal["lab", "rotating"] | ScalarLike | dict[str | BaseDevice, ScalarLike]
+    FrameSpec: TypeAlias = Literal["lab", "rotating", "auto"] | ScalarLike | dict[str | BaseDevice, ScalarLike]
 
 
 def _is_scalar_like(value: Any) -> bool:
@@ -1663,13 +1664,16 @@ class ResolvedFrame:
       :attr:`~quchip.devices.base.BaseDevice.reference_freq`); it
       merely defaults to the dressed drive frequency when not set
       explicitly.
-    * ``mode`` — one of ``"lab"`` / ``"rotating"`` / ``"float"`` /
-      ``"dict"``.
+    * ``mode`` — one of ``"lab"`` / ``"rotating"`` / ``"auto"`` /
+      ``"float"`` / ``"dict"``.
+    * ``plan`` — the :class:`~quchip.engine.frames.FramePlan` selected for
+      ``"auto"``, or ``None`` for an explicit frame.
     """
 
     frequencies: dict[str, Any]
     demod_freqs: dict[str, Any]
     mode: str
+    plan: FramePlan | None = None
 
 
 # ── Solve Problem ───────────────────────────────────────────────────

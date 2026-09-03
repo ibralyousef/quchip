@@ -9,11 +9,29 @@ from typing import Any, Literal
 import jax
 import jax.numpy as jnp
 
+from quchip.utils.jax_utils import contains_tracer
 
-@partial(jax.custom_vjp, nondiff_argnums=(1,))
-def _lowest_eigenpairs(matrix: Any, levels: int) -> tuple[Any, Any]:
+
+def _eigenpairs(matrix: Any, levels: int) -> tuple[Any, Any]:
     values, vectors = jnp.linalg.eigh(matrix)
     return values[:levels], vectors[:, :levels]
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _differentiable_eigenpairs(matrix: Any, levels: int) -> tuple[Any, Any]:
+    return _eigenpairs(matrix, levels)
+
+
+def _lowest_eigenpairs(matrix: Any, levels: int) -> tuple[Any, Any]:
+    """Return the lowest ``levels`` eigenpairs without staging constant matrices.
+
+    A ``custom_vjp`` call is always staged, so constant matrices use the plain
+    eigensolve and can finish inside ``jax.ensure_compile_time_eval``. Traced
+    matrices use the custom-gradient path.
+    """
+    if contains_tracer(matrix):
+        return _differentiable_eigenpairs(matrix, levels)
+    return _eigenpairs(matrix, levels)
 
 
 def _lowest_eigenpairs_fwd(matrix: Any, levels: int) -> tuple[tuple[Any, Any], tuple[Any, Any]]:
@@ -45,7 +63,7 @@ def _lowest_eigenpairs_bwd(
     return (gradient.astype(vectors.dtype),)
 
 
-_lowest_eigenpairs.defvjp(_lowest_eigenpairs_fwd, _lowest_eigenpairs_bwd)
+_differentiable_eigenpairs.defvjp(_lowest_eigenpairs_fwd, _lowest_eigenpairs_bwd)
 
 
 @dataclass(frozen=True)

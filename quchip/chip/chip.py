@@ -34,6 +34,7 @@ from quchip.control.signal import Crosstalk, SignalTransform
 from quchip.declarative.expr import PhysicsExpr
 from quchip.declarative.parameters import validate_sign
 from quchip.devices.base import BaseDevice, _validate_noise_params
+from quchip.engine.frames import FramePlan
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar
 from quchip.utils.labeling import LabelKeyedDict, resolve_label
 
@@ -119,6 +120,9 @@ def _frame_cache_value(frame: Any) -> Any:
     """Return a stable cache key for one concrete frame specification."""
     if isinstance(frame, str):
         return frame
+    if isinstance(frame, FramePlan):
+        # A traced plan raises ValueError here, which disables the resolve cache.
+        return ("plan", frame.concrete_key())
     if isinstance(frame, Mapping):
         return tuple(
             sorted(
@@ -168,6 +172,9 @@ class Chip:
         - ``"lab"`` — all reference frequencies 0 GHz (default).
         - ``"rotating"`` — per-device rotating frame at dressed drive
           frequencies.
+        - ``"auto"`` — per-device frequencies chosen from retained couplings,
+          cascade-generated network couplings, delivered drive tones, and
+          scattering-scaled coherent-input tones.
         - scalar-like — one shared reference frequency for all devices.
         - ``dict`` — per-device references keyed by label or device.
     approximation : Approximation
@@ -450,7 +457,7 @@ class Chip:
         if signature is not None and cache is not None and cache[0] == signature:
             return cache[1]
 
-        local_resolution, resolved_frame = _prepare_engine_assembly(self, frame_spec)
+        local_resolution, resolved_frame = _prepare_engine_assembly(self, frame_spec, strategy)
         result = build_engine_result(
             self,
             [],
@@ -975,6 +982,9 @@ class Chip:
 
         - ``"lab"`` — all reference frequencies are 0.0 GHz.
         - ``"rotating"`` — per-device references use dressed drive frequencies.
+        - ``"auto"`` — per-device frequencies are planned from retained
+          couplings, cascade-generated network couplings, delivered drive
+          tones, and scattering-scaled coherent-input tones.
         - scalar-like — shared reference frequency for all devices.
         - ``dict`` — per-device references keyed by label or device.
 
@@ -982,8 +992,8 @@ class Chip:
         always computed from the lab-frame static Hamiltonian.
         """
         if isinstance(frame, str):
-            if frame not in ("lab", "rotating"):
-                raise ValueError(f"frame string must be one of 'lab' or 'rotating', got {frame!r}")
+            if frame not in ("lab", "rotating", "auto"):
+                raise ValueError(f"frame string must be one of 'lab', 'rotating', or 'auto', got {frame!r}")
             self._frame_spec = frame
             return
 
@@ -996,7 +1006,7 @@ class Chip:
             return
 
         raise TypeError(
-            f"frame must be 'lab', 'rotating', a scalar-like frequency, or "
+            f"frame must be 'lab', 'rotating', 'auto', a scalar-like frequency, or "
             f"dict[str|BaseDevice, scalar-like], got {type(frame).__name__}"
         )
 

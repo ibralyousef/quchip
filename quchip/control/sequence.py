@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from quchip.approximations import Approximation
+from quchip.approximations import Approximation, require_approximation
 from quchip.chip.chip import Chip
 from quchip.chip.coupling_base import BaseCoupling
 from quchip.control.batch import (
@@ -69,6 +69,7 @@ from quchip.engine.assembly import (
     compile_hamiltonian_template,
     instantiate_engine_result,
 )
+from quchip.engine.frames import resolve_for_operations
 from quchip.engine.problem import (
     build_solve_batch_from_results,
     build_solve_problem,
@@ -767,6 +768,7 @@ class QuantumSequence:
         e_ops: dict | None = None,
         initial_state: Any | None = None,
         approximation: Approximation | None = None,
+        frame: FrameSpec | None = None,
     ) -> "SolveProblem":
         """Build a single :class:`~quchip.engine.ir.SolveProblem` from this sequence.
 
@@ -791,6 +793,10 @@ class QuantumSequence:
             A ket, density matrix, or mapping for
             :meth:`~quchip.chip.chip.Chip.state`. Defaults to the chip's
             default initial state when omitted.
+        frame : FrameSpec, optional
+            Integration-frame override. Defaults to the chip's declared frame.
+            ``"auto"`` derives constraints from delivered scheduled signals and
+            weights them over ``tlist[-1] - tlist[0]``.
 
         Returns
         -------
@@ -812,6 +818,7 @@ class QuantumSequence:
             e_ops=e_ops,
             initial_state=initial_state,
             approximation=approximation,
+            frame=frame,
         )
 
     def resolve(
@@ -822,7 +829,7 @@ class QuantumSequence:
     ) -> EngineResult:
         """Resolve the backend-neutral Hamiltonian and noise description."""
         drive_ops = self._materialize_drive_ops()
-        base_result = self._chip.resolve(frame=frame, approximation=approximation)
+        base_result = resolve_for_operations(self._chip, drive_ops, frame=frame, approximation=approximation)
         return build_engine_result(
             self._chip,
             drive_ops,
@@ -942,11 +949,7 @@ class QuantumSequence:
     ) -> tuple[Any, Any]:
         """Return ``(EngineResult, initial_state)`` for one batch point."""
         axis_initial_state = overrides.get((None, "initial_state"))
-        entry_overrides: dict[tuple[int, str], Any] = {
-            (idx, field): value
-            for (idx, field), value in overrides.items()
-            if idx is not None
-        }
+        entry_overrides = self._entry_overrides(overrides)
 
         if axis_initial_state is not None and shared_initial_state is not None:
             raise ValueError("initial_state may be provided either as a shared scalar or as a batch axis, not both")
@@ -991,7 +994,7 @@ class QuantumSequence:
             for axis in axes
             for member in (axis.axes if isinstance(axis, ZippedBatchAxis) else (axis,))
         )
-        if parameter_axes:
+        if parameter_axes or self._auto_frames_differ(expanded, actual_tlist, approximation):
             problems: list[Any] = []
             for coord, overrides in expanded:
                 parameter_bindings = {
@@ -999,11 +1002,7 @@ class QuantumSequence:
                     for (index, field), value in overrides.items()
                     if index is None and field != "initial_state"
                 }
-                entry_overrides = {
-                    (index, field): value
-                    for (index, field), value in overrides.items()
-                    if index is not None
-                }
+                entry_overrides = self._entry_overrides(overrides)
                 axis_initial_state = overrides.get((None, "initial_state"))
                 if axis_initial_state is not None and initial_state is not None:
                     raise ValueError(
@@ -1080,6 +1079,34 @@ class QuantumSequence:
             shape=shape,
             axes=tuple(_axis_metadata(axis) for axis in axes),
         )
+
+    def _auto_frames_differ(self, expanded: Any, tlist: Any, approximation: Approximation | None) -> bool:
+        """Return whether entry-axis values produce distinct or traced ``"auto"`` frames.
+
+        A true result sends the batch through per-point problem construction.
+        """
+        from quchip.engine.frames import plan_for_operations
+
+        if not (isinstance(self._chip.frame, str) and self._chip.frame == "auto"):
+            return False
+        strategy = self._chip.approximation if approximation is None else require_approximation(approximation)
+        window = (tlist[0], tlist[-1])
+        keys: set[Any] = set()
+        for _, overrides in expanded:
+            drive_ops = self._materialize_drive_ops(self._entry_overrides(overrides))
+            plan = plan_for_operations(self._chip, "auto", drive_ops, approximation=strategy, solve_window=window)
+            try:
+                keys.add(plan.concrete_key())
+            except ValueError:
+                return True
+            if len(keys) > 1:
+                return True
+        return False
+
+    @staticmethod
+    def _entry_overrides(overrides: Mapping[tuple[int | None, str], Any]) -> dict[tuple[int, str], Any]:
+        """Return only the per-entry (non-shared) overrides of one batch point."""
+        return {(index, field): value for (index, field), value in overrides.items() if index is not None}
 
     @staticmethod
     def _point_params(

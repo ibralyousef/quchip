@@ -152,6 +152,15 @@ class Backend(ABC):
             CanonicalOperator.from_dense(data, dims=(n,), basis="fock", subsystem_labels=("0",))
         )
 
+    def eager_operators(self) -> Any:
+        """Return a context manager for operator construction during JAX compile-time evaluation.
+
+        The default implementation leaves backend state unchanged.
+        """
+        from contextlib import nullcontext
+
+        return nullcontext()
+
     def destroy(self, n: int) -> Operator:
         """Build the annihilation operator :math:`\\hat a` for an *n*-level Fock space."""
         data = np.zeros((n, n), dtype=complex)

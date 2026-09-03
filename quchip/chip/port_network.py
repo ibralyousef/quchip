@@ -1208,6 +1208,27 @@ class PortNetwork:
                 groups.append(members)
         return tuple(groups)
 
+    def fed_ports(self, chip: Any, exposure: str) -> list[tuple[Any, Any]]:
+        """Return ``(port, coefficient)`` pairs reached from ``exposure``.
+
+        Each coefficient combines the scattering entry from the exposure to a
+        channel with that port's weight in the channel. A coherent input ``β``
+        therefore reaches the port coupling as ``c = coefficient · β``.
+        """
+        exposures, scattering, coupling_maps, _, _, support = self._compile()
+        labels = [item.label for item in exposures]
+        if exposure not in labels:
+            raise ValueError(f"Unknown resolved port {exposure!r}.")
+        column = labels.index(exposure)
+        fed: list[tuple[Any, Any]] = []
+        for row, mapping in enumerate(coupling_maps):
+            if not support[row, column]:
+                continue
+            gain = scattering[row][column]
+            for source in self._active_mapping_sources(mapping):
+                fed.append((chip.port(source), gain * mapping[source]))
+        return fed
+
     @staticmethod
     def _active_pairs(
         pairs: list[tuple[str, str, Any]],

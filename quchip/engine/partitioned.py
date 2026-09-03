@@ -57,8 +57,10 @@ def maybe_simulate_partitioned(
     # keep these requests on the ordinary joint path.
     if _uses_field_boundary(drive_ops, e_ops):
         return None
-    resolved = chip.resolve(approximation=approximation)
     from quchip.chip.partition import partition_chip
+    from quchip.engine.frames import resolve_for_operations
+
+    resolved = resolve_for_operations(chip, drive_ops, approximation=approximation)
 
     part = partition_chip(
         chip,
