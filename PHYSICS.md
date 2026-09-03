@@ -206,8 +206,14 @@ that side's input and output terminals. `network.link(...)` cables consecutive
 sides in both directions; each cable compiles to two directed terminal
 connections. An ideal circulator routes `1 -> 2 -> 3 -> 1`; an isolator is a
 circulator whose third side is a hidden vacuum load. Compilation proceeds per
-terminal, so permutation components do not create false cycles. Genuine
-instantaneous loops still raise.
+terminal, so permutation components do not create false cycles; core terminals
+are grouped into strongly connected components, and each connection cycle is
+reduced algebraically with the feedback rule in 3.3.3. This produces
+loop-corrected `S`, `L`, structural reachability, and the generated
+series/feedback Hamiltonian, while reference sections cannot sit inside a
+loop. A concrete singular `I - M` raises; with traced JAX scattering, the
+singularity cannot be detected during tracing and the solve returns non-finite
+values at that point.
 
 Concrete scattering must be unitary. Loss is represented by an explicit
 unitary dilation: a two-sided reciprocal attenuator with power transmission

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import pairwise
 from types import MappingProxyType
@@ -177,6 +177,40 @@ class FieldExposure:
         return OutputField(self.label)
 
 
+def _strongly_connected(nodes: Mapping[Any, Any], successors: Callable[[Any], list[Any]]) -> list[list[Any]]:
+    """Return strongly connected components with every component after the ones it depends on."""
+    index: dict[Any, int] = {}
+    lowlink: dict[Any, int] = {}
+    stack: list[Any] = []
+    on_stack: set[Any] = set()
+    components: list[list[Any]] = []
+
+    def visit(node: Any) -> None:
+        index[node] = lowlink[node] = len(index)
+        stack.append(node)
+        on_stack.add(node)
+        for successor in successors(node):
+            if successor not in index:
+                visit(successor)
+                lowlink[node] = min(lowlink[node], lowlink[successor])
+            elif successor in on_stack:
+                lowlink[node] = min(lowlink[node], index[successor])
+        if lowlink[node] == index[node]:
+            component = []
+            while True:
+                member = stack.pop()
+                on_stack.discard(member)
+                component.append(member)
+                if member == node:
+                    break
+            components.append(component[::-1])
+
+    for node in nodes:
+        if node not in index:
+            visit(node)
+    return components
+
+
 _SERIALIZED_FACTORIES = frozenset(
     {
         "through",
@@ -193,6 +227,10 @@ _SERIALIZED_FACTORIES = frozenset(
 )
 
 
+#: ``(coefficient, boundary_input, upstream_output)`` for one structurally fed column.
+_Feeder = tuple[Any, "TerminalKey | None", "TerminalKey | None"]
+
+
 @dataclass
 class _AffineField:
     scattering: list[Any]
@@ -201,7 +239,7 @@ class _AffineField:
 
 
 class PortNetwork:
-    """Ports and an acyclic, instantaneous scalar-S field-routing graph."""
+    """Ports and an instantaneous scalar-S field-routing graph with algebraic feedback."""
 
     _type_prefix = "port_network"
 
@@ -932,10 +970,10 @@ class PortNetwork:
     def physics_notes(self) -> list[str]:
         """Return the boundary convention and approximation scope."""
         return [
-            "This instantaneous Markovian boundary uses b_out = S b_in + L; "
-            "scalar S is unitary after explicit vacuum loss dilation.",
-            "Reference sections shift incident and reported fields at external planes only "
-            "and do not enter S, L, or H.",
+            "This instantaneous Markovian boundary uses b_out = S b_in + L; scalar S is unitary after "
+            "explicit vacuum loss dilation, and instantaneous core feedback is reduced algebraically.",
+            "Reference sections shift incident and reported fields at external planes only; they do not "
+            "enter S, L, or H and cannot sit inside feedback loops.",
         ]
 
     def dynamical_supports(self, chip: Any) -> tuple[tuple[str, ...], ...]:
@@ -1174,7 +1212,8 @@ class PortNetwork:
         ]
         if unreached:
             raise ValueError(
-                f"Reference components {unreached} must sit between an exposure and the Markov boundary."
+                f"Reference components {unreached} must sit on a run between an exposure and the Markov "
+                "boundary, not inside the core graph or an instantaneous feedback loop."
             )
         core = [component for component in self.components if not self._is_reference(component.label)]
         covered_inputs = {boundary_input for boundary_input, _, _ in peeled}
@@ -1199,60 +1238,49 @@ class PortNetwork:
             basis[column] = 1.0
             input_fields[boundary_input] = _AffineField(basis, {}, [index == column for index in range(size)])
 
-        pending = {
+        nodes = {
             (component.label, name): (component, row)
             for component in core
             for row, name in enumerate(component.output_names)
         }
-        matrices: dict[str, Any] = {}
-        generated_pairs: list[tuple[str, str, Any]] = []
-        while pending:
-            progressed = False
-            for terminal, (component, row) in tuple(pending.items()):
-                label = component.label
-                columns = (
-                    range(len(component.input_names))
-                    if component._row_inputs is None
-                    else component._row_inputs[row]
-                )
-                incoming: dict[int, _AffineField] = {}
-                for column in columns:
-                    key = (label, component.input_names[column])
-                    source = input_fields.get(key)
-                    if source is None and key in self._connections:
-                        source = output_fields.get(self._connections[key])
-                    if source is None:
-                        break
-                    incoming[column] = source
+        matrices = {component.label: self._component_matrix(component) for component in core}
+
+        def _feeders(terminal: TerminalKey) -> list[_Feeder]:
+            """Return ``(coefficient, boundary_input, upstream_output)`` per structurally fed column."""
+            component, row = nodes[terminal]
+            columns = (
+                range(len(component.input_names)) if component._row_inputs is None else component._row_inputs[row]
+            )
+            result: list[_Feeder] = []
+            for column in columns:
+                key = (component.label, component.input_names[column])
+                coefficient = matrices[component.label][row, column]
+                if key in input_fields:
+                    result.append((coefficient, key, None))
                 else:
-                    if label not in matrices:
-                        matrices[label] = self._component_matrix(component)
-                    matrix = matrices[label]
-                    scattering = [
-                        sum(matrix[row, column] * incoming[column].scattering[index] for column in incoming)
-                        for index in range(size)
-                    ]
-                    upstream: dict[str, Any] = {}
-                    for column, incoming_field in incoming.items():
-                        for coupling_source, coefficient in incoming_field.coupling.items():
-                            upstream[coupling_source] = (
-                                upstream.get(coupling_source, 0.0) + matrix[row, column] * coefficient
-                            )
-                    local_port = component._local_ports[row]
-                    coupling = dict(upstream)
-                    if local_port is not None:
-                        local_label = local_port.label
-                        for coupling_source, coefficient in upstream.items():
-                            generated_pairs.append((local_label, coupling_source, coefficient))
-                        coupling[local_label] = coupling.get(local_label, 0.0) + 1.0
-                    support = [
-                        any(incoming[column].support[index] for column in incoming) for index in range(size)
-                    ]
-                    output_fields[terminal] = _AffineField(scattering, coupling, support)
-                    del pending[terminal]
-                    progressed = True
-            if not progressed:
-                raise ValueError("PortNetwork contains instantaneous feedback or a connection cycle.")
+                    result.append((coefficient, None, self._connections[key]))
+            return result
+
+        feeds = {terminal: _feeders(terminal) for terminal in nodes}
+        generated_pairs: list[tuple[str, str, Any]] = []
+        for members in _strongly_connected(nodes, lambda terminal: [up for _, _, up in feeds[terminal] if up]):
+            cyclic = len(members) > 1 or any(up == members[0] for _, _, up in feeds[members[0]])
+            if cyclic:
+                solved = self._solve_loop(members, nodes, feeds, input_fields, output_fields, size)
+            else:
+                solved = {members[0]: self._propagate(members[0], nodes, feeds, input_fields, output_fields, size)}
+            for terminal, solved_field in solved.items():
+                component, row = nodes[terminal]
+                local_port = component._local_ports[row]
+                if local_port is not None:
+                    upstream = dict(solved_field.coupling)
+                    upstream[local_port.label] = upstream.get(local_port.label, 0.0) - 1.0
+                    generated_pairs.extend(
+                        (local_port.label, source, coefficient)
+                        for source, coefficient in upstream.items()
+                        if not self._is_concrete_zero(coefficient)
+                    )
+                output_fields[terminal] = solved_field
 
         rows = [output_fields[boundary_output] for _, boundary_output, _ in peeled]
         support_matrix = np.asarray([row.support for row in rows], dtype=bool)
@@ -1289,6 +1317,121 @@ class PortNetwork:
 
         self._validate_unitary(scattering)
         return exposures, scattering, coupling_maps, generated_pairs, planes, support_matrix
+
+    @staticmethod
+    def _incoming(
+        terminal: TerminalKey,
+        feeds: Mapping[TerminalKey, list[_Feeder]],
+        input_fields: Mapping[TerminalKey, _AffineField],
+        output_fields: Mapping[TerminalKey, _AffineField],
+        pending: Collection[TerminalKey] = (),
+    ) -> tuple[list[tuple[Any, _AffineField]], list[tuple[Any, TerminalKey]]]:
+        """Split a terminal's feeders into known fields and unsolved loop members."""
+        known: list[tuple[Any, _AffineField]] = []
+        unsolved: list[tuple[Any, TerminalKey]] = []
+        for coefficient, boundary, upstream in feeds[terminal]:
+            if boundary is not None:
+                known.append((coefficient, input_fields[boundary]))
+                continue
+            assert upstream is not None
+            if upstream in pending:
+                unsolved.append((coefficient, upstream))
+            else:
+                known.append((coefficient, output_fields[upstream]))
+        return known, unsolved
+
+    def _propagate(
+        self,
+        terminal: TerminalKey,
+        nodes: Mapping[TerminalKey, tuple[SLHComponent, int]],
+        feeds: Mapping[TerminalKey, list[_Feeder]],
+        input_fields: Mapping[TerminalKey, _AffineField],
+        output_fields: Mapping[TerminalKey, _AffineField],
+        size: int,
+    ) -> _AffineField:
+        """Evaluate one output terminal whose feeders are all known."""
+        known, _ = self._incoming(terminal, feeds, input_fields, output_fields)
+        scattering = [
+            sum(coefficient * known_field.scattering[index] for coefficient, known_field in known)
+            for index in range(size)
+        ]
+        coupling: dict[str, Any] = {}
+        for coefficient, known_field in known:
+            for source, value in known_field.coupling.items():
+                coupling[source] = coupling.get(source, 0.0) + coefficient * value
+        support = [any(known_field.support[index] for _, known_field in known) for index in range(size)]
+        component, row = nodes[terminal]
+        local_port = component._local_ports[row]
+        if local_port is not None:
+            coupling[local_port.label] = coupling.get(local_port.label, 0.0) + 1.0
+        return _AffineField(scattering, coupling, support)
+
+    def _solve_loop(
+        self,
+        members: list[TerminalKey],
+        nodes: Mapping[TerminalKey, tuple[SLHComponent, int]],
+        feeds: Mapping[TerminalKey, list[_Feeder]],
+        input_fields: Mapping[TerminalKey, _AffineField],
+        output_fields: Mapping[TerminalKey, _AffineField],
+        size: int,
+    ) -> dict[TerminalKey, _AffineField]:
+        """Solve the algebraic loop ``y = M y + b`` for one strongly connected set of terminals."""
+        pending = set(members)
+        position = {terminal: index for index, terminal in enumerate(members)}
+        count = len(members)
+        loop_matrix: list[list[Any]] = [[0.0] * count for _ in members]
+        structure = np.zeros((count, count), dtype=bool)
+        knowns: list[list[tuple[Any, _AffineField]]] = []
+        for terminal in members:
+            known, unsolved = self._incoming(terminal, feeds, input_fields, output_fields, pending)
+            knowns.append(known)
+            for coefficient, upstream in unsolved:
+                loop_matrix[position[terminal]][position[upstream]] += coefficient
+                structure[position[terminal], position[upstream]] = True
+        sources: list[str] = []
+        for index, terminal in enumerate(members):
+            component, row = nodes[terminal]
+            local_port = component._local_ports[row]
+            candidates = [source for _, known_field in knowns[index] for source in known_field.coupling]
+            if local_port is not None:
+                candidates.append(local_port.label)
+            sources.extend(source for source in candidates if source not in sources)
+        width = size + len(sources)
+        drive: list[list[Any]] = [[0.0] * width for _ in members]
+        drive_support = np.zeros((count, size), dtype=bool)
+        for index, terminal in enumerate(members):
+            for coefficient, known_field in knowns[index]:
+                for column in range(size):
+                    drive[index][column] += coefficient * known_field.scattering[column]
+                for source, value in known_field.coupling.items():
+                    drive[index][size + sources.index(source)] += coefficient * value
+                drive_support[index] |= np.asarray(known_field.support, dtype=bool)
+            component, row = nodes[terminal]
+            local_port = component._local_ports[row]
+            if local_port is not None:
+                drive[index][size + sources.index(local_port.label)] += 1.0
+        xp = select_array_module(contains_tracer((loop_matrix, drive)))
+        system = xp.eye(count, dtype=complex) - xp.asarray(loop_matrix, dtype=complex)
+        if not contains_tracer(system):
+            singular_values = np.linalg.svd(np.asarray(system), compute_uv=False)
+            if singular_values[-1] <= 1e-12 * max(1.0, float(singular_values[0])):
+                labels = sorted({terminal[0] for terminal in members})
+                raise ValueError(f"Instantaneous feedback loop through {labels} is singular: I - M has no inverse.")
+        solution = xp.linalg.solve(system, xp.asarray(drive, dtype=complex))
+        support = drive_support.copy()
+        for _ in members:
+            support = drive_support | ((structure.astype(int) @ support.astype(int)) > 0)
+        fields: dict[TerminalKey, _AffineField] = {}
+        for index, terminal in enumerate(members):
+            coupling = {
+                source: solution[index, size + offset]
+                for offset, source in enumerate(sources)
+                if not self._is_concrete_zero(solution[index, size + offset])
+            }
+            fields[terminal] = _AffineField(
+                [solution[index, column] for column in range(size)], coupling, [bool(flag) for flag in support[index]]
+            )
+        return fields
 
     def _boundary_scattering(self, labels: tuple[str, ...]) -> Any | None:
         authored = self._authored_scattering

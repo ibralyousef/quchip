@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import json
 
 import numpy as np
@@ -512,3 +514,174 @@ def test_every_builtin_component_round_trips_as_kind_and_parameters() -> None:
         PortNetwork.from_dict({"components": [{"label": "x", "kind": "warp_drive", "parameters": {}}]})
     with pytest.raises(TypeError, match="no kind"):
         PortNetwork.from_dict({"components": [{"label": "x", "parameters": {}}]})
+
+
+def _open_system(network: PortNetwork, chip: Chip) -> tuple[Any, dict[str, str]]:
+    """Every core terminal as one channel of an unconnected SLH triple (ports carry L, components none).
+
+    ``network`` must have no connections so every port resolves to its own exposed channel.
+    """
+    from quchip.engine import concatenate
+    from quchip.engine.ir import CollapseTerm, HamiltonianProgram, ResolvedSLH, SLHChannel
+
+    resolved_ports = {channel.key: channel for channel in chip.resolve().slh.external_channels}
+    zero = next(iter(resolved_ports.values())).coupling.scaled(0.0)
+    systems = []
+    for component in network.components:
+        matrix = network._component_matrix(component)
+        size = len(component.output_names)
+        channels = []
+        for index, name in enumerate(component.output_names):
+            key = f"{component.label}.{name}"
+            local = component._local_ports[index]
+            coupling = zero if local is None else resolved_ports[local.label].coupling
+            collapse = CollapseTerm(operator=coupling, rate=1.0, source=key, channel="port", frame_frequency=None)
+            channels.append(SLHChannel(key=key, accessibility="exposed", collapse=collapse, coupling_operator=coupling))
+        systems.append(
+            ResolvedSLH(
+                scattering=np.asarray(matrix, dtype=complex),
+                hamiltonian=HamiltonianProgram(),
+                channels=tuple(channels),
+                support=np.ones((size, size), dtype=bool),
+            )
+        )
+    return concatenate(*systems), {}
+
+
+def _close_connections(network: PortNetwork, system: Any) -> Any:
+    """Close every connection with feedback_reduce, following the merged channel keys it creates."""
+    from quchip.engine import feedback_reduce
+
+    current_input = {channel.key: channel.key for channel in system.channels}
+    current_output = dict(current_input)
+    for input_key, output_key in network._connections.items():
+        source = current_output[".".join(output_key)]
+        sink = current_input[".".join(input_key)]
+        system = feedback_reduce(system, output=source, input=sink)
+        merged = f"{source}->{sink}"
+        for terminal, key in current_input.items():
+            if key == source:
+                current_input[terminal] = merged
+        for terminal, key in current_output.items():
+            if key == sink:
+                current_output[terminal] = merged
+    return system
+
+
+def test_feedback_loop_matches_gough_james_reduction() -> None:
+    """A lossy ring through a beam splitter compiles to the algebraic feedback reduction."""
+
+    first = Resonator(freq=5.0, levels=3, label="a")
+    second = Resonator(freq=5.0, levels=3, label="b")
+    network = PortNetwork(label="ring")
+    port_a = network.port("pa", target=first, rate=0.04)
+    port_b = network.port("pb", target=second, rate=0.09)
+    splitter = network.beam_splitter("bs", eta=0.36)
+    phase = network.phase_shift("phi", phase=0.7)
+    network.cascade(port_a, splitter.input_terminal("left"))
+    network.cascade(splitter.output_terminal("left"), port_b, phase, splitter.input_terminal("right"))
+    network.expose("ring", input=port_a.input, output=splitter.output_terminal("right"))
+    compiled = Chip([first, second], port_network=network).resolve().slh
+
+    bare = PortNetwork(label="bare")
+    bare.port("pa", target=Resonator(freq=5.0, levels=3, label="a"), rate=0.04)
+    bare.port("pb", target=Resonator(freq=5.0, levels=3, label="b"), rate=0.09)
+    open_chip = Chip(list(device for port in bare.ports for device in port._targets), port_network=bare)
+    oracle = _close_connections(network, _open_system(network, open_chip)[0])
+
+    assert [channel.key for channel in compiled.channels] == ["ring"]
+    np.testing.assert_allclose(compiled.S, oracle.S, atol=1e-12)
+    np.testing.assert_allclose(compiled.L[0].to_dense(), oracle.L[0].to_dense(), atol=1e-12)
+    compiled_h = sum(term.operator.to_dense() for term in compiled.H.static_terms if term.origin == "network")
+    oracle_h = sum(term.operator.to_dense() for term in oracle.H.static_terms if term.origin == "network")
+    np.testing.assert_allclose(compiled_h, oracle_h, atol=1e-12)
+    assert compiled.feeds(0, 0)
+
+
+def test_feedback_rejects_reference_cycle() -> None:
+    """A delay inside an instantaneous loop is not Markovian and is refused by name."""
+    resonator = Resonator(freq=5.0, levels=2, label="r")
+    network = PortNetwork(label="loop")
+    port = network.port("p", target=resonator, rate=0.04)
+    splitter = network.beam_splitter("bs", eta=0.5)
+    cable = network.delay("cable", duration=1.0)
+    network.cascade(port, splitter.input_terminal("left"))
+    network.cascade(splitter.output_terminal("left"), cable.input_terminal("1"))
+    network.cascade(cable.output_terminal("2"), splitter.input_terminal("right"))
+    network.expose("out", input=port.input, output=splitter.output_terminal("right"))
+
+    with pytest.raises(ValueError, match="cable.*feedback loop"):
+        Chip([resonator], port_network=network).resolve()
+
+
+def test_feedback_rejects_singular_concrete_loop() -> None:
+    """A loop whose round trip is exactly unity has no instantaneous solution."""
+    resonator = Resonator(freq=5.0, levels=2, label="r")
+    network = PortNetwork(label="loop")
+    port = network.port("p", target=resonator, rate=0.04)
+    line = network.through("line")
+    network.connect(port.output, line.input)
+    network.connect(line.output, port.input)
+
+    with pytest.raises(ValueError, match="singular"):
+        Chip([resonator], port_network=network).resolve()
+
+
+def test_feedback_gain_is_jittable_and_differentiable() -> None:
+    """A traced loop phase flows through the compiled ring gain."""
+    jax = pytest.importorskip("jax")
+    resonator = Resonator(freq=5.0, levels=2, label="r")
+
+    def reflection(value: Any) -> Any:
+        network = PortNetwork(label="ring")
+        port = network.port("p", target=resonator, rate=0.04)
+        splitter = network.beam_splitter("bs", eta=0.5)
+        phase = network.phase_shift("phi", phase=value)
+        network.cascade(port, splitter.input_terminal("left"))
+        network.cascade(splitter.output_terminal("left"), phase, splitter.input_terminal("right"))
+        network.expose("out", input=port.input, output=splitter.output_terminal("right"))
+        slh = Chip([resonator], port_network=network).resolve().slh
+        return jax.numpy.abs(slh.S[0, 0]) ** 2
+
+    value, gradient = jax.jit(jax.value_and_grad(reflection))(jax.numpy.asarray(0.3))
+    assert np.isfinite(float(value)) and np.isfinite(float(gradient))
+    np.testing.assert_allclose(float(value), float(reflection(0.3)), rtol=1e-6)
+
+
+def _ring(eta: Any) -> Chip:
+    resonator = Resonator(freq=5.0, levels=2, label="r")
+    network = PortNetwork(label="ring")
+    port = network.port("p", target=resonator, rate=0.04)
+    splitter = network.beam_splitter("bs", eta=eta)
+    phase = network.phase_shift("phi", phase=0.3)
+    network.cascade(port, splitter.input_terminal("left"))
+    network.cascade(splitter.output_terminal("left"), phase, splitter.input_terminal("right"))
+    network.expose("out", input=port.input, output=splitter.output_terminal("right"))
+    return Chip([resonator], port_network=network)
+
+
+def test_loop_support_is_structural_not_numerical() -> None:
+    """Reachability through a loop follows the wiring, not the current coefficient values."""
+    transparent = _ring(1.0).resolve().slh
+    mixing = _ring(0.36).resolve().slh
+    np.testing.assert_array_equal(transparent.support, mixing.support)
+    assert transparent.feeds(0, 0)
+
+
+def test_many_channel_loop_with_small_determinant_is_not_singular() -> None:
+    """Five near-resonant loops in one component have a tiny determinant but a benign condition number."""
+    resonator = Resonator(freq=5.0, levels=2, label="r")
+    network = PortNetwork(label="mixer")
+    network.port("p", target=resonator, rate=0.04)
+    detuning = 0.002
+    names = tuple(str(index) for index in range(6))
+    mixer = network.component("mix", scattering=np.diag(np.full(6, np.exp(1j * detuning))), terminals=names)
+    for name in names[1:]:
+        network.connect(mixer.output_terminal(name), mixer.input_terminal(name))
+    network.expose("probe", input=mixer.input_terminal("0"), output=mixer.output_terminal("0"))
+
+    resolved = Chip([resonator], port_network=network).resolve().slh
+
+    assert abs(np.linalg.det(np.eye(5) - np.exp(1j * detuning) * np.eye(5))) < 1e-12
+    probe = [channel.key for channel in resolved.channels].index("probe")
+    np.testing.assert_allclose(resolved.S[probe, probe], np.exp(1j * detuning))

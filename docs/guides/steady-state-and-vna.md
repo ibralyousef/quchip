@@ -146,6 +146,10 @@ Use `link` for physical cabling; it joins consecutive sides in both directions
 and traverses a two-sided component from side 1 to side 2. Use `cascade` for a
 directional SLH series connection.
 
+Instantaneous loops inside the Markov core, such as a ring through a beam
+splitter, are allowed and solved exactly; delays and other reference sections
+cannot sit inside them.
+
 `PortNetwork` composes instantaneous scalar scattering with the port coupling
 operators. Scattering mappings use `(output, input)` keys. A reciprocal
 two-sided attenuator uses power transmission `eta`; each direction has

@@ -579,7 +579,12 @@ class ChipAnalysis:
             eigenvalues, _, _, kernel_labeling = self._compute_array_labeled()
         else:
             eigenvalues, kernel_labeling = precomputed
-        return eigenvalues[kernel_labeling.indices[bare_idx]]
+        index = kernel_labeling.indices[bare_idx]
+        if contains_tracer(index) and not contains_tracer(eigenvalues):
+            import jax.numpy as jnp
+
+            return jnp.asarray(eigenvalues)[index]
+        return eigenvalues[index]
 
     def dress(
         self,
