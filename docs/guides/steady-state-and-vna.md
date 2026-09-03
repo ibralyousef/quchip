@@ -108,6 +108,27 @@ print(resolved.slh.S)
 print(resolved.slh.L)
 ```
 
+The resolved triples also support direct textbook composition:
+
+```python
+from quchip import Resonator
+from quchip.engine import feedback_reduce
+
+r_a = Resonator(freq=6.8, levels=4, label="r_a")
+r_b = Resonator(freq=7.1, levels=4, label="r_b")
+pair = PortNetwork(label="pair")
+pair.port("p_a", target=r_a, rate=0.02)
+pair.port("p_b", target=r_b, rate=0.03)
+open_triple = Chip([r_a, r_b], port_network=pair).resolve().slh
+cascade = feedback_reduce(open_triple, output="p_a", input="p_b")
+print(cascade.S, cascade.channels[0].key)
+```
+
+Feeding `p_a`'s output into `p_b`'s input gives the same resolved triple as
+`network.cascade(p_a, p_b)` with one through plane. Use this algebra as an
+oracle for resolved triples; use `PortNetwork` to wire ports and compile a
+user-facing field graph.
+
 For reflection readout through a circulator and isolator:
 
 ```python

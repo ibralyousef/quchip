@@ -59,6 +59,7 @@ from quchip.engine.ir import (
     StaticTerm,
 )
 from quchip.engine.basis import BasisRecord
+from quchip.engine.slh import concatenate, feedback_reduce, series_product
 
 __all__ = [
     "simulate",
@@ -86,6 +87,9 @@ __all__ = [
     "SteadyStateProblem",
     "StaticTerm",
     "BasisRecord",
+    "series_product",
+    "concatenate",
+    "feedback_reduce",
 ]
 
 

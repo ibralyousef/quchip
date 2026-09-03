@@ -286,6 +286,32 @@ raise; request them at a plane before the amplifier.
 
 Noise parameters are ordinary tracked attributes: set (or clear with `None`) at construction **or any time after** — collapse operators are rebuilt from current values on every solve, and post-construction writes get the same validation as the constructor. Chip-level shared/collective dissipation lives in `Bath` ([`quchip/chip/baths.py`](quchip/chip/baths.py)), attached at construction or later via `chip.add_bath(...)`; bath rates are Lindblad-ready 1/ns with no assembly `2π` (that boundary is Hamiltonian-only — a component's *intrinsic* `2π`, e.g. a resonator's `κ = 2π·f/Q`, is its own physics).
 
+### 3.3.3 Composition rules
+
+Source: [`quchip/engine/slh.py`](quchip/engine/slh.py)
+
+For resolved triples `G1 = (S1, L1, H1)` and `G2 = (S2, L2, H2)`,
+the Gough–James rules are
+
+```text
+G1 ▷ G2 = (S2 S1, L2 + S2 L1,
+           H1 + H2 + (L2^dagger S2 L1 - h.c.) / 2i),
+G1 ⊞ G2 = (diag(S1, S2), (L1, L2), H1 + H2),
+g = (1 - S_xy)^-1,
+S_tilde = S_x̄ȳ + S_x̄y g S_xȳ,
+L_tilde = L_x̄ + S_x̄y g L_x,
+H_tilde = H + ((sum_j L_j^dagger S_jy) g L_x - h.c.) / 2i.
+```
+
+`quchip.engine` exposes these as `series_product`, `concatenate`, and
+`feedback_reduce` on the input-free `ResolvedSLH` returned by
+`chip.resolve().slh`. Operands must share one Hilbert space, and joined or
+closed legs must have empty reference runs. A concrete loop with
+`1 - S_xy = 0` is singular and raises. Concatenation needs `prefixes=` when
+channel keys collide; feedback from `x` to a different `y` keys the merged
+channel `x->y`. Composition Hamiltonian corrections are network-origin static
+terms.
+
 ### 3.4 Authored local spaces and solver bases
 
 Source: [`quchip/devices/spaces.py`](quchip/devices/spaces.py), [`quchip/engine/basis.py`](quchip/engine/basis.py)
