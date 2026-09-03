@@ -685,3 +685,58 @@ def test_many_channel_loop_with_small_determinant_is_not_singular() -> None:
     assert abs(np.linalg.det(np.eye(5) - np.exp(1j * detuning) * np.eye(5))) < 1e-12
     probe = [channel.key for channel in resolved.channels].index("probe")
     np.testing.assert_allclose(resolved.S[probe, probe], np.exp(1j * detuning))
+
+
+def _two_line_chip() -> Chip:
+    first = Resonator(freq=5.0, levels=2, label="a")
+    second = Resonator(freq=5.4, levels=2, label="b")
+    network = PortNetwork(label="lines")
+    port_a = network.port("pa", target=first, rate=0.02)
+    port_b = network.port("pb", target=second, rate=0.03)
+    loss = network.attenuator("loss", eta=0.5)
+    cable = network.delay("cable", duration=1.0)
+    network.link(port_a, loss)
+    network.expose("line_a", at=loss.side(2))
+    network.link(port_b, cable)
+    network.expose("line_b", at=cable.side(2))
+    return Chip([first, second], port_network=network)
+
+
+def test_restrict_keeps_the_subgraphs_touching_selected_ports() -> None:
+    """restrict() copies every component, connection, and plane reachable from the chosen ports."""
+    chip = _two_line_chip()
+    network = chip.port_network
+    assert network is not None
+    full = chip.resolve().slh
+
+    line_a = network.restrict(["pa"])
+
+    assert [port.label for port in line_a.ports] == ["pa"]
+    assert {component.label for component in line_a.components} == {"pa", "loss"}
+    assert [exposure.label for exposure in line_a.exposures] == ["line_a"]
+    sub = Chip([Resonator(freq=5.0, levels=2, label="a")], port_network=line_a).resolve().slh
+    keys = [channel.key for channel in full.channels]
+    rows = [keys.index(channel.key) for channel in sub.channels]
+    np.testing.assert_allclose(sub.S, np.asarray(full.S)[np.ix_(rows, rows)])
+    assert "component.loss.eta" in line_a.parameters and "component.cable.duration" not in line_a.parameters
+
+    line_b = network.restrict(["pb"])
+    assert [exposure.label for exposure in line_b.exposures] == ["line_b"]
+    resolved_b = Chip([Resonator(freq=5.4, levels=2, label="b")], port_network=line_b).resolve().slh
+    assert [element.label for element in resolved_b.external_channels[0].reference.outbound] == ["cable"]
+
+
+def test_restrict_rejects_subgraphs_spanning_other_ports() -> None:
+    """A subgraph that also touches an unselected port cannot be cut without changing the dynamics."""
+    first = Resonator(freq=5.0, levels=2, label="a")
+    second = Resonator(freq=5.4, levels=2, label="b")
+    network = PortNetwork(label="cascade")
+    port_a = network.port("pa", target=first, rate=0.02)
+    port_b = network.port("pb", target=second, rate=0.03)
+    network.cascade(port_a, port_b)
+    network.expose("feedline", input=port_a.input, output=port_b.output)
+
+    with pytest.raises(ValueError, match="pb"):
+        network.restrict(["pa"])
+    with pytest.raises(KeyError):
+        network.restrict(["missing"])

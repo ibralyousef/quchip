@@ -17,6 +17,7 @@ This file records notable user-visible changes to quchip.
 - Added external-plane input scheduling through `network.expose(...).input`; coherent amplitudes are in `sqrt(photons/ns)` and are not stored on `ResolvedSLH`.
 - Added complete transient field traces through `result.output(plane)`, with complex amplitude, arbitrary post-solve quadratures, normally ordered photon flux, and the Markov-boundary values before outbound reference sections derived from the same `b_out = S b_in + L` model. `VNA.sweep()` remains small signal, while `VNA.finite_power()` reports the stationary mean field.
 - `PortNetwork.to_dict()` now records every built-in component by factory `kind` and `parameters`, and `PortNetwork.from_dict()` rebuilds it through that factory. Generic `component(...)` entries retain their terminals and scattering matrix; unknown kinds raise `TypeError`.
+- Added `PortNetwork.restrict(ports)`, which copies the independent field-graph components reached from selected ports, including their connections, exposures, tracked parameters, filter callables, and boundary scattering. `Chip.partition()` now carries separable field lines into their device-group sub-chips; if a field graph spans groups, contains components unreachable from any one group's ports, or has boundary scattering that mixes groups, it keeps one joint solve and records why in `partition.notes`. This includes a passive swap between otherwise independent ports.
 
 ### Visualization
 

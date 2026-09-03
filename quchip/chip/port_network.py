@@ -915,6 +915,57 @@ class PortNetwork:
         """Return an independent structural copy with label-based port targets."""
         return self._copy_with_port_replacements({})
 
+    def restrict(self, ports: Sequence[str | Port]) -> "PortNetwork":
+        """Return an independent sub-network of field-graph components reachable from ``ports``.
+
+        Every reachable component is copied with its connections, exposures, tracked
+        parameters, and filter callables. Authored boundary scattering is limited to
+        the kept planes. A reachable subgraph that also touches an unselected port
+        raises, because cutting it would change the SLH dynamics.
+
+        Parameters
+        ----------
+        ports : sequence of str or Port
+            Quantum coupling ports whose field subgraphs are kept.
+
+        Returns
+        -------
+        PortNetwork
+            An independent network with label-based port targets.
+
+        Raises
+        ------
+        KeyError
+            A selected port is not part of this network.
+        ValueError
+            A reachable subgraph also touches an unselected port, or boundary
+            scattering couples kept and dropped planes.
+        """
+        labels = {port if isinstance(port, str) else port.label for port in ports}
+        known = {port.label for port in self._ports}
+        missing = sorted(labels - known)
+        if missing:
+            raise KeyError(f"Unknown PortNetwork ports {missing}; available: {sorted(known)}.")
+        neighbours: dict[str, set[str]] = {component.label: set() for component in self.components}
+        edges = [*self._connections.items(), *((item._input_key, item._output_key) for item in self._exposures)]
+        for first, second in edges:
+            neighbours[first[0]].add(second[0])
+            neighbours[second[0]].add(first[0])
+        keep: set[str] = set()
+        stack = list(labels)
+        while stack:
+            label = stack.pop()
+            if label not in keep:
+                keep.add(label)
+                stack.extend(neighbours[label])
+        stray = sorted(keep & known - labels)
+        if stray:
+            raise ValueError(
+                f"PortNetwork subgraph reached from ports {sorted(labels)} also touches ports {stray}; "
+                "restrict them together."
+            )
+        return self._copy_graph({}, keep)
+
     def _copy_with_port_replacements(
         self,
         replacements: Mapping[str, Port],
@@ -929,11 +980,41 @@ class PortNetwork:
                 raise ValueError(
                     f"Replacement for port {label!r} must retain that label, got {replacement.label!r}."
                 )
-        copied = PortNetwork(
-            scattering=self._copy_value(self._authored_scattering),
-            label=self.label,
-        )
+        return self._copy_graph(replacements, None)
+
+    def _restricted_boundary(self, keep: set[str]) -> Any:
+        """Return the authored boundary scattering limited to planes inside ``keep``."""
+        authored = self._authored_scattering
+        if authored is None:
+            return None
+        planes = [exposure for exposure in self._effective_exposures() if not exposure._hidden]
+        kept = {exposure.label for exposure in planes if exposure._input_key[0] in keep}
+        if isinstance(authored, Mapping):
+            restricted = {}
+            for (output, input_), value in authored.items():
+                has_output, has_input = resolve_label(output) in kept, resolve_label(input_) in kept
+                if has_output != has_input:
+                    raise ValueError(
+                        f"Boundary scattering entry {(resolve_label(output), resolve_label(input_))} couples "
+                        "planes of different field subgraphs."
+                    )
+                if has_output:
+                    restricted[(output, input_)] = self._copy_value(value)
+            return restricted or None
+        if len(kept) == len(planes):
+            return self._copy_value(authored)
+        if not kept:
+            return None
+        raise ValueError("Matrix-form boundary scattering spans planes of different field subgraphs.")
+
+    def _copy_graph(self, replacements: Mapping[str, Port], keep: set[str] | None) -> "PortNetwork":
+        """Copy the components in ``keep`` (all when ``None``) with their wiring and parameters."""
+        kept = keep if keep is not None else {component.label for component in self.components}
+        scattering = self._copy_value(self._authored_scattering) if keep is None else self._restricted_boundary(kept)
+        copied = PortNetwork(scattering=scattering, label=self.label)
         for component in self.components:
+            if component.label not in kept:
+                continue
             if any(port is not None for port in component._local_ports):
                 assert len(component._local_ports) == 1
                 local_port = component._local_ports[0]
@@ -953,18 +1034,22 @@ class PortNetwork:
                         _row_inputs=component._row_inputs,
                     )
                 )
-        copied._connections = dict(self._connections)
-        copied._used_outputs = dict(self._used_outputs)
+        copied._connections = {
+            input_key: output_key for input_key, output_key in self._connections.items() if input_key[0] in kept
+        }
+        copied._used_outputs = {output_key: input_key for input_key, output_key in copied._connections.items()}
         copied._exposures = [
             replace(exposure, _network_token=copied._token)
             for exposure in self._exposures
+            if exposure._input_key[0] in kept
         ]
-        copied._component_kinds = dict(self._component_kinds)
+        copied._component_kinds = {label: kind for label, kind in self._component_kinds.items() if label in kept}
         copied._component_parameters = {
-            label: dict(parameters)
-            for label, parameters in self._component_parameters.items()
+            label: dict(parameters) for label, parameters in self._component_parameters.items() if label in kept
         }
-        copied._component_transfers = dict(self._component_transfers)
+        copied._component_transfers = {
+            label: transfer for label, transfer in self._component_transfers.items() if label in kept
+        }
         return copied
 
     def physics_notes(self) -> list[str]:

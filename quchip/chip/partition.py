@@ -155,13 +155,32 @@ def _component_baths(clone: "Chip", member_set: set[str]) -> list[Any]:
     return kept
 
 
-def _component_ports(clone: "Chip", member_set: set[str]) -> list[Any]:
-    """Return ports whose complete target support belongs to one component."""
-    return [
-        port.copy()
-        for port in clone.ports
-        if set(port.resolve_targets(clone)).issubset(member_set)
-    ]
+def _split_network(chip: "Chip", groups: list[list[str]]) -> list[Any]:
+    """Restrict the chip's field network to each device group, or explain why that changes the physics."""
+    network = chip.port_network
+    if network is None:
+        return [None] * len(groups)
+    per_group: list[Any] = []
+    covered: set[str] = set()
+    for group in groups:
+        members = set(group)
+        labels = [port.label for port in network.ports if set(port.resolve_targets(chip)).issubset(members)]
+        if not labels:
+            per_group.append(None)
+            continue
+        try:
+            restricted = network.restrict(labels)
+        except ValueError as error:
+            raise ValueError(f"{error} Those ports belong to different device groups") from error
+        covered.update(component.label for component in restricted.components)
+        per_group.append(restricted)
+    leftover = sorted({component.label for component in network.components} - covered)
+    if leftover:
+        raise ValueError(
+            f"PortNetwork components {leftover} are not reachable from one device group's ports; "
+            "restricting the field network would change the SLH dynamics"
+        )
+    return per_group
 
 
 def _transform_drive_labels(transform: "SignalTransform") -> tuple[str, ...]:
@@ -187,10 +206,11 @@ def _distribute_control_lines(
     return lines_per, notes
 
 
-def _build_component_chip(chip: "Chip", clone: "Chip", index: int, group: list[str], lines: list[Any]) -> "Chip":
+def _build_component_chip(
+    chip: "Chip", clone: "Chip", index: int, group: list[str], lines: list[Any], network: Any
+) -> "Chip":
     """Assemble one component's solve-ready sub-chip: its devices, internal couplings, baths, frame, equipment."""
     from quchip.chip.chip import Chip as _Chip
-    from quchip.chip.port_network import PortNetwork
     from quchip.control.equipment import ControlEquipment
 
     member_set = set(group)
@@ -207,7 +227,6 @@ def _build_component_chip(chip: "Chip", clone: "Chip", index: int, group: list[s
         {k: v for k, v in clone.frame.items() if k in member_set}
         if isinstance(clone.frame, dict) else clone.frame
     )
-    ports = _component_ports(clone, member_set)
     sub = _Chip(
         devices=devices,
         couplings=couplings or None,
@@ -216,7 +235,7 @@ def _build_component_chip(chip: "Chip", clone: "Chip", index: int, group: list[s
         approximation=clone.approximation,
         backend=clone._backend,
         baths=_component_baths(clone, member_set) or None,
-        port_network=PortNetwork.from_ports(ports) if ports else None,
+        port_network=network,
     )
     equipment = clone.control_equipment
     if equipment is not None and lines:
@@ -250,22 +269,18 @@ def partition_chip(
     for support in extra_supports:
         edges.extend((support[0], other) for other in support[1:])
     groups = connected_components(labels, edges)
-    has_network_hamiltonian = any(
-        term.origin == "network" for term in resolved.slh.H.static_terms
-    )
-    if has_network_hamiltonian and len(groups) > 1:
-        return PartitionResult(
-            components=(PartitionComponent(labels=chip_order, chip=chip),),
-            chip_order=chip_order,
-            notes=(
-                "Kept a joint solve because the PortNetwork generated Hamiltonian terms; "
-                "v0.3 does not slice an active field graph across component chips.",
-            ),
-        )
     if len(groups) == 1:
         return PartitionResult(
             components=(PartitionComponent(labels=chip_order, chip=chip),),
             chip_order=chip_order,
+        )
+    try:
+        networks = _split_network(chip, groups)
+    except ValueError as error:
+        return PartitionResult(
+            components=(PartitionComponent(labels=chip_order, chip=chip),),
+            chip_order=chip_order,
+            notes=(f"Kept a joint solve because {error}.",),
         )
 
     clone = chip.clone()
@@ -276,7 +291,9 @@ def partition_chip(
 
     lines_per, notes = _distribute_control_lines(clone, groups, owner)
     components = tuple(
-        PartitionComponent(labels=tuple(group), chip=_build_component_chip(chip, clone, i, group, lines_per[i]))
+        PartitionComponent(
+            labels=tuple(group), chip=_build_component_chip(chip, clone, i, group, lines_per[i], networks[i])
+        )
         for i, group in enumerate(groups)
     )
 

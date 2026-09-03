@@ -45,21 +45,8 @@ def test_cascade_generated_hamiltonian_connects_partitions() -> None:
     assert chip.partition().is_trivial
 
 
-def test_passive_scattering_does_not_connect_independent_ports() -> None:
-    """A passive field-basis rotation does not merge independent subsystems."""
-    first = Resonator(freq=5.0, levels=2, label="a")
-    second = Resonator(freq=5.4, levels=2, label="b")
-    network = PortNetwork(scattering=np.asarray([[0.0, 1.0], [1.0, 0.0]]), label="swap")
-    network.port("a_port", target=first, rate=0.02)
-    network.port("b_port", target=second, rate=0.03)
-    chip = Chip([first, second], port_network=network)
-
-    assert chip.resolve().dynamical_supports == ()
-    assert len(chip.partition()) == 2
-
-
-def test_active_network_with_an_extra_device_stays_joint() -> None:
-    """An active network is not partially sliced while graph splitting is unsupported."""
+def test_active_cascade_partitions_away_from_an_independent_line() -> None:
+    """A cascade keeps its two devices joint while an independent line splits off with its own network."""
     first = Resonator(freq=5.0, levels=2, label="a")
     second = Resonator(freq=5.4, levels=2, label="b")
     spectator = Resonator(freq=6.0, levels=2, label="c")
@@ -68,11 +55,33 @@ def test_active_network_with_an_extra_device_stays_joint() -> None:
     second_port = network.port("b_port", target=second, rate=0.03)
     network.cascade(first_port, second_port)
     network.expose("feedline", input=first_port.input, output=second_port.output)
+    loss = network.attenuator("loss", eta=0.5)
+    network.link(network.port("c_port", target=spectator, rate=0.01), loss)
+    network.expose("spectator_line", at=loss.side(2))
     chip = Chip([first, second, spectator], port_network=network)
 
+    partition = chip.partition()
+
     assert chip.resolve().dynamical_supports == (("a", "b"),)
-    assert chip.partition().is_trivial
-    assert "generated Hamiltonian" in chip.partition().notes[0]
+    assert [component.labels for component in partition.components] == [("a", "b"), ("c",)]
+    assert not partition.notes
+    joint = chip.resolve().slh
+    pair = partition.components[0].chip.resolve().slh
+    keys = [channel.key for channel in joint.channels]
+    rows = [keys.index(channel.key) for channel in pair.channels]
+    np.testing.assert_allclose(pair.S, np.asarray(joint.S)[np.ix_(rows, rows)])
+    for channel, row in zip(pair.channels, rows, strict=True):
+        np.testing.assert_allclose(channel.coupling.to_dense(), _without_spectator(joint.channels[row].coupling))
+    generated = [term for term in pair.H.static_terms if term.origin == "network"]
+    joint_generated = [term for term in joint.H.static_terms if term.origin == "network"]
+    assert len(generated) == len(joint_generated) == 1
+    np.testing.assert_allclose(generated[0].operator.to_dense(), _without_spectator(joint_generated[0].operator))
+
+
+def _without_spectator(operator) -> np.ndarray:
+    """Block of a three-qubit operator with the last subsystem in its ground state."""
+    tensor = np.asarray(operator.to_dense()).reshape(2, 2, 2, 2, 2, 2)
+    return tensor[:, :, 0, :, :, 0].reshape(4, 4)
 
 
 def test_coupling_dropped_by_rwa_does_not_connect_resolved_partitions() -> None:
@@ -156,3 +165,48 @@ def test_field_io_declines_component_solve_but_keeps_automatic_simulation() -> N
 
     assert not isinstance(result, PartitionedSimulationResult)
     assert result.output(right_plane).amplitude.shape == (3,)
+
+
+
+def test_partition_keeps_each_groups_field_network() -> None:
+    """Separable network lines travel with their device group instead of being dropped."""
+    first = Resonator(freq=5.0, levels=2, label="a")
+    second = Resonator(freq=5.4, levels=2, label="b")
+    network = PortNetwork(label="lines")
+    port_a = network.port("pa", target=first, rate=0.02)
+    port_b = network.port("pb", target=second, rate=0.03)
+    loss = network.attenuator("loss", eta=0.5)
+    network.link(port_a, loss)
+    network.expose("line_a", at=loss.side(2))
+    network.expose("line_b", at=port_b)
+    chip = Chip([first, second], port_network=network)
+
+    partition = chip.partition()
+
+    assert len(partition) == 2 and not partition.notes
+    sub_a, sub_b = (component.chip for component in partition.components)
+    assert sub_a.port_network is not None and sub_b.port_network is not None
+    assert [exposure.label for exposure in sub_a.port_network.exposures] == ["line_a"]
+    assert {component.label for component in sub_a.port_network.components} == {"pa", "loss"}
+    assert [exposure.label for exposure in sub_b.port_network.exposures] == ["line_b"]
+    full = chip.resolve().slh
+    keys = [channel.key for channel in full.channels]
+    for sub in (sub_a, sub_b):
+        resolved = sub.resolve().slh
+        rows = [keys.index(channel.key) for channel in resolved.channels]
+        np.testing.assert_allclose(resolved.S, np.asarray(full.S)[np.ix_(rows, rows)])
+
+
+def test_partition_stays_joint_when_a_field_subgraph_spans_groups() -> None:
+    """A passive rotation mixing two groups' fields keeps one solve, with the reason recorded."""
+    first = Resonator(freq=5.0, levels=2, label="a")
+    second = Resonator(freq=5.4, levels=2, label="b")
+    network = PortNetwork(scattering=np.asarray([[0.0, 1.0], [1.0, 0.0]]), label="swap")
+    network.port("a_port", target=first, rate=0.02)
+    network.port("b_port", target=second, rate=0.03)
+    chip = Chip([first, second], port_network=network)
+
+    assert chip.resolve().dynamical_supports == ()
+    partition = chip.partition()
+    assert partition.is_trivial
+    assert "different device groups" in partition.notes[0]
