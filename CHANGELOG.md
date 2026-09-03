@@ -14,6 +14,7 @@ This file records notable user-visible changes to quchip.
 - Added physical connector sides through `port.side` and `component.side(k)`, bidirectional cabling through `PortNetwork.link(...)`, side exposures through `PortNetwork.expose(..., at=...)`, and ideal `PortNetwork.circulator(...)` and `PortNetwork.isolator(...)` components. `PortNetwork.attenuator(...)` is two-sided and reciprocal, with two hidden vacuum channels.
 - Added external-plane input scheduling through `network.expose(...).input`; coherent amplitudes are in `sqrt(photons/ns)` and are not stored on `ResolvedSLH`.
 - Added complete transient field traces through `result.output(plane)`, with complex amplitude, arbitrary post-solve quadratures, normally ordered photon flux, and the Markov-boundary values before outbound reference sections derived from the same `b_out = S b_in + L` model. `VNA.sweep()` remains small signal, while `VNA.finite_power()` reports the stationary mean field.
+- `PortNetwork.to_dict()` now records every built-in component by factory `kind` and `parameters`, and `PortNetwork.from_dict()` rebuilds it through that factory. Generic `component(...)` entries retain their terminals and scattering matrix; unknown kinds raise `TypeError`.
 
 ### Visualization
 

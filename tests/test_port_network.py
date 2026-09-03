@@ -460,3 +460,55 @@ def test_link_rejects_directional_components_and_keeps_true_feedback_explicit() 
     )
     with pytest.raises(ValueError, match="feedback|cycle"):
         Chip([first, second], port_network=network).resolve()
+
+
+def test_every_builtin_component_round_trips_as_kind_and_parameters() -> None:
+    """Serialized networks rebuild built-in components from their factory kind and parameters."""
+    resonator = Resonator(freq=6.0, levels=2, label="r")
+    network = PortNetwork(label="fridge")
+    port = network.port("chip_port", target=resonator, rate=0.04)
+    circ = network.circulator("circ", ports=4)
+    iso = network.isolator("iso")
+    loss = network.attenuator("loss", eta=0.25)
+    splitter = network.beam_splitter("split", eta=0.3)
+    hybrid = network.hybrid90("hyb")
+    swap = network.permutation("swap", order=[1, 0])
+    phase = network.phase_shift("phase", phase=0.4)
+    through = network.through("thru")
+    custom = network.component("custom", scattering=[[0.0, 1j], [1j, 0.0]], terminals=("a", "b"))
+    cable = network.delay("cable", duration=1.5)
+    hemt = network.amplifier("hemt", gain=50.0, added_noise=1.0)
+    network.link(port, circ.side(2))
+    network.link(circ.side(3), iso, loss, cable, hemt)
+    network.expose("readout", at=hemt.side(2))
+    network.expose("drive", at=circ.side(1))
+    network.expose("spare", at=circ.side(4))
+    network.cascade(splitter.output_terminal("left"), phase, through, hybrid.input_terminal("left"))
+    network.cascade(splitter.output_terminal("right"), swap.input_terminal("0"))
+    network.cascade(hybrid.output_terminal("left"), custom.input_terminal("a"))
+    network.cascade(swap.output_terminal("0"), custom.input_terminal("b"))
+    network.expose("aux_a", input=splitter.input_terminal("left"), output=custom.output_terminal("a"))
+    network.expose("aux_b", input=splitter.input_terminal("right"), output=custom.output_terminal("b"))
+    network.expose("hyb_side", input=hybrid.input_terminal("right"), output=hybrid.output_terminal("right"))
+    network.expose("swap_side", input=swap.input_terminal("1"), output=swap.output_terminal("1"))
+    chip = Chip([resonator], port_network=network)
+
+    payload = json.loads(json.dumps(chip.to_dict()))
+    restored = Chip.from_dict(payload)
+
+    kinds = {item["label"]: item for item in payload["port_network"]["components"]}
+    assert kinds["circ"] == {"label": "circ", "kind": "circulator", "parameters": {"ports": 4}}
+    assert kinds["swap"]["parameters"] == {"order": [1, 0]}
+    assert kinds["custom"]["kind"] == "scattering" and kinds["custom"]["terminals"] == ["a", "b"]
+    assert restored.port_network is not None
+    assert restored.port_network.to_dict() == chip.port_network.to_dict()
+    original, rebuilt = chip.resolve().slh, restored.resolve().slh
+    np.testing.assert_allclose(rebuilt.S, original.S)
+    assert [c.key for c in rebuilt.channels] == [c.key for c in original.channels]
+    assert restored.parameters == chip.parameters
+    assert "component.circ.ports" not in network.parameters
+    assert "component.swap.order" not in network.parameters
+    with pytest.raises(TypeError, match="kind"):
+        PortNetwork.from_dict({"components": [{"label": "x", "kind": "warp_drive", "parameters": {}}]})
+    with pytest.raises(TypeError, match="no kind"):
+        PortNetwork.from_dict({"components": [{"label": "x", "parameters": {}}]})

@@ -177,6 +177,22 @@ class FieldExposure:
         return OutputField(self.label)
 
 
+_SERIALIZED_FACTORIES = frozenset(
+    {
+        "through",
+        "hybrid90",
+        "permutation",
+        "circulator",
+        "isolator",
+        "phase_shift",
+        "beam_splitter",
+        "attenuator",
+        "delay",
+        "amplifier",
+    }
+)
+
+
 @dataclass
 class _AffineField:
     scattering: list[Any]
@@ -348,11 +364,15 @@ class PortNetwork:
             _network_token=self._token,
             _local_ports=tuple(None for _ in names),
         )
-        return self._add_component(component)
+        component = self._add_component(component)
+        self._component_kinds[label] = "scattering"
+        return component
 
     def through(self, label: str) -> SLHComponent:
         """Add a one-channel identity through component."""
-        return self.component(label, scattering=[[1.0]], terminals=("signal",))
+        component = self.component(label, scattering=[[1.0]], terminals=("signal",))
+        self._component_kinds[label] = "through"
+        return component
 
     def phase_shift(self, label: str, *, phase: Any) -> SLHComponent:
         """Add a one-channel phase shift."""
@@ -376,11 +396,13 @@ class PortNetwork:
 
     def hybrid90(self, label: str) -> SLHComponent:
         """Add an ideal reciprocal 90-degree hybrid."""
-        return self.component(
+        component = self.component(
             label,
             scattering=np.asarray([[1.0, 1j], [1j, 1.0]], dtype=complex) / np.sqrt(2.0),
             terminals=("left", "right"),
         )
+        self._component_kinds[label] = "hybrid90"
+        return component
 
     def permutation(self, label: str, *, order: Sequence[int]) -> SLHComponent:
         """Add an output permutation; ``order[row]`` selects the input column."""
@@ -388,7 +410,7 @@ class PortNetwork:
         if sorted(order) != list(range(len(order))):
             raise ValueError("Permutation order must contain each input index exactly once.")
         names = tuple(str(index) for index in range(len(order)))
-        return self._permutation_component(label, names, order, kind="scattering", sided=False)
+        return self._permutation_component(label, names, order, kind="permutation", sided=False)
 
     def attenuator(self, label: str, *, eta: Any) -> SLHComponent:
         """Add a reciprocal two-sided attenuator with power transmission ``eta``.
@@ -536,8 +558,7 @@ class PortNetwork:
             _row_inputs=tuple((source,) for source in sources),
         )
         component = self._add_component(component)
-        if kind != "scattering":
-            self._component_kinds[label] = kind
+        self._component_kinds[label] = kind
         return component
 
     def connect(self, output: FieldTerminal, input: FieldTerminal) -> None:
@@ -758,23 +779,7 @@ class PortNetwork:
             "ports": [port.to_dict() for port in self._ports],
             "scattering": self._serialize_boundary(self._authored_scattering),
             "components": [
-                {
-                    "label": component.label,
-                    "input_names": list(component.input_names),
-                    "output_names": list(component.output_names),
-                    "scattering": self._serialize_matrix(component.scattering),
-                    "hidden_pairs": [list(item) for item in component._hidden_pairs],
-                    "sides": list(component.sides),
-                    "row_inputs": (
-                        None if component._row_inputs is None
-                        else [list(item) for item in component._row_inputs]
-                    ),
-                    "kind": self._component_kinds.get(component.label, "scattering"),
-                    "parameters": {
-                        name: self._serialize_scalar(value)
-                        for name, value in self._component_parameters.get(component.label, {}).items()
-                    },
-                }
+                self._serialize_component(component)
                 for component in self.components
                 if not any(port is not None for port in component._local_ports)
             ],
@@ -794,6 +799,27 @@ class PortNetwork:
                 for exposure in self._exposures
             ],
         }
+
+    def _serialize_component(self, component: SLHComponent) -> dict[str, Any]:
+        kind = self._component_kinds[component.label]
+        if kind == "scattering":
+            return {
+                "label": component.label,
+                "kind": kind,
+                "terminals": list(component.input_names),
+                "scattering": self._serialize_matrix(component.scattering),
+            }
+        if kind == "circulator":
+            parameters: dict[str, Any] = {"ports": len(component.sides)}
+        elif kind == "permutation":
+            parameters = {"order": [inputs[0] for inputs in component._row_inputs or ()]}
+        else:
+            parameters = {}
+        parameters.update(
+            (name, self._serialize_scalar(value))
+            for name, value in self._component_parameters.get(component.label, {}).items()
+        )
+        return {"label": component.label, "kind": kind, "parameters": parameters}
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "PortNetwork":
@@ -815,27 +841,22 @@ class PortNetwork:
         for payload in data.get("ports", []):
             network._add_port(Port.from_dict(payload))
         for payload in data.get("components", []):
-            network._add_component(
-                SLHComponent(
-                    label=payload["label"],
-                    input_names=tuple(payload["input_names"]),
-                    output_names=tuple(payload["output_names"]),
+            if "kind" not in payload:
+                raise TypeError(f"Serialized PortNetwork component {payload.get('label')!r} has no kind.")
+            kind = payload["kind"]
+            if kind == "scattering":
+                network.component(
+                    payload["label"],
                     scattering=cls._deserialize_matrix(payload["scattering"]),
-                    _network_token=network._token,
-                    sides=tuple(payload.get("sides", ())),
-                    _local_ports=tuple(None for _ in payload["output_names"]),
-                    _hidden_pairs=tuple(tuple(item) for item in payload.get("hidden_pairs", [])),
-                    _row_inputs=(
-                        None if payload.get("row_inputs") is None
-                        else tuple(tuple(item) for item in payload["row_inputs"])
-                    ),
+                    terminals=tuple(payload["terminals"]),
                 )
-            )
-            network._component_kinds[payload["label"]] = payload.get("kind", "scattering")
-            network._component_parameters[payload["label"]] = {
-                name: cls._deserialize_scalar(value)
-                for name, value in payload.get("parameters", {}).items()
+                continue
+            if kind not in _SERIALIZED_FACTORIES:
+                raise TypeError(f"Unknown serialized PortNetwork component kind {kind!r}.")
+            parameters = {
+                name: cls._deserialize_scalar(value) for name, value in payload.get("parameters", {}).items()
             }
+            getattr(network, kind)(payload["label"], **parameters)
         for payload in data.get("connections", []):
             input_key = tuple(payload["input"])
             output_key = tuple(payload["output"])
@@ -1008,7 +1029,9 @@ class PortNetwork:
         return {"real": scalar.real, "imag": scalar.imag}
 
     @staticmethod
-    def _deserialize_scalar(value: Any) -> complex | float:
+    def _deserialize_scalar(value: Any) -> Any:
+        # Structural options such as a permutation order or a port count are
+        # plain JSON values and pass through untouched.
         if not isinstance(value, Mapping):
             return value
         scalar = complex(value["real"], value["imag"])
@@ -1027,6 +1050,7 @@ class PortNetwork:
             _local_ports=(port,),
         )
         self._add_component(component)
+        self._component_kinds[port.label] = "port"
         port._bind_network(self, component)
         self._ports.append(port)
 

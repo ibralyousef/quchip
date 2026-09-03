@@ -37,7 +37,7 @@ def _network_of(source: Any) -> PortNetwork:
 
 def _annotation(network: PortNetwork, component: Any) -> list[str]:
     """Return the value lines drawn under a component label."""
-    kind = network._component_kinds.get(component.label, "scattering")
+    kind = network._component_kinds[component.label]
     parameters = network._component_parameters.get(component.label, {})
     ports = [port for port in component._local_ports if port is not None]
     if ports:
