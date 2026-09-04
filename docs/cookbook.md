@@ -260,6 +260,18 @@ Use:
 - `reduced_state()` for one subsystem;
 - `check_truncation()` before trusting a small local basis.
 
+Read a resolved collapse-channel jump rate from the stored states with:
+
+```python
+t1_flux = result.collapse_flux("hidden.q.thermal_emission")  # <L†L>(t), 1/ns
+```
+
+Weight each channel's integrated jump count by its signed contribution to the
+excitation balance: `+1` for a lowering jump, `+2` for two-photon loss, `-1`
+for thermal absorption, and `0` for dephasing. With these weights,
+`n(0) = n(T) + Σ_c w_c ∫<L_c†L_c> dt` closes only when the Hamiltonian
+conserves excitation number and there is no coherent injection.
+
 Pass `e_ops=chip.e_ops(...)` when expectation traces are the main output.
 Stored states remain available by default; disable them only when the memory
 tradeoff is intentional.

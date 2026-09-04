@@ -34,7 +34,7 @@ DEFAULT_TRUNCATION_THRESHOLD = 1e-3
 StateMode = Literal["population", "dm"]
 
 if TYPE_CHECKING:
-    from quchip.engine.ir import SolveBatch, SolveProblem
+    from quchip.engine.ir import SLHChannel, SolveBatch, SolveProblem
 
 
 @dataclass(frozen=True)
@@ -123,8 +123,11 @@ class SimulationResult:
         device_info: list[tuple[str, bool]] | None = None,
         observable_traces: dict[Any, ObservableTrace | list[ObservableTrace]] | None = None,
         output_traces: dict[Any, OutputFieldTrace] | None = None,
+        channels: tuple[SLHChannel, ...] = (),
     ) -> None:
         self._backend = backend
+        self._channels: dict[str, SLHChannel] = {channel.key: channel for channel in channels}
+        self._collapse_flux_cache: dict[str, Any] = {}
         self.times = backend.array_module.asarray(solver_result.times, dtype=float)
         self.states = solver_result.states
         self._expect_data: dict[Any, ObservableTrace | list[ObservableTrace]] | None = observable_traces
@@ -202,6 +205,65 @@ class SimulationResult:
             raise KeyError(
                 f"No output for {label!r}. Available exposures: {sorted(self._output_data)}"
             ) from exc
+
+    # ------------------------------------------------------------------
+    # Collapse channels
+    # ------------------------------------------------------------------
+
+    @property
+    def collapse_channels(self) -> tuple[str, ...]:
+        """Return the resolved SLH channel keys accepted by :meth:`collapse_flux`.
+
+        Hidden channels use keys such as ``"hidden.q.thermal_emission"`` and
+        ``"hidden.r.internal_photon_loss"``. Channels exposed at external
+        planes use their exposure labels.
+        """
+        return tuple(self._channels)
+
+    def _channel_key(self, key: Any) -> str:
+        label = resolve_label(key)
+        if label in self._channels:
+            return label
+        matches = [name for name in self._channels if name.split("#")[0].partition(".")[2] == label]
+        if len(matches) == 1:
+            return matches[0]
+        detail = "matches several channels" if matches else "matches no channel"
+        raise KeyError(f"{label!r} {detail}. Available channels: {list(self._channels)}")
+
+    def collapse_flux(self, key: Any) -> Any:
+        """Return the cached jump rate ``<L†L>(t)`` for one resolved channel.
+
+        The rate is evaluated post-solve from stored states and has units of
+        ``1/ns``. ``key`` may be a resolved key from
+        :attr:`collapse_channels`, an exposure, or a
+        ``"<device>.<channel>"`` label that identifies one channel. Address a
+        port composed into a network through its exposure.
+
+        For an exposed plane, this rate equals ``raw_photon_flux`` only with
+        vacuum input. Dephasing and thermal-absorption channels can also have
+        nonzero jump rates, so this quantity alone is not an excitation-loss
+        rate.
+        """
+        name = self._channel_key(key)
+        if name not in self._collapse_flux_cache:
+            from quchip.engine.observables import collapse_number_operator
+
+            operator = collapse_number_operator(self._channels[name].coupling, self._backend, tag=f"flux:{name}")
+            flux = self._backend.expect_over_time(operator, self._stacked_states())
+            self._collapse_flux_cache[name] = self._backend.array_module.real(flux)
+        return self._collapse_flux_cache[name]
+
+    def collapse_integral(self, key: Any) -> Any:
+        """Return the cumulative expected jump count for one channel.
+
+        This is the cumulative trapezoid integral of :meth:`collapse_flux` on
+        the result grid. Its last entry is the expected number of jumps over
+        the whole solve.
+        """
+        xp = self._backend.array_module
+        flux = self.collapse_flux(key)
+        increments = 0.5 * (flux[1:] + flux[:-1]) * (self.times[1:] - self.times[:-1])
+        return xp.concatenate([xp.zeros((1,), dtype=increments.dtype), xp.cumsum(increments)])
 
     # ------------------------------------------------------------------
     # States, partial traces, overlaps
@@ -581,6 +643,25 @@ class SimulationBatchResult(BatchResult[SimulationResult]):
         values = self._reshape([r.population_array(device, level) for r in self._results])
         return self._reduce_time_axis(values, reduce)
 
+    def collapse_flux(self, key: Any, *, reduce: str | None = None) -> Any:
+        """Return one channel's jump-rate traces on the natural sweep grid.
+
+        ``reduce`` accepts ``None``, ``"last"``, ``"max"``, or ``"mean"``
+        and acts on the time axis.
+        """
+        values = self._reshape([r.collapse_flux(key) for r in self._results])
+        return self._reduce_time_axis(values, reduce)
+
+    def collapse_integral(self, key: Any, *, reduce: str | None = None) -> Any:
+        """Return one channel's cumulative jump counts on the natural sweep grid.
+
+        ``reduce`` accepts ``None``, ``"last"``, ``"max"``, or ``"mean"``
+        and acts on the time axis. ``reduce="last"`` returns the expected
+        number of jumps in each solve.
+        """
+        values = self._reshape([r.collapse_integral(key) for r in self._results])
+        return self._reduce_time_axis(values, reduce)
+
     def final_overlap_magnitudes(self, targets: list[Any] | tuple[Any, ...]) -> Any:
         """Return stacked final overlap magnitudes, one per ``(result, target)`` pair."""
         self._check_targets_len(targets)
@@ -626,6 +707,7 @@ def _wrap(
         device_info=[(d.label, d.computational) for d in chip.devices],
         observable_traces=observable_traces,
         output_traces=output_traces,
+        channels=engine_result.slh.channels,
     )
 
 

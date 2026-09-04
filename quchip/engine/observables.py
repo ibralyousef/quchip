@@ -38,7 +38,7 @@ import numpy as np
 
 from quchip.backend import Backend, SolverResult
 from quchip.chip.chip import Chip
-from quchip.engine.ir import ResolvedFrame
+from quchip.engine.ir import CanonicalOperator, ResolvedFrame
 from quchip.engine.reference import carrier_transfer, has_filter, time_shift
 from quchip.observables import OutputField, is_output_field
 from quchip.results.results import ObservableTrace, OutputFieldTrace
@@ -270,27 +270,28 @@ def _append_output_eops(
         )
     )
 
-    values = coupling.to_dense()
-    xp = backend.array_module
-    number = xp.conj(xp.swapaxes(values, -1, -2)) @ values
-    from quchip.engine.ir import CanonicalOperator
-
-    flat_ops.append(
-        backend.from_canonical_operator(
-            CanonicalOperator.from_dense(
-                number,
-                dims=coupling.dims,
-                basis=coupling.basis,
-                subsystem_labels=coupling.subsystem_labels,
-                tag=f"output_flux:{observable.exposure}",
-            )
-        )
-    )
+    flat_ops.append(collapse_number_operator(coupling, backend, tag=f"output_flux:{observable.exposure}"))
     meta.append(
         OutputMeta(
             key=observable.exposure,
             observable=observable,
             role="flux",
+        )
+    )
+
+
+def collapse_number_operator(coupling: CanonicalOperator, backend: Backend, *, tag: str) -> Any:
+    """Build the backend-native ``L†L`` operator used for collapse and output fluxes."""
+    values = coupling.to_dense()
+    xp = backend.array_module
+    number = xp.conj(xp.swapaxes(values, -1, -2)) @ values
+    return backend.from_canonical_operator(
+        CanonicalOperator.from_dense(
+            number,
+            dims=coupling.dims,
+            basis=coupling.basis,
+            subsystem_labels=coupling.subsystem_labels,
+            tag=tag,
         )
     )
 
