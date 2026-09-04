@@ -13,57 +13,63 @@ from quchip.utils.jax_utils import contains_tracer
 
 
 def _eigenpairs(matrix: Any, levels: int) -> tuple[Any, Any]:
+    """Return the lowest ``levels`` eigenpairs from a plain Hermitian eigensolve."""
     values, vectors = jnp.linalg.eigh(matrix)
     return values[:levels], vectors[:, :levels]
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(1,))
+@partial(jax.custom_jvp, nondiff_argnums=(1,))
 def _differentiable_eigenpairs(matrix: Any, levels: int) -> tuple[Any, Any]:
     return _eigenpairs(matrix, levels)
 
 
-def _lowest_eigenpairs(matrix: Any, levels: int) -> tuple[Any, Any]:
-    """Return the lowest ``levels`` eigenpairs without staging constant matrices.
+@_differentiable_eigenpairs.defjvp
+def _eigenpairs_jvp(
+    levels: int, primals: tuple[Any], tangents: tuple[Any]
+) -> tuple[tuple[Any, Any], tuple[Any, Any]]:
+    """Return first-order tangents for the retained Hermitian eigenpairs.
 
-    A ``custom_vjp`` call is always staged, so constant matrices use the plain
-    eigensolve and can finish inside ``jax.ensure_compile_time_eval``. Traced
-    matrices use the custom-gradient path.
+    The rule Hermitianizes ``dH`` and evaluates
+    ``dλ_i = <v_i|dH|v_i>`` and
+    ``dv_i = Σ_{j≠i} v_j <v_j|dH|v_i> / (λ_i − λ_j)`` over the full
+    eigensystem. Gaps at or below ``1e-9·max|λ|`` contribute zero; the nested
+    ``where`` also keeps the reciprocal off the masked branch. The diagonal
+    connection is zero, fixing the parallel-transport gauge
+    ``v_i† dv_i = 0``, and eigenvalue tangents are real.
+
+    The rule is linear in ``dH``, so JAX obtains reverse mode by transposition;
+    ``grad``, ``jacfwd``, and ``hessian`` work through traced device parameters.
+    An exact degeneracy uses a zero eigenvector connection instead of a NaN.
+    Second derivatives at a degeneracy remain undefined because the outer
+    derivative passes through the rule's unmasked ``eigh``.
+    """
+    (matrix,) = primals
+    (dmatrix,) = tangents
+    values, vectors = jnp.linalg.eigh(matrix)
+    retained = vectors[:, :levels]
+    hermitian = 0.5 * (dmatrix + dmatrix.conj().T)
+    overlaps = vectors.conj().T @ hermitian @ retained
+    gaps = values[None, :levels] - values[:, None]
+    tolerance = 1e-9 * jnp.max(jnp.abs(values))
+    resolved = jnp.abs(gaps) > tolerance
+    inverse_gaps = jnp.where(resolved, 1.0 / jnp.where(resolved, gaps, 1.0), 0.0)
+    dvalues = jnp.real(jnp.diagonal(overlaps))
+    dvectors = vectors @ (inverse_gaps * overlaps)
+    return (values[:levels], retained), (dvalues, dvectors)
+
+
+def _lowest_eigenpairs(matrix: Any, levels: int) -> tuple[Any, Any]:
+    """Return the lowest ``levels`` eigenpairs without staging a constant matrix.
+
+    A traced matrix uses :func:`_differentiable_eigenpairs`, which supports
+    forward- and reverse-mode differentiation through device parameters. A
+    constant matrix uses the plain eigensolve so
+    ``jax.ensure_compile_time_eval`` can finish inside ``jit``; a
+    custom-derivative call would always be staged.
     """
     if contains_tracer(matrix):
         return _differentiable_eigenpairs(matrix, levels)
     return _eigenpairs(matrix, levels)
-
-
-def _lowest_eigenpairs_fwd(matrix: Any, levels: int) -> tuple[tuple[Any, Any], tuple[Any, Any]]:
-    values, vectors = jnp.linalg.eigh(matrix)
-    return (values[:levels], vectors[:, :levels]), (values, vectors)
-
-
-def _lowest_eigenpairs_bwd(
-    levels: int,
-    residuals: tuple[Any, Any],
-    cotangents: tuple[Any, Any],
-) -> tuple[Any]:
-    values, vectors = residuals
-    values_bar, vectors_bar = cotangents
-    retained = vectors[:, :levels]
-
-    gradient = (retained * values_bar[None, :]) @ retained.conj().T
-    gaps = values[None, :levels] - values[:, None]
-    tolerance = 1e-9 * jnp.max(jnp.abs(values))
-    resolved = jnp.abs(gaps) > tolerance
-    inverse_gaps = jnp.where(
-        resolved,
-        1.0 / jnp.where(resolved, gaps, 1.0),
-        0.0,
-    )
-    overlaps = vectors.conj().T @ vectors_bar
-    gradient = gradient + vectors @ (inverse_gaps * overlaps) @ retained.conj().T
-    gradient = 0.5 * (gradient + gradient.conj().T)
-    return (gradient.astype(vectors.dtype),)
-
-
-_differentiable_eigenpairs.defvjp(_lowest_eigenpairs_fwd, _lowest_eigenpairs_bwd)
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,7 @@ This file records notable user-visible changes to quchip.
 
 - Fixed solver selection so density-matrix initial states use `mesolve` even without collapse terms. QuTiP and dynamiqs now reject a density matrix passed explicitly to `sesolve`.
 - QuTiP no longer selects `method="diag"` automatically when the resolved SLH Hamiltonian contains network-generated static terms, avoiding diagonal-propagator failures for cascaded degenerate modes. Solver failure messages now include the underlying exception details.
+- Replaced the local eigensolver's custom VJP with a custom JVP. `jax.jacfwd` and `jax.hessian` now work through traced device parameters, while `jax.grad` is unchanged; exact degeneracies mask the eigenvector connection to zero, and second derivatives through a degeneracy remain undefined.
 
 ### Network and state diagnostics
 
