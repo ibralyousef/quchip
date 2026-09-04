@@ -202,6 +202,14 @@ L = L2 + S2 L1
 H = H1 + H2 + Im(L2^dagger S2 L1).
 ```
 
+For two equal-rate ports on one device,
+`network.cascade(near, network.phase_shift("phi", phase=phi), far)` gives an
+effective channel coefficient with magnitude squared `2γ(1 + cos φ)` and adds
+`+γ sin φ · a†a` to `H`. Here `γ` is angular, in rad/ns, so the Lamb shift is
+`+γ sin φ / 2π` GHz. Entering the propagation phase as
+`φ = 2π f τ = ωτ`, with `f` in GHz and `τ` in ns, matches the
+`Δ = γ sin φ` convention of Kockum et al., Phys. Rev. A 90, 013837 (2014).
+
 `port.side` and `component.side(k)` each select one physical connector, pairing
 that side's input and output terminals. `network.link(...)` cables consecutive
 sides in both directions; each cable compiles to two directed terminal
@@ -230,6 +238,13 @@ adjacent reference sections move the incident and reported reference planes;
 the compiler peels them from each leg before forming the instantaneous `S`,
 `L`, and `H`. A section traversed on a reflection line contributes once inbound
 and once outbound. A reference section not adjacent to an exposure raises.
+`network.delay(...)` is a reference-plane shift, not retardation. It changes
+fields at exposure planes but adds no memory to the dynamical SLH core, which
+is Markovian throughout; the propagation phase between giant-atom coupling
+points is entered with `network.phase_shift(...)` as above. Retarded feedback, linewidth-scale variation of `γ(ω)` or
+the phase across a resonance, and the non-Markovian giant-atom regime are out
+of scope.
+
 Static composition of several quantum ports requires a common rotating-frame
 frequency. Different local carriers would make both the collective `L` and
 `Im(L2^dagger S2 L1)` explicitly time dependent; until dynamic collapse

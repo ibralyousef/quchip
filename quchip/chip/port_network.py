@@ -540,6 +540,9 @@ class PortNetwork:
     def delay(self, label: str, *, duration: Any) -> SLHComponent:
         """Add a two-sided reference section with duration ``duration`` ns.
 
+        The section shifts fields at exposure planes but does not introduce
+        retardation or memory into the Markovian dynamics.
+
         Place it with :meth:`link` or :meth:`connect` like any other component.
         The compiler peels adjacent runs from each exposure leg, so the section
         never enters Markovian ``S``, ``L``, or ``H``. Every reference section must

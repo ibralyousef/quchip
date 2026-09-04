@@ -17,7 +17,13 @@ if TYPE_CHECKING:
 
 
 class Port:
-    """One accessible Markovian channel with a dimensionless coupling operator."""
+    """One accessible Markovian channel with a dimensionless coupling operator.
+
+    ``rate``, ``external_quality_factor``, and ``phase`` may be traced or swept
+    between solves; each remains constant within a solve. Model shaped
+    emission with an explicit buffer or coupler device holding a static ``Port``
+    and a modulated Hamiltonian coupling.
+    """
 
     _type_prefix = "port"
     _parameter_names = ("rate", "external_quality_factor", "phase")

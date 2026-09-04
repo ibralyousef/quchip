@@ -1611,6 +1611,9 @@ class Chip:
         Accepts a string shorthand (e.g. ``"eg1"``) when
         :meth:`set_state_order` has been called.
 
+        If the requested label's assignment overlap is low, this method
+        warns and names :meth:`bare_state` as the product-state alternative.
+
         Safe inside ``jax.jit``/``grad``/``vmap``: under tracing the
         assigned eigenvector column is selected through the
         :func:`~quchip.chip.dressing.label_eigensystem` array kernel, so

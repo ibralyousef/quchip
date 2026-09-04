@@ -5,11 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 import json
+import warnings
 
 import numpy as np
 import pytest
 
 from quchip import Chip, Port, PortNetwork, QuantumSequence, Resonator
+from quchip.chip.couplings import Capacitive
 
 
 def _lowering(levels: int) -> np.ndarray:
@@ -870,8 +872,7 @@ def test_directional_component_side_error_is_actionable() -> None:
         network.link(network.port("p", target=Resonator(freq=5.0, levels=2, label="r"), rate=0.02), splitter)
 
 
-def test_cascaded_degenerate_modes_solve_and_transfer_the_excitation() -> None:
-    """Pitch-and-catch between two identical modes: n_b peaks at 4/e^2 at t = 2/kappa."""
+def _cascaded_pair() -> Chip:
     first = Resonator(freq=5.0, levels=2, label="a")
     second = Resonator(freq=5.0, levels=2, label="b")
     network = PortNetwork(label="line")
@@ -879,12 +880,17 @@ def test_cascaded_degenerate_modes_solve_and_transfer_the_excitation() -> None:
     port_b = network.port("b_port", target=second, rate=0.05)
     network.cascade(port_a, port_b)
     network.expose("feedline", input=port_a.input, output=port_b.output)
-    chip = Chip([first, second], port_network=network, frame=5.0)
+    return Chip([first, second], port_network=network, frame=5.0)
+
+
+def test_cascaded_degenerate_modes_solve_and_transfer_the_excitation() -> None:
+    """Pitch-and-catch between two identical modes: n_b peaks at 4/e^2 at t = 2/kappa."""
+    chip = _cascaded_pair()
     times = np.linspace(0.0, 120.0, 241)
     result = QuantumSequence(chip).simulate(
         times,
-        e_ops={"b": second.number_operator()},
-        initial_state=chip.bare_state({first: 1, second: 0}),
+        e_ops={"b": chip["b"].number_operator()},
+        initial_state=chip.bare_state({"a": 1, "b": 0}),
         partition=False,
         check_truncation=False,
     )
@@ -892,3 +898,63 @@ def test_cascaded_degenerate_modes_solve_and_transfer_the_excitation() -> None:
     np.testing.assert_allclose(occupation[np.argmin(np.abs(times - 40.0))], 4.0 / np.e**2, atol=2e-3)
     assert times[np.argmax(occupation)] == pytest.approx(40.0, abs=1.0)
 
+
+def test_state_warns_when_the_cascade_hybridizes_the_requested_label() -> None:
+    """Degenerate cascaded modes dress into a 50/50 pair; state() says so and points to bare_state."""
+    chip = _cascaded_pair()
+    with pytest.warns(UserWarning, match=r"assignment overlap 0\.500.*bare_state"):
+        dressed = chip.state({"a": 1, "b": 0})
+    index = np.ravel_multi_index((1, 0), (2, 2))
+    populations = np.abs(np.asarray(chip.backend.to_array(dressed)).ravel()) ** 2
+    assert populations[index] == pytest.approx(0.5, abs=1e-6)
+    bare = np.abs(np.asarray(chip.backend.to_array(chip.bare_state({"a": 1, "b": 0}))).ravel()) ** 2
+    assert bare[index] == pytest.approx(1.0)
+
+
+def test_state_stays_quiet_for_well_separated_labels() -> None:
+    """A weakly coupled, detuned pair keeps every label above the warning overlap."""
+    first = Resonator(freq=5.0, levels=2, label="a")
+    second = Resonator(freq=6.0, levels=2, label="b")
+    chip = Chip([first, second], couplings=[Capacitive(first, second, g=0.01)])
+    assert chip.dress().assignment_overlaps[(1, 0)] > 0.9
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        chip.state({"a": 1, "b": 0})
+
+
+def test_two_port_giant_atom_reproduces_kockum_rates_and_lamb_shift() -> None:
+    """Two coupling points a phase phi apart: Gamma = 2 gamma (1 + cos phi) and Delta = +gamma sin phi."""
+    gamma = 0.02
+    for phi in (np.pi / 2, -np.pi / 2, np.pi):
+        atom = Resonator(freq=5.0, levels=2, label="q")
+        network = PortNetwork(label="wg")
+        near = network.port("near", target=atom, rate=gamma)
+        far = network.port("far", target=atom, rate=gamma)
+        network.cascade(near, network.phase_shift("phi", phase=phi), far)
+        network.expose("feedline", input=near.input, output=far.output)
+        slh = Chip([atom], port_network=network, frame=5.0).resolve().slh
+        coupling = slh.L[0].to_dense()
+        np.testing.assert_allclose(abs(coupling[0, 1]) ** 2, 2 * gamma * (1 + np.cos(phi)), atol=1e-12)
+        generated = [term for term in slh.H.static_terms if term.origin == "network"]
+        assert bool(generated) is not bool(np.isclose(np.sin(phi), 0.0))  # a vanishing cross term is dropped
+        shift = sum(term.operator.to_dense()[1, 1].real for term in generated)
+        np.testing.assert_allclose(shift, gamma * np.sin(phi), atol=1e-12)
+
+
+def test_connecting_a_network_invalidates_the_dressed_cache() -> None:
+    """Warm dressing before a cascade is attached, then the assigned states must follow the new terms."""
+    first = Resonator(freq=5.0, levels=2, label="a")
+    second = Resonator(freq=5.0, levels=2, label="b")
+    chip = Chip([first, second], frame=5.0)
+    assert chip.dress().assignment_overlaps[(1, 0)] == pytest.approx(1.0)
+
+    network = PortNetwork(label="line")
+    port_a = network.port("a_port", target=first, rate=0.05)
+    port_b = network.port("b_port", target=second, rate=0.05)
+    network.cascade(port_a, port_b)
+    network.expose("feedline", input=port_a.input, output=port_b.output)
+    chip.connect_network(network)
+
+    assert chip.dress().assignment_overlaps[(1, 0)] == pytest.approx(0.5, abs=1e-6)
+    with pytest.warns(UserWarning, match="assignment overlap 0.500"):
+        chip.state({"a": 1, "b": 0})

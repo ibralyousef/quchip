@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from quchip.engine.ir import EngineResult
 
 
+_STATE_OVERLAP_WARNING = 0.9
 _DRESS_TRACING_ERROR = (
     "Dressing returns a concrete dict-keyed DressedResult and is not "
     "traceable under jax.jit/grad/vmap. Use Chip.energy(), Chip.freq(), "
@@ -344,8 +345,31 @@ class ChipAnalysis:
         self._bare_labels_signature: tuple[int, ...] | None = None
 
     def _analysis_signature(self) -> tuple[Any, ...]:
-        """Hashable fingerprint covering every structural input to dressing."""
+        """Hashable fingerprint covering every structural input to dressing.
+
+        Ports and the port network enter because cascades add coherent terms to
+        the dressed Hamiltonian. Traced values are keyed by identity; a traced
+        result is never cached anyway.
+        """
+        from quchip.chip.chip import _operator_cache_value
+
         chip = self._chip
+
+        def scalar(value: Any) -> Any:
+            concrete = maybe_concrete_scalar(value)
+            return ("traced", id(value)) if concrete is None else concrete
+
+        def operator(value: Any) -> Any:
+            try:
+                return _operator_cache_value(value)
+            except ValueError:
+                return ("traced", id(value))
+
+        network = chip.port_network
+        try:
+            network_key = None if network is None else network.fingerprint()
+        except ValueError:
+            network_key = ("traced", id(network))
         return (
             f"{type(chip.backend).__module__}.{type(chip.backend).__qualname__}",
             chip.basis,
@@ -359,6 +383,16 @@ class ChipAnalysis:
                 )
                 for coupling in chip.couplings
             ),
+            tuple(
+                (
+                    port.label,
+                    tuple(port.resolve_targets(chip)),
+                    tuple((name, scalar(value)) for name, value in port.parameter_values().items()),
+                    operator(port.operator),
+                )
+                for port in chip.ports
+            ),
+            network_key,
         )
 
     def engine_result(self, *, _local_resolution: Any | None = None) -> EngineResult:
@@ -595,7 +629,9 @@ class ChipAnalysis:
     ) -> DressedResult:
         """Diagonalize the lab-frame Hamiltonian and assign bare-state labels.
 
-        Assignment goes through the ``label_eigensystem`` kernel
+        Dressing keeps network-generated Hamiltonian terms, so the assigned
+        eigenstates match the solver Hamiltonian; degenerate cascaded modes
+        therefore dress into superpositions. Assignment goes through the ``label_eigensystem`` kernel
         (:mod:`quchip.chip.dressing`) with ``assign_rowwise_greedy`` —
         confidence-ordered row-greedy matching as a pure ``lax.scan``,
         ``O(D**2)`` in the Hilbert dimension versus the ``O(D**3)`` global
@@ -701,7 +737,8 @@ class ChipAnalysis:
     def _dressed_state(self, **device_states: int) -> Any:
         """Dressed eigenstate (as a backend ket) for a bare-state label.
 
-        Eager: the cached dict view (with hybridization warnings).
+        Eager: the cached dict view (with the dress-time hybridization
+        warning and a per-label low-overlap warning).
         Traced: selects the assigned eigenvector column straight through
         the :func:`label_eigensystem` array kernel —
         ``evecs[:, labeling.indices[bare_idx]]`` — so dressed initial
@@ -725,6 +762,16 @@ class ChipAnalysis:
             raise KeyError(
                 f"State label {label_t} not found in state map. Available (first 10): {available}"
             ) from None
+        overlap = dressed.assignment_overlaps[label_t]
+        if overlap < _STATE_OVERLAP_WARNING:
+            # Hops: _dressed_state -> ChipAnalysis.state -> states.state -> Chip.state -> caller.
+            warnings.warn(
+                f"Dressed state label {label_t} has assignment overlap {overlap:.3f} "
+                f"(< {_STATE_OVERLAP_WARNING:.3f}); chip.state() returns the assigned dressed "
+                "eigenstate. Use chip.bare_state(...) for the product state.",
+                UserWarning,
+                stacklevel=5,
+            )
         return dressed.eigenstates[eigen_idx]
 
     def _dressed_frequencies(
@@ -1265,6 +1312,10 @@ class ChipAnalysis:
         through :func:`~quchip.chip.states.normalize_device_state_mapping`
         when :meth:`Chip.set_state_order` has been called. Use
         :meth:`Chip.bare_state` for arbitrary kets.
+
+        If the requested label's assignment overlap is low, this method
+        warns and names :meth:`Chip.bare_state` as the product-state
+        alternative.
 
         Safe inside ``jax.jit``/``grad``/``vmap``: under tracing the
         eigenvector column is selected through the array kernel, so a
