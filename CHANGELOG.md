@@ -4,6 +4,11 @@ This file records notable user-visible changes to quchip.
 
 ## [Unreleased]
 
+### Fixes
+
+- Fixed solver selection so density-matrix initial states use `mesolve` even without collapse terms. QuTiP and dynamiqs now reject a density matrix passed explicitly to `sesolve`.
+- QuTiP no longer selects `method="diag"` automatically when the resolved SLH Hamiltonian contains network-generated static terms, avoiding diagonal-propagator failures for cascaded degenerate modes. Solver failure messages now include the underlying exception details.
+
 ### Frames
 
 - Added opt-in `frame="auto"`, which chooses per-device frame frequencies from retained couplings and delivered scheduled signals. Drive tones include control gain, attenuation, delay, and crosstalk; coherent-input tones include network scattering and the `2π` conversion to ordinary GHz. Frequencies, pins, clusters, and residual oscillations are available through `resolved_frame.plan`, `chip.describe()`, and `sequence.describe()`.

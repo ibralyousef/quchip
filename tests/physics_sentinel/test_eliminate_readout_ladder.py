@@ -110,10 +110,8 @@ def test_reduced_readout_does_not_force_density_matrix_solve():
 
     assert problem_full.engine_result.collapse_terms == ()
     assert problem_reduced.engine_result.collapse_terms == ()
-    chosen_full = problem_full.solver or ("mesolve" if problem_full.engine_result.collapse_terms else "sesolve")
-    chosen_reduced = problem_reduced.solver or (
-        "mesolve" if problem_reduced.engine_result.collapse_terms else "sesolve"
-    )
+    chosen_full = problem_full.solver_name(problem_full.chip.backend)
+    chosen_reduced = problem_reduced.solver_name(problem_reduced.chip.backend)
     assert chosen_full == chosen_reduced == "sesolve"
 
 

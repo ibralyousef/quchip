@@ -415,11 +415,13 @@ class DynamiqsBackend(Backend):
         """Return a density matrix; pass through if *state* is already one."""
         if not self.is_ket(state):
             return state
-        return state @ dq.dag(state)
+        column = self.coerce_state(state)
+        return column @ dq.dag(column)
 
     def is_ket(self, state: State) -> bool:
-        """Return whether *state* is a column-vector ket rather than a density matrix."""
-        return len(state.shape) == 2 and state.shape[1] == 1
+        """Return whether *state* is a ket (flat or column vector) rather than a density matrix."""
+        shape = tuple(state.shape)
+        return len(shape) == 1 or (len(shape) == 2 and shape[1] == 1)
 
     def is_native_state(self, state: Any) -> bool:
         """Return whether *state* is a Dynamiqs quantum array."""
@@ -501,6 +503,9 @@ class DynamiqsBackend(Backend):
         """
         if hasattr(state, "full"):  # qutip.Qobj duck-type; no qutip import needed
             return dq.asqarray(state, dims=dims)
+        if len(tuple(state.shape)) == 1:  # flat native ket: dynamiqs solvers need a column
+            column = jnp.asarray(state).reshape(-1, 1)
+            return dq.asqarray(column, dims=dims) if dims else column
         return state
 
     # ------------------------------------------------------------------
@@ -1063,7 +1068,10 @@ class DynamiqsBackend(Backend):
         reference = batch.problems[0]
         tlist_arr = self.array_module.asarray(batch.tlist, dtype=float)
         c_ops = self._stack_batch_collapse_operators(batch)
-        solver_name = reference.solver or ("mesolve" if c_ops else "sesolve")
+        solver_names = {problem.solver_name(self) for problem in batch.problems}
+        if len(solver_names) != 1:
+            raise ValueError("Every SolveBatch point must resolve to the same solver.")
+        solver_name = solver_names.pop()
         opts = self._merge_options(reference.options, metadata=prepared.metadata, tlist=tlist_arr)
         e_ops, point_e_ops = self._batch_e_ops(batch)
         requested_store_states = bool(opts.get("store_states", True))

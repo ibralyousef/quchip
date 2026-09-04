@@ -868,3 +868,27 @@ def test_directional_component_side_error_is_actionable() -> None:
         splitter.side("left")
     with pytest.raises(ValueError, match="directional"):
         network.link(network.port("p", target=Resonator(freq=5.0, levels=2, label="r"), rate=0.02), splitter)
+
+
+def test_cascaded_degenerate_modes_solve_and_transfer_the_excitation() -> None:
+    """Pitch-and-catch between two identical modes: n_b peaks at 4/e^2 at t = 2/kappa."""
+    first = Resonator(freq=5.0, levels=2, label="a")
+    second = Resonator(freq=5.0, levels=2, label="b")
+    network = PortNetwork(label="line")
+    port_a = network.port("a_port", target=first, rate=0.05)
+    port_b = network.port("b_port", target=second, rate=0.05)
+    network.cascade(port_a, port_b)
+    network.expose("feedline", input=port_a.input, output=port_b.output)
+    chip = Chip([first, second], port_network=network, frame=5.0)
+    times = np.linspace(0.0, 120.0, 241)
+    result = QuantumSequence(chip).simulate(
+        times,
+        e_ops={"b": second.number_operator()},
+        initial_state=chip.bare_state({first: 1, second: 0}),
+        partition=False,
+        check_truncation=False,
+    )
+    occupation = np.asarray(result.expect("b")).real
+    np.testing.assert_allclose(occupation[np.argmin(np.abs(times - 40.0))], 4.0 / np.e**2, atol=2e-3)
+    assert times[np.argmax(occupation)] == pytest.approx(40.0, abs=1.0)
+

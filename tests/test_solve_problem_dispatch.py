@@ -7,6 +7,8 @@ Chip.solve_many() produce correct results that match the
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import numpy.testing as npt
 import pytest
@@ -800,3 +802,71 @@ class TestChipSolveMany:
 
         results = chip.solve_many([problem], progress=False)
         assert len(results) == 1
+
+
+class TestSolverSelection:
+    """The solver follows the state as well as the collapse terms."""
+
+    @staticmethod
+    def _mixed_ancilla_chip() -> tuple[Chip, Any]:
+        from quchip import Resonator
+        from quchip.chip.couplings import CrossKerr
+
+        qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=2, label="q")
+        ancilla = Resonator(freq=6.0, levels=2, label="a")
+        chip = Chip([qubit, ancilla], couplings=[CrossKerr(qubit, ancilla, chi=0.01)], frame="rotating")
+        ground = chip.backend.as_density_matrix(chip.bare_state({qubit: 1, ancilla: 0}))
+        excited = chip.backend.as_density_matrix(chip.bare_state({qubit: 1, ancilla: 1}))
+        return chip, 0.5 * ground + 0.5 * excited
+
+    def test_density_matrix_without_loss_runs_mesolve(self):
+        """A mixed initial state must evolve as U rho U^dagger even without collapse terms."""
+        chip, rho = self._mixed_ancilla_chip()
+        result = QuantumSequence(chip).simulate(
+            np.linspace(0.0, 40.0, 41), initial_state=rho, partition=False, check_truncation=False
+        )
+        final = chip.backend.to_array(result.final_state)
+        assert result.solver == "mesolve"
+        npt.assert_allclose(np.trace(final), 1.0, atol=1e-8)
+        npt.assert_allclose(final, final.conj().T, atol=1e-8)
+        npt.assert_allclose(np.trace(final @ final).real, 0.5, atol=1e-8)
+
+    def test_foreign_array_states_route_by_shape(self):
+        """A problem carrying a native array state still routes before the solve boundary coerces it."""
+        from dataclasses import replace
+
+        chip, rho = self._mixed_ancilla_chip()
+        problem = build_problem(chip, [], np.linspace(0.0, 4.0, 5))
+        ket = np.asarray(chip.backend.to_array(problem.initial_state))
+        assert replace(problem, initial_state=ket).solver_name(chip.backend) == "sesolve"
+        flat = replace(problem, initial_state=ket.reshape(-1), solver="sesolve")
+        assert flat.solver_name(chip.backend) == "sesolve"
+        assert solve_problem(flat).solver == "sesolve"
+        assert chip.backend.as_density_matrix(ket.reshape(-1)).shape == (4, 4)
+        mixed = replace(problem, initial_state=np.asarray(chip.backend.to_array(rho)))
+        assert mixed.solver_name(chip.backend) == "mesolve"
+        assert solve_problem(mixed).solver == "mesolve"
+
+    def test_flat_kets_solve_on_dynamiqs(self):
+        """dynamiqs promotes a flat native ket to a column before its solvers see it."""
+        pytest.importorskip("dynamiqs")
+        from dataclasses import replace
+
+        qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
+        chip = Chip([qubit], frame="rotating", backend="dynamiqs")
+        problem = build_problem(chip, [], np.linspace(0.0, 4.0, 5))
+        flat = np.asarray(chip.backend.to_array(problem.initial_state)).reshape(-1)
+        assert chip.backend.is_ket(flat)
+        assert np.asarray(chip.backend.to_array(chip.backend.as_density_matrix(flat))).shape == (3, 3)
+        result = solve_problem(replace(problem, initial_state=flat, solver="sesolve"))
+        assert result.solver == "sesolve"
+        npt.assert_allclose(np.asarray(result.population("q", 0)), 1.0, atol=1e-8)
+
+    def test_explicit_sesolve_rejects_a_density_matrix(self):
+        chip, rho = self._mixed_ancilla_chip()
+        with pytest.raises(RuntimeError) as excinfo:
+            QuantumSequence(chip).simulate(
+                np.linspace(0.0, 4.0, 5), initial_state=rho, solver="sesolve", partition=False
+            )
+        assert isinstance(excinfo.value.__cause__, ValueError)
+        assert "sesolve evolves kets only" in str(excinfo.value.__cause__)

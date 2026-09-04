@@ -449,7 +449,7 @@ def solve_problem_list(
 
     def _skeleton_prefilter_key(problem: SolveProblem) -> tuple:
         desc = problem.engine_result
-        solver_name = problem.solver or ("mesolve" if desc.collapse_terms else "sesolve")
+        solver_name = problem.solver_name(problem.chip.backend)
         return (
             solver_name,
             id(desc.static_terms),

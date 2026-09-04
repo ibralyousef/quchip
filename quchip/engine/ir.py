@@ -1110,6 +1110,11 @@ class ResolvedSLH:
     channels: tuple[SLHChannel, ...] = ()
     support: Any = None
 
+    @property
+    def has_network_hamiltonian(self) -> bool:
+        """Whether connection resolution generated coherent Hamiltonian terms."""
+        return any(term.origin == "network" for term in self.hamiltonian.static_terms)
+
     def __post_init__(self) -> None:
         size = len(self.channels)
         support = (
@@ -1716,6 +1721,20 @@ class SolveProblem:
     resolved_frame: Any = None
     solver: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
+
+    def solver_name(self, backend: Any) -> str:
+        """Return the selected solver name.
+
+        An explicit ``solver`` takes precedence, but ``sesolve`` is rejected for a
+        density matrix. Otherwise select ``sesolve`` only for a ket with no collapse
+        terms; select ``mesolve`` for a density matrix or any problem with collapse terms.
+        """
+        is_ket = backend.is_ket(self.initial_state)
+        if self.solver is not None:
+            if self.solver == "sesolve" and not is_ket:
+                raise ValueError("sesolve evolves kets only; a density matrix needs mesolve.")
+            return self.solver
+        return "sesolve" if is_ket and not self.engine_result.collapse_terms else "mesolve"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "options", _reject_backend_option(self.options, cls_name="SolveProblem"))

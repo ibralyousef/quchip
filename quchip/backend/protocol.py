@@ -539,13 +539,13 @@ class Backend(ABC):
         """Return a density matrix; pass through if *state* is already one."""
         if not self.is_ket(state):
             return state
-        arr = np.asarray(self.to_array(state), dtype=complex)
+        arr = np.asarray(self.to_array(state), dtype=complex).reshape(-1, 1)
         return self.from_array(arr @ np.conj(arr).T)
 
     def is_ket(self, state: State) -> bool:
-        """Return whether *state* is a column vector (ket) rather than a density matrix."""
+        """Return whether *state* is a ket (flat or column vector) rather than a density matrix."""
         arr = np.asarray(self.to_array(state), dtype=complex)
-        return arr.ndim == 2 and arr.shape[1] == 1
+        return arr.ndim == 1 or (arr.ndim == 2 and arr.shape[1] == 1)
 
     def as_density_matrix(self, state: State) -> State:
         """Promote a ket to its density matrix; pass a density matrix through unchanged."""
@@ -699,8 +699,9 @@ class Backend(ABC):
     def solve_problem(self, problem: "SolveProblem") -> SolverResult:
         """Lower and solve a :class:`SolveProblem` — the single-element entry point.
 
-        Picks ``mesolve`` when collapse operators are present (open system)
-        or ``sesolve`` otherwise, unless ``problem.solver`` forces a choice.
+        Delegates to :meth:`SolveProblem.solver_name`: ``sesolve`` only for a ket
+        with no collapse operators, ``mesolve`` otherwise, unless ``problem.solver``
+        forces a choice.
         """
         prepared = self.prepare_hamiltonian(problem.engine_result, problem.tlist)
         tlist_arr, c_ops, solver, opts, e_ops_arg = self._resolve_solve_config(
@@ -831,7 +832,7 @@ class Backend(ABC):
             rhs = prepared.rhs if isinstance(prepared, VmappedBatch) else prepared.rhs_list[idx]
             tlist_arr = self.array_module.asarray(problem.tlist, dtype=float)
             c_ops = self._collapse_operators(problem.engine_result)
-            solver_name = problem.solver or ("mesolve" if c_ops else "sesolve")
+            solver_name = problem.solver_name(self)
             solver_names.append(solver_name)
             opts = self._resolve_problem_options(
                 problem,
@@ -948,8 +949,9 @@ class Backend(ABC):
         """Resolve one problem's backend-independent solve configuration.
 
         Coerces the save grid (via :attr:`array_module`), assembles collapse
-        operators, selects the solver (``mesolve`` when collapse operators are
-        present, unless ``problem.solver`` forces a choice), and merges options
+        operators, selects the solver (``mesolve`` for a density matrix or when
+        collapse operators are present, unless ``problem.solver`` forces a
+        choice), and merges options
         through the single boundary. Returns
         ``(tlist_arr, c_ops, solver_name, opts, e_ops_arg)``; each backend
         contributes only its RHS-sourcing + native-solve dispatch tail.
@@ -960,7 +962,7 @@ class Backend(ABC):
         engine_result = problem.engine_result
         tlist_arr = self.array_module.asarray(problem.tlist, dtype=float)
         c_ops = self._collapse_operators(engine_result)
-        solver_name = problem.solver or ("mesolve" if c_ops else "sesolve")
+        solver_name = problem.solver_name(self)
         opts = self._resolve_problem_options(
             problem,
             metadata=prepared.metadata,

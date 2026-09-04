@@ -156,8 +156,8 @@ def build_problem(
     tlist : array_like
         Solver time grid in ns.
     solver : {"sesolve", "mesolve"}, optional
-        Solver selection; ``None`` auto-selects ``mesolve`` when collapse
-        operators are present, else ``sesolve``.
+        Solver selection. ``None`` selects ``sesolve`` only for a ket with no
+        collapse terms; otherwise it selects ``mesolve``.
     options : dict, optional
         Backend solver options. Must not contain a ``"backend"`` key
         (backend selection is chip-owned).
@@ -250,10 +250,10 @@ def simulate(
     """Build a :class:`SolveProblem`, dispatch it, and wrap the solver output.
 
     Parameters mirror :func:`build_problem`. ``solver`` is ``"sesolve"``
-    or ``"mesolve"``; ``None`` auto-selects ``mesolve`` when collapse
-    operators exist. ``e_ops`` is dict-form, keyed by device label (or
-    a 2-tuple of labels for two-body observables), and favors object
-    references via :func:`~quchip.utils.labeling.resolve_label`. The
+    or ``"mesolve"``; ``None`` selects ``sesolve`` only for a ket with no
+    collapse terms, and otherwise selects ``mesolve``. ``e_ops`` is dict-form,
+    keyed by device label (or a 2-tuple of labels for two-body observables),
+    and favors object references via :func:`~quchip.utils.labeling.resolve_label`. The
     Hilbert-truncation safety net is inherited from :func:`solve_problem`;
     ``check_truncation`` / ``truncation_threshold`` are threaded down.
 
@@ -267,8 +267,8 @@ def simulate(
     tlist : array_like
         Solver time grid in ns.
     solver : {"sesolve", "mesolve"}, optional
-        Solver selection; ``None`` auto-selects ``mesolve`` when collapse
-        operators are present, else ``sesolve``.
+        Solver selection. ``None`` selects ``sesolve`` only for a ket with no
+        collapse terms; otherwise it selects ``mesolve``.
     options : dict, optional
         Backend solver options. Must not contain a ``"backend"`` key
         (backend selection is chip-owned).
@@ -352,9 +352,6 @@ def simulate(
         initial_state=initial_state,
         approximation=approximation,
     )
-    collapse_terms = problem.engine_result.collapse_terms
-    chosen_solver = problem.solver or ("mesolve" if collapse_terms else "sesolve")
-
     try:
         return solve_problem(
             problem,
@@ -362,12 +359,14 @@ def simulate(
             truncation_threshold=truncation_threshold,
         )
     except Exception as e:
+        chosen_solver = problem.solver or "auto"
+        collapse_terms = problem.engine_result.collapse_terms
         tlist_arr = chip.backend.array_module.asarray(problem.tlist, dtype=float)
         raise RuntimeError(
             f"Solver '{chosen_solver}' failed. "
             f"Devices: {[d.label for d in chip.devices]}, "
             f"time: {float(tlist_arr[0]):.1f}-{float(tlist_arr[-1]):.1f} ns, "
-            f"collapse terms: {len(collapse_terms)}."
+            f"collapse terms: {len(collapse_terms)}. Cause: {type(e).__name__}: {e}"
         ) from e
 
 

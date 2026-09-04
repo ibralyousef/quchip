@@ -650,13 +650,12 @@ class QuTiPBackend(Backend):
 
     def state_to_dm(self, state: State) -> State:
         """Return a density matrix; pass through if *state* is already one."""
-        if isinstance(state, Qobj) and not state.isket:
-            return state
-        return qutip.ket2dm(state)
+        state = self.coerce_state(state)
+        return state if not state.isket else qutip.ket2dm(state)
 
     def is_ket(self, state: State) -> bool:
-        """Return whether *state* is a ket rather than a density matrix (``Qobj.isket``)."""
-        return state.isket
+        """Return whether *state* is a ket rather than a density matrix; foreign arrays go by shape."""
+        return state.isket if isinstance(state, Qobj) else super().is_ket(state)
 
     def is_native_state(self, state: Any) -> bool:
         """Return whether *state* is a QuTiP quantum object."""
@@ -735,7 +734,13 @@ class QuTiPBackend(Backend):
                 )
             return resolved
 
-        if explicit_method is not None or engine_result.dynamic_terms:
+        # Cascade-generated terms can leave a degenerate Liouvillian non-diagonalizable,
+        # so this reads slh.H (the resolved model), not the drive-augmented static terms.
+        if (
+            explicit_method is not None
+            or engine_result.dynamic_terms
+            or engine_result.slh.has_network_hamiltonian
+        ):
             return resolved
 
         dimension = math.prod(engine_result.dims)
@@ -1156,7 +1161,7 @@ class QuTiPBackend(Backend):
         for index, problem in enumerate(batch.problems):
             engine_result = problem.engine_result
             c_ops = self._collapse_operators(engine_result)
-            solver_name = problem.solver or ("mesolve" if c_ops else "sesolve")
+            solver_name = problem.solver_name(self)
             opts = self._resolve_problem_options(
                 problem,
                 metadata=engine_result.metadata,

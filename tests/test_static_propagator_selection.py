@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from quchip import ChargeDrive, Chip, DuffingTransmon, QuantumSequence, Square
+from quchip import ChargeDrive, Chip, DuffingTransmon, PortNetwork, QuantumSequence, Resonator, Square
 from quchip.engine import build_problem
 
 
@@ -165,3 +165,21 @@ def test_dynamiqs_static_problem_retains_adaptive_integrator() -> None:
 
     assert "method" not in options
     assert "max_steps" in options
+
+
+def test_network_generated_static_terms_keep_the_adaptive_integrator() -> None:
+    """Cascade-generated static terms can defeat diagonalization, so the adaptive integrator stays."""
+    first = Resonator(freq=5.0, levels=2, label="a")
+    second = Resonator(freq=5.0, levels=2, label="b")
+    network = PortNetwork(label="line")
+    port_a = network.port("a_port", target=first, rate=0.05)
+    port_b = network.port("b_port", target=second, rate=0.05)
+    network.cascade(port_a, port_b)
+    network.expose("feedline", input=port_a.input, output=port_b.output)
+    chip = Chip([first, second], port_network=network, frame=5.0, backend="qutip")
+    problem = build_problem(chip, [], np.linspace(0.0, 1.0, 3))
+    assert problem.engine_result.slh.has_network_hamiltonian
+
+    options = _resolved_options(chip.backend, problem)
+
+    assert "method" not in options
