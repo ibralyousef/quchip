@@ -247,10 +247,10 @@ def _sample_coeff_array(signal: Any, sample_tlist: Any) -> np.ndarray:
 # order (unspecified below).
 _WINDOWED_COEFFICIENT_ORDER = 1
 
-# QuTiP's diagonal integrator materializes a dense d x d Hamiltonian or
-# d^2 x d^2 Liouvillian. These measured caps keep that setup bounded.
+# Cap diag at Hilbert D=64 for sesolve and Liouvillian D²=1024 (Hilbert D=32) for mesolve.
+# The mesolve setup scales roughly as D⁶ in time and D⁴ in memory.
 _MAX_STATIC_HILBERT_DIM = 64
-_MAX_STATIC_LIOUVILLIAN_HILBERT_DIM = 12
+_MAX_STATIC_LIOUVILLIAN_DIM = 1024
 
 
 def _envelope_coefficient(envelope: Any, sample_tlist: Any) -> Any:
@@ -744,12 +744,9 @@ class QuTiPBackend(Backend):
             return resolved
 
         dimension = math.prod(engine_result.dims)
-        limit = (
-            _MAX_STATIC_HILBERT_DIM
-            if solver_name == "sesolve"
-            else _MAX_STATIC_LIOUVILLIAN_HILBERT_DIM
-        )
-        if dimension > limit:
+        generator_dim = dimension if solver_name == "sesolve" else dimension**2
+        limit = _MAX_STATIC_HILBERT_DIM if solver_name == "sesolve" else _MAX_STATIC_LIOUVILLIAN_DIM
+        if generator_dim > limit:
             return resolved
 
         discarded = adaptive_options & user_options.keys()

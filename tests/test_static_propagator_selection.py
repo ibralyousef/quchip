@@ -53,8 +53,8 @@ class TestQuTiPStaticPropagatorSelection:
         assert "max_step" not in options
 
     def test_small_static_open_problem_selects_liouvillian_diagonalization(self) -> None:
-        """A static dissipative Hilbert space through dimension 12 should diagonalize its Liouvillian."""
-        backend, problem = _static_problem("qutip", levels=12, T1=20.0)
+        """A static dissipative Hilbert space through dimension 32 (Liouvillian 1024) diagonalizes."""
+        backend, problem = _static_problem("qutip", levels=32, T1=20.0)
 
         options = _resolved_options(backend, problem)
 
@@ -64,7 +64,7 @@ class TestQuTiPStaticPropagatorSelection:
 
     @pytest.mark.parametrize(
         ("levels", "T1"),
-        [(65, None), (13, 20.0)],
+        [(65, None), (33, 20.0)],
         ids=["closed-above-limit", "open-above-limit"],
     )
     def test_large_static_problem_retains_adaptive_integrator(
@@ -165,6 +165,19 @@ def test_dynamiqs_static_problem_retains_adaptive_integrator() -> None:
 
     assert "method" not in options
     assert "max_steps" in options
+
+
+def test_open_transmon_resonator_chip_diagonalizes_its_liouvillian() -> None:
+    """A 4 x 5 open chip made static by its frame takes the diagonal propagator instead of adaptive stepping."""
+    qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=4, label="q", T1=20.0)
+    resonator = Resonator(freq=6.0, levels=5, label="r")
+    chip = Chip([qubit, resonator], frame="rotating", backend="qutip")
+    problem = build_problem(chip, [], np.linspace(0.0, 1.0, 3))
+    assert not problem.engine_result.dynamic_terms
+
+    options = _resolved_options(chip.backend, problem)
+
+    assert options["method"] == "diag"
 
 
 def test_network_generated_static_terms_keep_the_adaptive_integrator() -> None:

@@ -238,10 +238,11 @@ without changing the pulse schedule.
 
 For a time-independent QuTiP problem with no explicit solver method, quchip
 uses diagonal propagation at all requested save times when the total Hilbert
-dimension is at most 64 for `sesolve`, or at most 12 for `mesolve` (whose
-Liouvillian dimension is the square of the Hilbert dimension). `diag` does not
-use adaptive tolerances or step controls, so quchip removes `atol`, `rtol`,
-`nsteps`, and `max_step` and logs the discarded options at `INFO` level. Driven
+dimension is at most 64 for `sesolve`. For `mesolve`, the Liouvillian dimension
+(the square of the Hilbert dimension) must be at most 1024, so the Hilbert
+dimension may be at most 32. `diag` does not use adaptive tolerances or step
+controls, so quchip removes `atol`, `rtol`, `nsteps`, and `max_step` and logs
+the discarded options at `INFO` level. Driven
 problems, larger spaces, network-generated static terms, and an explicit
 non-`diag` method keep QuTiP's selected adaptive integrator. For dynamiqs, method selection remains explicit through
 `options={"method": ...}`; its default is `Tsit5`.
