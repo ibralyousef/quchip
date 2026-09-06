@@ -794,12 +794,29 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
     # -- Pauli operators on the two lowest isolated energy states -----------
 
     def _pauli_operator(self, name: str, *, basis: BasisRecord | None = None) -> Operator:
+        from quchip.declarative.parameters import component_fingerprint
         from quchip.devices.spaces import FockSpace
         from quchip.engine.basis import resolve_device_basis
+        from quchip.utils.jax_utils import contains_tracer
 
-        basis = resolve_device_basis(self, basis="native") if basis is None else basis
-        vectors = basis.energy_vectors[:, :2]
-        matrix = vectors @ FockSpace(2).matrix(name) @ vectors.conj().T
+        matrices: dict[str, Any] = {}
+        if basis is None:
+            key = component_fingerprint(self)
+            cached = getattr(self, "_pauli_cache", None)
+            if cached is not None and cached[0] == key:
+                _, basis, matrices = cached
+            else:
+                basis = resolve_device_basis(self, basis="native")
+                if not contains_tracer(basis.energy_vectors):
+                    self._pauli_cache = (key, basis, matrices)
+        assert basis is not None
+        matrix = matrices.get(name)
+        if matrix is None:
+            vectors = basis.energy_vectors[:, :2]
+            matrix = vectors @ FockSpace(2).matrix(name) @ vectors.conj().T
+            # Cache immutable arrays only; each caller owns its lowered operator.
+            if not contains_tracer(matrix):
+                matrices[name] = matrix
         dimension = self.local_space().dimension
         return get_default_backend().from_array(matrix, dims=[[dimension], [dimension]])
 

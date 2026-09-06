@@ -158,7 +158,8 @@ def reduce_coupling(chip: "Chip", target: Any, method: str) -> EliminationResult
     )
     terms = EffectiveTerms(tuple(labels), tuple(final.authored_dims), correction,
                            tuple(channels), label=f"retained_{coupling_label}", projection=projection)
-    final = rebuild_chip(chip, devices=final.devices, couplings=final.couplings, effective_terms=(terms,))
+    terms.validate_for(final)
+    final._effective_terms = (terms,)
     source_to_solver = reduce(jnp.kron, (source.bases[label].vectors.conj().T
                                        @ source.bases[label].energy_vectors for label in labels))
     target_to_solver = final_lift.conj().T @ lift

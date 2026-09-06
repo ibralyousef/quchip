@@ -120,15 +120,19 @@ def test_local_energy_states_and_default_paulis_agree(basis, backend):
     np.testing.assert_allclose(authored_ground, record.energy_vectors[:, 0], atol=1e-10)
 
 
-def test_default_paulis_follow_parameter_changes_without_stale_caches():
+@pytest.mark.parametrize("name", ["sigma_x", "sigma_y", "sigma_z", "sigma_plus", "sigma_minus"])
+def test_default_paulis_follow_parameter_changes_without_stale_caches(name):
     """A changed local Hamiltonian rotates the computational projectors immediately."""
     q = TiltedMode(levels=3, label="q")
-    before = q.sigma_x.full()
+    operator = getattr(q, name)
+    before = operator.full()
+    operator.data = (123.0 * operator).data
+    np.testing.assert_allclose(getattr(q, name).full(), before, atol=1e-12)
     q.mixing = 0.8
-    after = q.sigma_x.full()
+    after = getattr(q, name).full()
     assert np.linalg.norm(after - before) > 0.1
     fresh = TiltedMode(mixing=0.8, levels=3, label="fresh")
-    np.testing.assert_allclose(after, fresh.sigma_x.full(), atol=1e-12)
+    np.testing.assert_allclose(after, getattr(fresh, name).full(), atol=1e-12)
 
 
 @pytest.mark.parametrize("basis", ["native", "eigen"])
@@ -205,3 +209,28 @@ def test_energy_population_is_independent_of_integration_frame(basis):
         )
         np.testing.assert_allclose(result.population(q, 1), 1.0, atol=1e-9)
         np.testing.assert_allclose(result.expect(q), -1.0, atol=1e-9)
+
+
+@pytest.mark.parametrize("warm", [False, True])
+def test_pauli_cache_keeps_jit_gradients_and_backend_selection(warm):
+    """Cached energy operators retain gradients, native types, and independent copies."""
+    import jax
+    from quchip.backend import _backend_context, _coerce_backend
+
+    q = TiltedMode(levels=3, label="q")
+    if warm:
+        _ = q.sigma_z
+    backend = _coerce_backend("dynamiqs")
+    with _backend_context(backend), jax.checking_leaks():
+        def read():
+            return backend.to_array(q.sigma_z)[0, 0].real
+        assert jax.jit(read)() == pytest.approx(float(read()))
+
+        def value(mixing):
+            changed = q.copy()
+            changed.mixing = mixing
+            return backend.to_array(changed.sigma_z)[0, 0].real
+
+        expected = -4 * q.freq * q.mixing / (q.freq**2 + 4 * q.mixing**2 + 0.16)**1.5
+        assert jax.jit(jax.grad(value))(q.mixing) == pytest.approx(expected, rel=1e-10)
+    assert q.sigma_z.full().shape == (3, 3)

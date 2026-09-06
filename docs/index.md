@@ -75,8 +75,8 @@ guides/slh-networks
 guides/chip-transformations
 guides/differentiability
 guides/choosing-a-backend
-guides/migrating-to-0.3
 guides/from-sqa-2026
+release-notes
 cookbook
 extensions
 physics

@@ -56,6 +56,12 @@ This file records notable user-visible changes to quchip.
 
 - Scattering is scalar and instantaneous in 0.3; operator-valued scattering, time-dependent collapse channels, Floquet dressing, and thermal input fields remain outside this release. Static composition of several quantum-port couplings requires a shared rotating-frame frequency.
 
+### Breaking changes and migration
+
+- Removed `SimulationResult.population_array()` and `overlap_array()` without aliases. Use `population()` and `overlap()`; they return NumPy arrays with QuTiP and JAX arrays with dynamiqs.
+- Reduction entries now name their resulting edge with `effective_params[<edge>]["coupling"]` instead of `"folded_into"`. Update code that reads this metadata.
+- `chip.parameters` now includes unset optional device fields such as `T1` and `T2` as `None`. Filter these entries before numerical conversion; passing them unchanged to `with_params()` remains supported.
+
 ## [0.2.1] - 2026-08-28
 
 ### Fixed

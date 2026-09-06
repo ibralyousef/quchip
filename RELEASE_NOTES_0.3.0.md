@@ -1,6 +1,6 @@
 # quchip 0.3.0
 
-Changes since 0.2.1.
+Changes since [v0.2.1](https://github.com/quchip/quchip/releases/tag/v0.2.1).
 
 ## New features
 
@@ -21,13 +21,14 @@ Changes since 0.2.1.
 - Corrected partitioning for interactions spanning multiple devices and made failed batches identify the failing point.
 - Updated examples, backend guidance, and extension documentation. Added `py.typed` and removed the unused Optax dependency.
 
-## Breaking changes
+## Migrating from 0.2.1
 
-- Component labels are immutable. Create a replacement component to rename it.
-- Local state indices and Pauli observables use isolated energy levels.
-- Removed deprecated fitting arguments `coupling_targets`, `observable_targets`, and `fit_parameters`. Use `constraints`, `vary`, and `start`; full-model evaluation is the default.
-- Set `states="all"`, `"final"`, or `"none"` on simulation requests instead of native `store_states` options. Explicit `tlist` specifies the solver grid; states are never interpolated.
-- Updated signal-transform declarations and custom reduction hooks.
-- Saved models require `format_version: 1`. Recreate older models from their Python declarations.
-
-See the [migration guide](docs/guides/migrating-to-0.3.md) for replacements and reduction limits, and the [microwave guide](docs/guides/steady-state-and-vna.md) for supported network and response calculations.
+- Labels are immutable; create a replacement component to rename one. Replace `device.dressed_freq` and chip-bound `device.drive_freq` with `chip.freq(device)`.
+- Local state indices, populations, and Pauli operators use isolated energy levels; excited-state Z is −1.
+- Replace `population_array()` / `overlap_array()` with `population()` / `overlap()` (NumPy on QuTiP, JAX on dynamiqs).
+- Set `states="all"`, `"final"`, or `"none"` instead of native storage options. For the old nearest-time behavior, pass `method="nearest"` to `state_at()` / `dm_at()`; the default is now `"exact"`.
+- `chip.parameters` includes unset optional fields as `None`. Skip them before numerical conversion; unchanged rebinding still works.
+- Replace deprecated fitting arguments `coupling_targets`, `observable_targets`, and `fit_parameters` with `constraints`, `vary`, and `start`. Fitting defaults to `evaluator="full"`; choose `"local"` explicitly.
+- Replace reduction metadata key `"folded_into"` with `"coupling"`. Keep the returned chip's effective terms; parameter summaries no longer reconstruct the reduction.
+- Custom signal transforms use `parameter()` / `setting()` instead of `_parameter_names`; custom reductions implement `retained_hamiltonian(ctx)` and `embedding(ctx)`. See [extensions](docs/extensions.md).
+- Saved models require `format_version: 1`; recreate older models from Python declarations.

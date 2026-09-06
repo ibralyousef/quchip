@@ -341,6 +341,7 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
 
         pairs = list(combinations(touching_labels, 2))
         single_pair = len(pairs) == 1
+        used_labels = set(survivor_labels) | {edge.label for edge in kept_couplings}
         for label_a, label_b in pairs:
             before = ctx.h[bare_index(labels, dims, label_a), bare_index(labels, dims, label_b)]
             mediated_strength = jnp.real(pair_params[("J", label_a, label_b)] - before)
@@ -352,7 +353,6 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
             pathways = reduction.pathways(ctx, pair_params, label_a, label_b)
 
             fresh_label = f"elim_{mode_label}" if single_pair else f"elim_{mode_label}_{label_a}_{label_b}"
-            used_labels = set(survivor_labels) | {edge.label for edge in kept_couplings}
             edge_label = fresh_label
             suffix = 1
             while edge_label in used_labels:
@@ -368,6 +368,7 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
                     reduced[label_a], reduced[label_b], g=mediated_strength, label=edge_label,
                 )
             kept_couplings.append(mediated)
+            used_labels.add(edge_label)
 
             exchange_by_pair[(label_a, label_b)] = {
                 "j_eff": mediated_strength,

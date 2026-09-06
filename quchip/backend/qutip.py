@@ -31,6 +31,7 @@ from qutip.solver.mesolve import MESolver
 from qutip.solver.sesolve import SESolver
 from scipy import sparse
 
+from quchip.backend._response import linear_response, stationary_condition_number
 from quchip.utils.values import DeferredValue
 from quchip.backend._dims import (
     compute_two_body_permutation,
@@ -861,37 +862,12 @@ class QuTiPBackend(Backend):
         )
 
     def _stationary_condition_number(self, engine_result: Any) -> float:
-        liouvillian = self._stationary_liouvillian(engine_result)
-        constrained = self._scipy_liouvillian(liouvillian).toarray()
-        dimension = math.prod(engine_result.dims)
-        constrained[-1, :] = 0.0
-        constrained[-1, :: dimension + 1] = 1.0
-        return float(np.linalg.cond(constrained))
-
-    @staticmethod
-    def _linear_response_systems(drift: Any, frequencies: Any) -> Any:
-        return -1j * 2.0 * np.pi * frequencies[:, None, None] * np.eye(drift.shape[0])[None, :, :] - drift[None, :, :]
+        liouvillian = self._scipy_liouvillian(self._stationary_liouvillian(engine_result)).toarray()
+        return float(stationary_condition_number(liouvillian, math.prod(engine_result.dims), xp=np))
 
     def linear_response(self, problem: Any) -> LinearResponseSolverResult:
         """Solve passive-linear scattering with batched NumPy mode matrices."""
-        hamiltonian = np.asarray(problem.hamiltonian, dtype=complex)
-        couplings = np.asarray(problem.couplings, dtype=complex)
-        scattering = np.asarray(problem.scattering, dtype=complex)
-        frequencies = np.atleast_1d(np.array(problem.frequencies, dtype=float, copy=True))
-        drift = -1j * hamiltonian - 0.5 * couplings.conj().T @ couplings
-        indices = np.asarray(problem.plane_indices)
-        sources = -couplings.conj().T @ scattering[:, indices]
-        systems = self._linear_response_systems(drift, frequencies)
-        amplitudes = np.linalg.solve(systems, sources[None, :, :])
-        responses = scattering[np.ix_(indices, indices)][None, :, :] + couplings[indices] @ amplitudes
-        residuals = np.linalg.norm(systems @ amplitudes - sources[None, :, :], axis=(-2, -1))
-        return LinearResponseSolverResult(
-            responses=responses,
-            residuals=residuals,
-            _condition_numbers=DeferredValue(
-                lambda: np.linalg.cond(self._linear_response_systems(drift, frequencies))
-            ),
-        )
+        return linear_response(problem, xp=np)
 
     def stationary_resolvent(
         self,

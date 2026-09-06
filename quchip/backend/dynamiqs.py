@@ -43,6 +43,7 @@ import jax.numpy as jnp  # noqa: E402
 import jax.scipy.linalg as jsp_linalg  # noqa: E402
 import jax.tree_util as jtu  # noqa: E402
 
+from quchip.backend._response import linear_response, stationary_condition_number
 from quchip.utils.values import DeferredValue
 from quchip.backend._dims import (  # noqa: E402
     compute_two_body_permutation,
@@ -605,34 +606,11 @@ class DynamiqsBackend(Backend):
 
     def _stationary_condition_number(self, engine_result: Any) -> Any:
         liouvillian = self._stationary_liouvillian(engine_result)
-        dimension = math.prod(engine_result.dims)
-        trace_row = jnp.zeros((dimension * dimension,), dtype=jnp.complex128).at[:: dimension + 1].set(1.0)
-        return jnp.linalg.cond(liouvillian.at[-1, :].set(trace_row))
-
-    @staticmethod
-    def _linear_response_systems(drift: Any, frequencies: Any) -> Any:
-        return -1j * 2.0 * jnp.pi * frequencies[:, None, None] * jnp.eye(drift.shape[0])[None, :, :] - drift[None, :, :]
+        return stationary_condition_number(liouvillian, math.prod(engine_result.dims), xp=jnp)
 
     def linear_response(self, problem: Any) -> LinearResponseSolverResult:
         """Solve passive-linear scattering with batched JAX mode matrices."""
-        hamiltonian = jnp.asarray(problem.hamiltonian, dtype=jnp.complex128)
-        couplings = jnp.asarray(problem.couplings, dtype=jnp.complex128)
-        scattering = jnp.asarray(problem.scattering, dtype=jnp.complex128)
-        frequencies = jnp.atleast_1d(jnp.asarray(problem.frequencies, dtype=jnp.float64))
-        drift = -1j * hamiltonian - 0.5 * couplings.conj().T @ couplings
-        indices = jnp.asarray(problem.plane_indices)
-        sources = -couplings.conj().T @ scattering[:, indices]
-        systems = self._linear_response_systems(drift, frequencies)
-        amplitudes = jnp.linalg.solve(systems, sources[None, :, :])
-        responses = scattering[jnp.ix_(indices, indices)][None, :, :] + couplings[indices] @ amplitudes
-        residuals = jnp.linalg.norm(systems @ amplitudes - sources[None, :, :], axis=(-2, -1))
-        return LinearResponseSolverResult(
-            responses=responses,
-            residuals=residuals,
-            _condition_numbers=DeferredValue(
-                lambda: jnp.linalg.cond(self._linear_response_systems(drift, frequencies))
-            ),
-        )
+        return linear_response(problem, xp=jnp)
 
     def stationary_resolvent(
         self,
