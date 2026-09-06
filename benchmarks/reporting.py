@@ -18,7 +18,7 @@ METRICS = {
     "warm_solve_s": "Warm solve",
 }
 FAMILIES = ("qutip", "dynamiqs")
-PATHS = ("head", "main", "native")
+PATHS = ("head", "base", "native")
 PLOT_METRICS = (
     ("cold_build_s", "cold build"),
     ("build_s", "repeated build"),
@@ -37,15 +37,13 @@ def load_result(path: Path) -> dict[str, Any]:
     import json
 
     document = json.loads(path.read_text())
-    if not isinstance(document, dict) or document.get("schema_version") != 2:
+    if not isinstance(document, dict) or document.get("schema_version") != 3:
         raise ValueError("unsupported benchmark schema")
-    if document.get("complete") is not True:
-        raise ValueError("benchmark result is incomplete")
 
     provenance = document.get("provenance")
     if not isinstance(provenance, dict):
         raise ValueError("benchmark provenance is missing")
-    for key in ("head_commit", "main_commit"):
+    for key in ("head_commit", "base_commit"):
         value = provenance.get(key)
         if not isinstance(value, str) or len(value) != 40:
             raise ValueError(f"benchmark provenance has invalid {key}")
@@ -64,7 +62,7 @@ def load_result(path: Path) -> dict[str, Any]:
         status = row.get("status")
         cell = f"{family}/{path_name}/N={n}"
         if status != "ok":
-            failures.append(f"{cell}: {status}")
+            failures.append(f"{cell}: {status}: {row.get('error', 'physics parity failed')}")
             continue
         if family not in FAMILIES or path_name not in PATHS or not isinstance(n, int):
             raise ValueError(f"invalid benchmark cell {cell}")
@@ -77,6 +75,8 @@ def load_result(path: Path) -> dict[str, Any]:
         cells.add((family, path_name, n))
     if failures:
         raise ValueError("; ".join(failures))
+    if document.get("complete") is not True:
+        raise ValueError("benchmark result is incomplete")
 
     rungs = {row["N"] for row in rows}
     missing = [
@@ -104,10 +104,10 @@ def _rows(document: Mapping[str, Any], family: str, path_name: str) -> list[dict
 
 def _paired(document: Mapping[str, Any], family: str, metric: str) -> tuple[list[int], list[float]]:
     head = _rows(document, family, "head")
-    main = _rows(document, family, "main")
-    if [row["dim"] for row in head] != [row["dim"] for row in main]:
-        raise ValueError(f"head/main dimensions differ for {family}")
-    deltas = [(head_row[metric] / main_row[metric] - 1.0) * 100.0 for head_row, main_row in zip(head, main)]
+    base = _rows(document, family, "base")
+    if [row["dim"] for row in head] != [row["dim"] for row in base]:
+        raise ValueError(f"head/base dimensions differ for {family}")
+    deltas = [(head_row[metric] / base_row[metric] - 1.0) * 100.0 for head_row, base_row in zip(head, base)]
     return [row["dim"] for row in head], deltas
 
 
@@ -117,7 +117,7 @@ def render_markdown(document: Mapping[str, Any]) -> str:
     lines = [
         "## Closed-system performance",
         "",
-        f"Head `{provenance['head_commit'][:12]}` compared with main `{provenance['main_commit'][:12]}` in one job.",
+        f"Head `{provenance['head_commit'][:12]}` compared with base `{provenance['base_commit'][:12]}` in one job.",
         "Timing changes are informational; execution and physics-parity failures are not.",
         "",
         "- **Cold build:** first model construction in a fresh worker; includes one-time construction setup.",
@@ -166,7 +166,7 @@ def _style_axis(axis: Any, dims: list[int], n_by_dim: Mapping[int, int], *, xlab
 
 
 def render_plots(document: Mapping[str, Any], output_dir: Path) -> list[Path]:
-    """Render one simple PR-versus-main-versus-hand-built comparison."""
+    """Render one simple head-versus-base-versus-hand-built comparison."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -179,10 +179,10 @@ def render_plots(document: Mapping[str, Any], output_dir: Path) -> list[Path]:
     n_by_dim = {row["dim"]: row["N"] for row in document["rows"]}
     styles: dict[str, dict[str, Any]] = {
         "head": dict(color=NAVY, marker="o", linestyle="-"),
-        "main": dict(color=TERRA, marker="s", linestyle="-."),
+        "base": dict(color=TERRA, marker="s", linestyle="-."),
         "native": dict(color=SAGE, marker="o", linestyle="--", markerfacecolor="white"),
     }
-    labels = {"head": "this PR", "main": "main", "native": "hand-built"}
+    labels = {"head": "head", "base": "base", "native": "hand-built"}
     rc: dict[str, Any] = {
         "figure.facecolor": PAPER,
         "axes.facecolor": PAPER,

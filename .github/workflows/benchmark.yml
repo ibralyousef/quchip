@@ -2,10 +2,15 @@ name: benchmark
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Comparison commit or ref (defaults to the preceding commit)
+        type: string
+        default: HEAD^
 
 permissions:
   contents: read
@@ -23,6 +28,9 @@ jobs:
       BENCHMARK_RUNGS: ${{ github.event_name == 'push' && '1,2,3,4,5,6,7' || '1,3,5,7' }}
       BUILD_REPEAT: ${{ github.event_name == 'push' && '5' || '3' }}
       SOLVE_REPEAT: ${{ github.event_name == 'push' && '7' || '5' }}
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
       JAX_ENABLE_X64: "true"
       XLA_PYTHON_CLIENT_PREALLOCATE: "false"
       MPLCONFIGDIR: /tmp/quchip-matplotlib
@@ -46,16 +54,13 @@ jobs:
           uv venv --python 3.11
           uv pip install -e '.[dynamiqs]' -c ci-constraints-3.11.txt
 
-      - name: Resolve exact main
+      - name: Resolve comparison commit
         id: comparison
         env:
-          EVENT_MAIN_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base_ref }}
         run: |
-          if ! git cat-file -e "${EVENT_MAIN_SHA}^{commit}" 2>/dev/null; then
-            echo "::notice::Previous main is unavailable; using current main."
-            EVENT_MAIN_SHA=$(git rev-parse origin/main)
-          fi
-          echo "main_sha=$EVENT_MAIN_SHA" >> "$GITHUB_OUTPUT"
+          base_sha=$(git rev-parse --verify "${BASE_REF}^{commit}")
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
 
       - name: Record environment
         run: |
@@ -69,7 +74,7 @@ jobs:
         id: benchmark
         run: |
           uv run --no-sync python benchmarks/closed_system.py run \
-            --main-ref "${{ steps.comparison.outputs.main_sha }}" \
+            --base-ref "${{ steps.comparison.outputs.base_sha }}" \
             --rungs "$BENCHMARK_RUNGS" \
             --build-repeat "$BUILD_REPEAT" \
             --warmup 1 \
@@ -78,6 +83,7 @@ jobs:
 
       - name: Render report
         id: report
+        if: ${{ !cancelled() && steps.benchmark.outcome != 'skipped' }}
         run: |
           uv run --no-sync python benchmarks/closed_system.py report \
             --data benchmark-output/closed-system.json \
@@ -95,8 +101,10 @@ jobs:
           retention-days: 90
 
       - name: Publish job summary
-        if: ${{ !cancelled() && steps.report.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.report.outcome != 'skipped' }}
         run: |
-          cat benchmark-output/summary.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -f benchmark-output/summary.md ]; then
+            cat benchmark-output/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
           printf '\n[Download JSON, environment, samples, and plots](%s)\n' \
             "${{ steps.upload.outputs.artifact-url }}" >> "$GITHUB_STEP_SUMMARY"
