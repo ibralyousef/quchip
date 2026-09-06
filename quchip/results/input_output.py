@@ -2,42 +2,65 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
 
 import numpy as np
 
+from quchip.utils.jax_utils import is_jax_array, select_array_module
+
 from quchip.utils.labeling import resolve_label
+
+
+class _LazyDiagnostics(Mapping[str, Any]):
+    """Read-only diagnostic values with explicitly deferred calculations."""
+
+    def __init__(self, values: Mapping[str, Any]):
+        self._values = MappingProxyType(dict(values))
+
+    def __getitem__(self, key: str) -> Any:
+        value = self._values[key]
+        return value() if callable(value) else value
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._values
 
 
 @dataclass(frozen=True)
 class SParameterResult:
-    """Complex port response over a declared VNA sweep grid."""
+    """Complete selected-port small-signal scattering over a sweep grid.
+
+    Around a phase-sensitive operating point, the response is
+    ``delta <b_out> = S delta beta + T conj(delta beta)``. ``matrix`` stores ``S``
+    and ``conjugate_matrix`` stores ``T``; both have shape ``(*shape, n_ports,
+    n_ports)`` and use ``[..., output, input]`` indexing in ``ports`` order.
+    ``s(output, input)`` and ``t(output, input)`` select individual entries.
+
+    The stationary route computes both matrices from one shifted-Liouvillian
+    factorization. The passive-linear route reports zero for ``T``.
+    ``numpy.asarray(result)`` returns ``matrix``.
+    """
 
     frequencies: Any
-    input_port: str
-    output_ports: tuple[str, ...]
-    input_amplitudes: Any | None
-    input_photon_fluxes: Any | None
-    input_powers: Any | None
+    ports: tuple[str, ...]
     axes: tuple[tuple[str, Any], ...]
     shape: tuple[int, ...]
-    steady_states: tuple[Any, ...]
     diagnostics: tuple[Mapping[str, Any], ...]
-    _response: Mapping[tuple[str, str], Any] = field(repr=False)
-
-    @property
-    def input_power_unit(self) -> str:
-        """Unit of :attr:`input_powers`."""
-        return "W"
+    matrix: Any
+    conjugate_matrix: Any
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "_response", MappingProxyType(dict(self._response)))
         object.__setattr__(
             self,
             "diagnostics",
-            tuple(MappingProxyType(dict(item)) for item in self.diagnostics),
+            tuple(item if isinstance(item, _LazyDiagnostics) else _LazyDiagnostics(item) for item in self.diagnostics),
         )
 
     @property
@@ -45,50 +68,121 @@ class SParameterResult:
         """Names of the result axes, in array order."""
         return tuple(name for name, _ in self.axes)
 
-    def s(self, output: Any, input: Any | None = None) -> Any:
-        """Return one complex ``S(output, input)`` array."""
-        output_label = resolve_label(output)
-        input_label = self.input_port if input is None else resolve_label(input)
-        try:
-            return self._response[(output_label, input_label)]
-        except KeyError:
-            available = [key for key in self._response]
-            raise KeyError(f"S({output_label!r}, {input_label!r}) is unavailable. Available: {available}") from None
+    def s(self, output: Any, input: Any) -> Any:
+        """Return ``S(output, input)`` over the sweep grid for two selected ports."""
+        return self.matrix[..., self._index(output), self._index(input)]
+
+    def t(self, output: Any, input: Any) -> Any:
+        """Return the phase-conjugating ``T(output, input)`` over the sweep grid."""
+        return self.conjugate_matrix[..., self._index(output), self._index(input)]
 
     @property
     def s11(self) -> Any:
-        """Reflection at the swept input port."""
-        return self.s(self.input_port, self.input_port)
+        """Return reflection from the first selected plane back onto itself."""
+        return self.matrix[..., 0, 0]
 
     @property
     def s21(self) -> Any:
-        """Transmission to the first requested output distinct from the input."""
-        output = next((label for label in self.output_ports if label != self.input_port), None)
-        if output is None:
-            raise AttributeError("s21 requires an output port distinct from the swept input port.")
-        return self.s(output, self.input_port)
+        """Return transmission from the first selected plane to the second."""
+        if len(self.ports) < 2:
+            raise AttributeError("s21 requires at least two ports.")
+        return self.matrix[..., 1, 0]
+
+    def _index(self, plane: Any) -> int:
+        label = resolve_label(plane)
+        try:
+            return self.ports.index(label)
+        except ValueError:
+            raise KeyError(f"Port {label!r} is not in this result. Available: {list(self.ports)}") from None
 
     def __array__(self) -> np.ndarray:
-        return np.asarray(self.s11)
+        return np.asarray(self.matrix)
+
+
+@dataclass(frozen=True)
+class MeanFieldResponseResult:
+    """Stationary mean output fields from a finite coherent probe.
+
+    ``values`` stores ``<b_out>`` at every selected plane with shape
+    ``(*shape, n_ports)`` in ``ports`` order. ``incident`` stores the input
+    amplitude ``beta`` broadcast to ``shape``. ``axes`` lists chip and pump sweep
+    axes first, followed by ``"amplitude"`` and ``"frequency"`` when those
+    arguments are arrays.
+
+    ``ratio(plane)`` approaches the corresponding small-signal S-parameter as
+    ``beta`` tends to zero when no fixed pump leaves a coherent mean at that
+    plane and carrier, and is ``NaN`` where ``beta`` is zero. The result
+    contains one stationary mean-field branch; it does not encode sweep-rate
+    hysteresis or metastable branches.
+    """
+
+    ports: tuple[str, ...]
+    input: str
+    frequencies: Any
+    amplitudes: Any
+    axes: tuple[tuple[str, Any], ...]
+    shape: tuple[int, ...]
+    diagnostics: tuple[Mapping[str, Any], ...]
+    values: Any
+    incident: Any
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "diagnostics",
+            tuple(item if isinstance(item, _LazyDiagnostics) else _LazyDiagnostics(item) for item in self.diagnostics),
+        )
+
+    @property
+    def axis_names(self) -> tuple[str, ...]:
+        """Names of the result axes, in array order."""
+        return tuple(name for name, _ in self.axes)
+
+    def mean(self, plane: Any) -> Any:
+        """Return the stationary ``<b_out>`` at ``plane`` with shape ``shape``."""
+        label = resolve_label(plane)
+        try:
+            return self.values[..., self.ports.index(label)]
+        except ValueError:
+            raise KeyError(f"Port {label!r} is not in this result. Available: {list(self.ports)}") from None
+
+    def ratio(self, plane: Any) -> Any:
+        """Return the stationary ``<b_out>/beta`` at ``plane`` with shape ``shape``.
+
+        The result is complex ``NaN`` where the incident ``beta`` is zero. Its
+        zero-amplitude limit is the corresponding small-signal S-parameter when
+        no fixed pump leaves a coherent mean at that plane and carrier.
+        """
+        mean = self.mean(plane)
+        xp = select_array_module(is_jax_array(mean))
+        incident = xp.asarray(self.incident)
+        zero = incident == 0
+        return xp.where(zero, xp.nan + 0j, mean / xp.where(zero, 1.0, incident))
 
 
 @dataclass(frozen=True)
 class OutputSpectrumResult:
-    """Normally ordered stationary output-field fluctuation spectrum."""
+    """Stationary output-field fluctuation spectra and signal photon fluxes.
+
+    ``signal_fluctuation_spectrum`` is the normally ordered signal spectral
+    density. ``added_noise_spectrum`` is the amplifier added-noise density,
+    and ``total_fluctuation_spectrum`` is their sum. ``signal_photon_flux``
+    is the signal's mean normally ordered flux, split into
+    ``signal_coherent_flux`` and ``signal_incoherent_flux``. Added noise is
+    not included in these fluxes because converting a spectral density to
+    flux requires a detection bandwidth.
+    """
 
     port: str
     frequencies: Any
-    fluctuation_spectrum: Any
-    output_photon_flux: Any
-    coherent_flux: Any
-    incoherent_flux: Any
+    total_fluctuation_spectrum: Any
+    signal_fluctuation_spectrum: Any
+    added_noise_spectrum: Any
+    signal_photon_flux: Any
+    signal_coherent_flux: Any
+    signal_incoherent_flux: Any
     steady_state: Any
     fourier_convention: str = "2 Re integral_0^inf d tau exp(+i 2 pi f tau) C(tau)"
-
-    @property
-    def total_flux(self) -> Any:
-        """Mean normally ordered output photon flux."""
-        return self.output_photon_flux
 
 
 @dataclass(frozen=True)

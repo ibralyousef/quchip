@@ -13,6 +13,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from quchip.chip.partition import _line_device_labels
 from quchip.utils.jax_utils import contains_tracer
 
 if TYPE_CHECKING:
@@ -64,19 +65,6 @@ def graph_distances(adjacency: dict[str, set[str]], sources: set[str]) -> dict[s
                 distances[neighbor] = distances[current] + 1
                 queue.append(neighbor)
     return distances
-
-
-def _line_targets(chip: "Chip", line: Any) -> tuple[str, ...]:
-    """The device label(s) a control line's fate is tied to (one for a device line, two for an edge/pump line)."""
-    from quchip.control.drive import CouplingDrive
-
-    target = line.target_label
-    if target is None:
-        return ()
-    if isinstance(line, CouplingDrive):
-        coupling = chip.coupling_map[target]
-        return (coupling.device_a_label, coupling.device_b_label)
-    return (target,)
 
 
 def _warn_on_poor_validity(step: "EliminationResult", target: str) -> None:
@@ -153,6 +141,24 @@ class ActivePatchResult:
         """``{eliminated label: that step's .effective_params}`` — verbatim, per-survivor shape untouched."""
         return {label: step.effective_params for label, step in zip(self.eliminated_labels, self.steps)}
 
+    @property
+    def mapping(self) -> Any:
+        """Compose the captured state/operator maps from the source into this patch."""
+        from quchip.chip.transformations.result import ReductionMap
+        from quchip.utils.values import DeferredValue
+        from functools import reduce
+        from math import prod
+        import jax.numpy as jnp
+
+        maps = tuple(step.mapping for step in self.steps)
+        if not maps:
+            labels, dims = tuple(d.label for d in self.chip.devices), tuple(self.chip.dims)
+            return ReductionMap(labels, dims, labels, dims, self.chip.backend,
+                                DeferredValue(lambda: jnp.eye(prod(dims))))
+        return ReductionMap(maps[0].source_labels, maps[0].source_dims,
+                            maps[-1].target_labels, maps[-1].target_dims, maps[0]._backend,
+                            DeferredValue(lambda: reduce(jnp.matmul, (m.embedding for m in maps))))
+
     def simulate(self, **kwargs: Any) -> Any:
         """Solve the patch sequence (automatic partitioning still applies inside)."""
         return self.sequence.simulate(**kwargs)
@@ -194,7 +200,7 @@ def _strip_dead_control_lines(chip: "Chip", sequence: "QuantumSequence", reachab
     unused = sorted(
         ln.label for ln in equipment.lines
         if ln.label not in scheduled_drives
-        and any(lbl in doomed for lbl in _line_targets(chip, ln))
+        and any(lbl in doomed for lbl in _line_device_labels(chip, ln))
     )
     if not unused:
         return chip, []
@@ -241,16 +247,8 @@ def _eliminate_spectators(
             break
         target = min(remaining, key=lambda label: (-current_distances.get(label, -1), label))
         try:
-            # Narrow on purpose: NotImplementedError is eliminate()'s typed
-            # signal that this particular elimination step is unsupported
-            # (e.g. a Purcell decay fold onto a survivor that carries
-            # thermal_population — eliminate_device.py has no collapse-channel
-            # API to represent the resulting rate without inventing thermal
-            # absorption that was never physically present). That is a model
-            # limitation worth downgrading to a note. A bath explicitly
-            # targeting this mode raises ValueError (eliminate_device.py's
-            # fail-fast guard) and must propagate — an explicit user conflict
-            # is not a graceful-stop candidate.
+            # Unsupported physical reductions leave the remaining spectators
+            # in place. Invalid configuration raises ValueError and propagates.
             step = eliminate(working, target, method=method)
         except NotImplementedError as exc:
             notes.append(
@@ -291,9 +289,7 @@ def active_patch(sequence: "QuantumSequence", *, hops: int = 1, method: str = "s
     edges carrying ``g_0``. Both fold onward, so cycles among spectators
     reduce all the way down. If ``eliminate`` still declines a step (its
     typed :class:`NotImplementedError` signal for an unsupported
-    elimination — e.g. a Purcell decay fold onto a survivor that carries
-    thermal occupation, which no collapse-channel API can represent without
-    inventing physics that was never present), the reduction stops
+    elimination, such as an unsupported accessible-field boundary), the reduction stops
     there: everything eliminated so far stays folded, and the remaining
     spectators — including the one that failed — are left on the patch
     chip untouched, with the reason recorded in :attr:`notes`.
@@ -313,30 +309,18 @@ def active_patch(sequence: "QuantumSequence", *, hops: int = 1, method: str = "s
     -------
     ActivePatchResult
     """
-    from quchip.control.sequence import QuantumSequence as _Sequence
-
     chip = sequence._chip
     active = active_labels(sequence, hops=hops)
     spectators = [d.label for d in chip.devices if d.label not in active]
-    if not spectators:
-        return ActivePatchResult(
-            chip=chip, sequence=sequence,
-            active_labels=tuple(sorted(active)), eliminated_labels=(), steps=(), notes=(),
-        )
-
     reachable, notes = _split_reachable_spectators(chip, spectators, active)
     working, strip_notes = _strip_dead_control_lines(chip, sequence, reachable)
     notes.extend(strip_notes)
     working, steps, eliminated, elimination_notes = _eliminate_spectators(working, active, reachable, method)
     notes.extend(elimination_notes)
 
-    patch_sequence = _Sequence(working)
-    # ``_entries`` is the single source of truth for scheduling and its
-    # entries are immutable records replayed functionally — sharing them
-    # (never deep-copying) is safe and required: an envelope may carry
-    # traced pulse parameters that a deep copy would silently detach from
-    # the surrounding trace.
-    patch_sequence._entries = list(sequence._entries)
+    if working is chip:
+        working = chip.clone()
+    patch_sequence = sequence._copy_with_chip(working)
     return ActivePatchResult(
         chip=working,
         sequence=patch_sequence,

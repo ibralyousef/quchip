@@ -1,11 +1,12 @@
 """Device-target elimination: adiabatic reduction of a far-detuned mode.
 
-A mode touching **one** survivor (leaf) folds into a Lamb shift, plus a
-Purcell channel when the mode dissipates. A mode touching **two or more**
+A mode touching **one** survivor (leaf) contributes a retained Hamiltonian
+correction and inherited channels when the removed components dissipate.
+Surviving devices keep their authored parameters and local bases. A mode touching **two or more**
 survivors — bus / tunable-coupler (bridge) or several at once — additionally
 induces a mediated exchange ``J = g_a g_b / 2 · (1/Δ_a + 1/Δ_b)`` between every
-survivor pair, folded into the direct coupling between that pair when one
-exists or added as its own edge otherwise. A fixed eliminated mode emits a
+survivor pair, represented by its own edge. Authored direct couplings keep
+their parameters, channels and controls. A fixed eliminated mode emits a
 :class:`~quchip.chip.couplings.Capacitive`; a frequency-controlled mode (or an
 already-modulable direct edge) emits a
 :class:`~quchip.chip.couplings.TunableCapacitive`.
@@ -22,34 +23,43 @@ label here without importing this module directly.
 
 from __future__ import annotations
 
-import warnings
+from functools import reduce
 from itertools import combinations
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import jax.numpy as jnp
+import numpy as np
 
-from quchip.backend import _backend_context
+from quchip.utils.values import DeferredValue
+from quchip.approximations import Exact
 from quchip.chip.couplings import Capacitive, TunableCapacitive
-from quchip.engine.approximations import apply_operator_band_filter
+from quchip.chip.effective import EffectiveTerms, OperatorProjection
+from quchip.declarative.dissipation import CollapseChannel
+from quchip.chip.ports import Port
+from quchip.engine.bands import embed_on_support
 from quchip.chip.sw import (
+    _exact_eigensystem,
     bare_hamiltonian,
+    bare_index,
+    basis_row,
     mode_blocks,
     purcell_rate_from,
-    sylvester_generator,
+    cross_block_gap,
 )
 from quchip.chip.transformations.dispatch import EliminationTarget, register_elimination_target
 from quchip.chip.transformations.methods import DeviceReductionContext, lookup_reduction_method
 from quchip.chip.transformations.plumbing import (
     StrandedLine,
-    detach_intermediate_clone,
     plan_stranded_lines,
     reattach_equipment,
     rebuild_chip,
 )
-from quchip.chip.transformations.result import EliminationResult, LazyEffectiveParams, _HasFreq
+from quchip.chip.transformations.result import EliminationResult, LazyEffectiveParams, ReductionMap
 from quchip.control.drive import FluxDrive
 from quchip.declarative.expr import materialize_expr
 from quchip.devices.protocols import FrequencyControlled
+from quchip.devices.resonator import Resonator
+from quchip.devices.spaces import FockSpace
 from quchip.utils.labeling import LabelKeyedDict, resolve_label
 
 if TYPE_CHECKING:
@@ -71,42 +81,6 @@ def mode_decay_rate(mode: Any) -> tuple[Any, bool]:
     if rate is None:
         return 0.0, False
     return rate, True
-
-
-def _exchange_matrix_element(coupling: Any, row_label: str, chip: "Chip") -> Any:
-    """One-excitation exchange matrix element of *coupling* as :meth:`Chip.hamiltonian` assembles it.
-
-    Reads ``<1_row,0_other|H_int|0_row,1_other>`` from the interaction form
-    :meth:`~quchip.chip.chip.Chip.hamiltonian` embeds. Under
-    :class:`~quchip.approximations.RWA`, the engine applies the same
-    operator-band filter used for chip assembly. A rejected exchange band
-    therefore contributes zero here and is not subtracted from
-    ``total_coupling``. Row/column convention matches
-    :func:`~quchip.chip.sw.extract_pair_parameters`'s ``("J", a, b)`` P-block entry. This is the
-    physically correct measure of a coupling's exchange contribution — not its declared
-    :attr:`~quchip.chip.coupling_base.BaseCoupling.coupling_strength`, which need not equal this
-    matrix element for a coupling that is not dipole-dipole exchange-compatible (e.g. a
-    dispersive ``g · n_a n_b`` interaction has no off-diagonal exchange element at all).
-    """
-    backend = chip.backend
-    with _backend_context(backend):
-        h_int = materialize_expr(coupling.interaction_hamiltonian(), backend)
-        if chip.approximation.filters_terms:
-            h_int = apply_operator_band_filter(
-                h_int,
-                dims=(coupling.device_a.levels, coupling.device_b.levels),
-                labels=(coupling.device_a_label, coupling.device_b_label),
-                keeps_band=lambda delta_a, delta_b: chip.approximation.keeps_operator_band(
-                    (delta_a, delta_b)
-                ),
-                backend=backend,
-            )
-            if h_int is None:
-                return jnp.asarray(0.0, dtype=complex)
-        h_int_array = jnp.asarray(backend.to_array(h_int), dtype=complex)
-    dim_b = coupling.device_b.levels
-    element = h_int_array[dim_b, 1]  # <device_a=1,device_b=0|H_int|device_a=0,device_b=1>, C-order flat index
-    return element if coupling.device_a_label == row_label else jnp.conj(element)
 
 
 def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
@@ -136,17 +110,63 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
     for c in touching:
         other = c.device_b_label if c.device_a_label == mode_label else c.device_a_label
         survivors.append((other, c))
-    is_multi = len(survivors) >= 2
-
-    # A bath that *explicitly* targets the eliminated mode would dangle after
-    # reduction and raise KeyError at solve time — fail fast and clearly here.
-    # Baths with default (None) targets re-resolve against the survivors, so
-    # they are fine.
-    for bath in chip.baths:
-        if bath._targets is not None and mode_label in {resolve_label(t) for t in bath._targets}:
-            raise ValueError(
-                f"Cannot eliminate '{mode_label}': bath '{bath.label}' explicitly targets it. "
-                "Remove the eliminated mode from the bath's targets first."
+    is_multi = len({label for label, _ in survivors}) >= 2
+    mode_device: Any = chip[mode_label]
+    affected_ports = [
+        port
+        for port in chip.ports
+        if mode_label in port.resolve_targets(chip)
+    ]
+    if affected_ports:
+        if not isinstance(mode_device, Resonator):
+            raise NotImplementedError(
+                "Network-connected elimination currently supports a linear Resonator target; "
+                f"{mode_label!r} is {type(mode_device).__name__}. Keep the boundary mode."
+            )
+        if not survivors:
+            raise NotImplementedError(
+                f"Cannot eliminate port-coupled Resonator {mode_label!r} without a coupled survivor."
+            )
+        if len(chip.devices) != 2:
+            raise NotImplementedError(
+                "Network-connected elimination currently requires exactly one survivor; "
+                "multi-device effective boundary support is deferred."
+            )
+        survivor_device = chip[survivors[0][0]]
+        if survivor_device.resolved_dimension(chip.basis) != survivor_device.local_space().dimension:
+            raise NotImplementedError(
+                "Network-connected elimination does not yet lift a transformed port from a "
+                "projected survivor basis back into its authored local space."
+            )
+        affected_labels = {port.label for port in affected_ports}
+        assert chip.port_network is not None
+        if any(
+            affected_labels.intersection((downstream, upstream))
+            for downstream, upstream, _coefficient in chip.port_network._active_generated_pairs()
+        ):
+            raise NotImplementedError(
+                "Cannot eliminate a port that participates in a cascade-generated Hamiltonian; "
+                "joint SLH adiabatic elimination is not implemented."
+            )
+        unsupported = [
+            port.label
+            for port in affected_ports
+            if port.resolve_targets(chip) != (mode_label,) or port.operator is not None
+        ]
+        if unsupported:
+            raise NotImplementedError(
+                "Network-connected linear-mode elimination currently transforms the mode's "
+                f"default lowering ports only; unsupported ports: {unsupported}."
+            )
+        non_fock = [
+            label
+            for label, _ in survivors
+            if not isinstance(chip[label].local_space(), FockSpace)
+        ]
+        if non_fock:
+            raise NotImplementedError(
+                "Network-connected linear-mode elimination requires Fock-space survivors so "
+                f"the effective lowering channel is explicit; unsupported: {non_fock}."
             )
 
     # A control line wired to the eliminated mode (or to a coupling that
@@ -156,8 +176,6 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
     # bath guard above.
     result_kind = "edge" if is_multi else "leaf-fold"
     equipment = chip.control_equipment
-    mode_device: Any = chip[mode_label]
-
     def classify(line: Any) -> StrandedLine | None:
         from quchip.control.drive import CouplingDrive
 
@@ -196,7 +214,7 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
     # dropped only when at least one touching coupling resolves RWA True —
     # never claim the drop unconditionally.
     dropped_items = ["ring-up transients"]
-    if chip.approximation.filters_terms and survivors:
+    if method != "exact" and chip.approximation.filters_terms and survivors:
         dropped_items.insert(0, "counter-rotating terms")
     notes = [
         f"Adiabatic elimination (method='{method}'): steady-state (vacuum) reduction.",
@@ -213,7 +231,10 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
     mode_is_frequency_controlled = isinstance(mode, FrequencyControlled) or any(
         isinstance(line, FluxDrive) for line, _ in retarget_plan
     )
-    h, labels, dims = bare_hamiltonian(chip)
+    h, labels, dims = bare_hamiltonian(
+        chip,
+        approximation=Exact() if method == "exact" else None,
+    )
     # Survivor pairs are keyed in the chip's device order everywhere — the
     # pair extraction, the exact route, and the fold loop below — so the two
     # sides of every ("J", a, b) lookup agree no matter what order the legs
@@ -222,97 +243,74 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
     scanned = {lbl for lbl, _ in survivors}
     touching_labels = [lbl for lbl in labels if lbl in scanned]
 
+    # Capture the full lab-frame matrix now; diagonalize only if chi is read.
+    report_h = None
+    if not is_multi and survivors:
+        report_h = h if method == "exact" else bare_hamiltonian(chip, approximation=Exact())[0]
+
     p_mask, _ = mode_blocks(dims, labels, mode_label)
-    s, min_gap = sylvester_generator(h, p_mask)
+    min_gap = cross_block_gap(h, p_mask)
 
     ctx = DeviceReductionContext(
-        chip=chip,
-        mode=mode,
         mode_label=mode_label,
         survivor_labels=touching_labels,
         labels=labels,
         dims=dims,
         h=h,
-        s=s,
         p_mask=p_mask,
     )
     pair_params = reduction.pair_parameters(ctx)
+    incoming_frequencies = {
+        label: jnp.real(h[bare_index(labels, dims, label), bare_index(labels, dims, label)] - h[0, 0])
+        for label in labels
+    }
 
     kappa, has_purcell = mode_decay_rate(mode)
-    amplitudes = reduction.survivor_amplitudes(ctx) if has_purcell else {}
-    if getattr(mode, "thermal_population", None) is not None:
-        # The Purcell fold below carries only the mode's lowering-operator
-        # (downward) rate into the survivor's T1; thermal_population's
-        # upward/absorption channel has no representation in the reduced
-        # chip's collapse operators — declared explicitly rather than
-        # silently dropped.
-        notes.append(
-            f"Mode '{mode_label}' carries thermal_population (an upward absorption channel); "
-            "the Purcell fold only carries its lowering-operator (downward) decay rate into the "
-            "survivor's T1 — thermal absorption is not represented in the reduced chip."
+    transformed_mode_operator: Any | None = None
+    if has_purcell or affected_ports:
+        mode_index = labels.index(mode_label)
+        mode_operator = jnp.asarray(
+            chip.backend.to_array(
+                chip.backend.embed(mode.lowering_operator(), mode_index, dims)
+            ),
+            dtype=complex,
         )
+        transformed_mode_operator = reduction.transform_operator(ctx, mode_operator)
+    amplitudes: dict[str, Any] = {}
+    if has_purcell:
+        assert transformed_mode_operator is not None
+        p_index = np.flatnonzero(ctx.p_mask)
+        ground_row = basis_row(p_index, ctx.labels, ctx.dims)
+        amplitudes = {
+            survivor: transformed_mode_operator[
+                ground_row,
+                basis_row(p_index, ctx.labels, ctx.dims, survivor),
+            ]
+            for survivor in ctx.survivor_labels
+        }
 
-    for survivor_label, coupling in survivors:
+    for survivor_label in touching_labels:
         freq_after = jnp.real(pair_params[survivor_label]["freq_after"])
-        lamb_shift = freq_after - cast(_HasFreq, chip[survivor_label]).freq
+        lamb_shift = freq_after - incoming_frequencies[survivor_label]
         purcell_rate = purcell_rate_from(amplitudes[survivor_label], kappa) if has_purcell else 0.0
-        g = coupling.coupling_strength
-        delta = cast(_HasFreq, chip[survivor_label]).freq - cast(_HasFreq, mode).freq
-        g_over_delta = abs(g / delta)
-
-        dev = reduced[survivor_label]
-        if "freq" in dev.tunable_params():
-            dev.set_tunable_param("freq", freq_after)
-        else:
-            # Circuit-level survivors (E_C/E_J/n_g tunables) expose no bare
-            # frequency to absorb the Lamb shift into, and inverting it
-            # through the circuit parameters would silently reshape the
-            # anharmonicity. The reduced device keeps its bare spectrum; the
-            # shifted frequency stays reported, not folded.
-            warnings.warn(
-                f"Survivor '{survivor_label}' ({type(dev).__name__}) exposes no 'freq' tunable; the Lamb "
-                "shift from this elimination is reported in effective_params ('freq_after', 'lamb_shift') "
-                "but not folded into the reduced device's bare parameters.",
-                UserWarning,
-                stacklevel=2,
-            )
-        # Whether a T1 channel exists is decided from *static* info only (an
-        # intrinsic T1, or a Purcell channel from the mode's own decay) —
-        # never by comparing the traced rate to zero, which would break
-        # @jax.jit.
-        t1 = dev.T1
-        has_intrinsic_t1 = t1 is not None
-        if has_purcell and dev.thermal_population is not None:
-            # The thermal-emission channel scales both the downward
-            # ((n̄+1)/T1) and upward (n̄/T1) rates off the same T1
-            # coefficient, but the inherited Purcell channel is pure
-            # lowering (the eliminated mode's own decay, folded through a
-            # vacuum-bath-like coupling — see mode_decay_rate()). Bumping
-            # 1/T1 by purcell_rate would therefore inflate the downward rate
-            # by (n̄+1)·purcell_rate *and* invent an upward absorption
-            # channel of n̄·purcell_rate with no physical basis. No device
-            # This reduction does not synthesize an independent device field
-            # for the pure-lowering rate, so fail fast rather than mis-model it.
-            raise NotImplementedError(
-                f"Purcell fold onto survivor '{survivor_label}' would scale the shared T1 "
-                f"coefficient, but '{survivor_label}' also carries thermal_population: the pure "
-                "lowering Purcell channel cannot be represented by scaling T1 without inventing "
-                "thermal absorption that was never physically present. Unset thermal_population "
-                f"on '{survivor_label}' before eliminating '{mode_label}', or keep the mode."
-            )
-        if has_intrinsic_t1 or has_purcell:
-            rate_before = 1.0 / t1 if t1 is not None else 0.0
-            dev.T1 = 1.0 / (rate_before + purcell_rate)
 
         chi_value: Any
         if is_multi:
             # A mode coupling several survivors is a bus/coupler, not a readout mode.
             chi_value = 0.0
         else:
-            def _chi(mode_label: str = mode_label, survivor_label: str = survivor_label) -> Any:
-                return chip.dispersive_shift(mode_label, survivor_label)
+            mode_index = labels.index(mode_label)
+            survivor_index = labels.index(survivor_label)
 
-            chi_value = _chi
+            def _chi() -> Any:
+                from quchip.chip.analysis import kerr_entry
+
+                values, _, labeling = _exact_eigensystem(report_h, dims)
+                return kerr_entry(
+                    mode_index, survivor_index, dims=dims, eigenvalues=values, labeling=labeling,
+                )
+
+            chi_value = DeferredValue(_chi)
         effective_params[survivor_label] = LazyEffectiveParams({
             "lamb_shift": lamb_shift,
             "purcell_rate": purcell_rate,
@@ -320,6 +318,9 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
             "chi": chi_value,
             "kappa": kappa,
         })
+    for survivor_label, coupling in survivors:
+        delta = incoming_frequencies[survivor_label] - incoming_frequencies[mode_label]
+        g_over_delta = abs(coupling.coupling_strength / delta)
         validity[coupling.label] = {
             "g_over_delta": g_over_delta,
             "is_valid": g_over_delta < 0.1,
@@ -328,31 +329,21 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
 
     exchange_by_pair: dict[tuple[str, str], dict[str, Any]] = LabelKeyedDict()
     if is_multi:
-        # Mediated survivor-survivor exchange, 2nd order in the leg strengths:
-        # J = (g_a g_b / 2) (1/Δ_a + 1/Δ_b), Δ_i = ω_i − ω_mode (RWA exchange
-        # form; the standard bus / tunable-coupler result — F. Yan et al.,
-        # Phys. Rev. Applied 10, 054062 (2018)), read off the pair extraction
-        # above. Every survivor pair gets its own mediated exchange, folded
-        # into an existing direct coupling between that pair when one
-        # exists, else added as its own edge, so the reduced chip's net
-        # coupling is what the survivors actually feel. Tunability is kept
-        # only when the eliminated mode declares frequency control (or has a
-        # flux line being retargeted), or when the direct edge was already
-        # modulable; a fixed resonator does not create a control knob.
-        leg_g = {lbl: c.coupling_strength for lbl, c in survivors}
-        mode_freq = cast(_HasFreq, mode).freq
-        leg_delta = {lbl: cast(_HasFreq, chip[lbl]).freq - mode_freq for lbl in touching_labels}
+        # The full matrix remains authoritative; an explicit mediated edge
+        # supplies its exchange component and a target for converted flux drives.
+        # Authored direct edges retain their parameters, channels and controls.
+        leg_g = {
+            label: sum(c.coupling_strength for endpoint, c in survivors if endpoint == label)
+            for label in touching_labels
+        }
+        mode_freq = incoming_frequencies[mode_label]
+        leg_delta = {lbl: incoming_frequencies[lbl] - mode_freq for lbl in touching_labels}
 
         pairs = list(combinations(touching_labels, 2))
         single_pair = len(pairs) == 1
         for label_a, label_b in pairs:
-            # ``pair_params[("J", a, b)]`` is read off H_eff = P(H + correction)P,
-            # so it already reports the *total* post-reduction coupling. Any
-            # authored direct edges between this pair are included through the
-            # bare H term, alongside the mode-mediated correction. See the edge_strength/base_all
-            # accounting below for how that total is split back out across the
-            # reduced chip's edges without double-counting.
-            total_coupling = jnp.real(pair_params[("J", label_a, label_b)])
+            before = ctx.h[bare_index(labels, dims, label_a), bare_index(labels, dims, label_b)]
+            mediated_strength = jnp.real(pair_params[("J", label_a, label_b)] - before)
             dj_domega_c = (
                 leg_g[label_a] * leg_g[label_b] / 2.0
                 * (1.0 / leg_delta[label_a] ** 2 + 1.0 / leg_delta[label_b] ** 2)
@@ -361,103 +352,28 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
             pathways = reduction.pathways(ctx, pair_params, label_a, label_b)
 
             fresh_label = f"elim_{mode_label}" if single_pair else f"elim_{mode_label}_{label_a}_{label_b}"
-            pair = {label_a, label_b}
-            pair_edges = [c for c in kept_couplings if {c.device_a_label, c.device_b_label} == pair]
-            # folds_exchange (a prior fold may already be a TunableCapacitive,
-            # or the user built one directly) is a physics capability, not a
-            # duck-typed "g"/"g_0" attribute check — a coupling that carries a
-            # scalar strength but is not dipole-dipole exchange-compatible
-            # (e.g. a dispersive g·n_a·n_b interaction) must not silently
-            # absorb a mediated exchange term.
-            direct = next((c for c in pair_edges if c.folds_exchange), None)
-            others = [c for c in pair_edges if c is not direct]
-
-            # total_coupling already includes every pair_edges member's own
-            # contribution (each is baked into the bare Hamiltonian the pair
-            # extraction reads), at whatever RWA the chip actually resolves
-            # for it — so every edge's contribution here is read the same
-            # way, through the resolved-RWA interaction, not the raw full
-            # one (a coupling whose approximation rejects the exchange band
-            # contributes zero to total_coupling and must contribute zero
-            # here too). "others_total" is what every edge *other than* the
-            # fold target already carries; the fold target (or, with no
-            # fold target, the new parallel edge) must carry exactly
-            # total_coupling minus that, so the reduced chip's edges sum to
-            # total_coupling with nothing counted twice.
-            others_total = jnp.asarray(0.0, dtype=complex)
-            for edge in others:
-                others_total = others_total + _exchange_matrix_element(edge, label_a, chip)
-            others_total = jnp.real(others_total)
-            direct_element = (
-                jnp.real(_exchange_matrix_element(direct, label_a, chip)) if direct is not None else 0.0
-            )
-            base_all = others_total + direct_element
-            edge_strength = total_coupling - others_total
-
-            if direct is not None:
-                already_tunable = isinstance(direct, TunableCapacitive)
-                keep_tunable = mode_is_frequency_controlled or already_tunable
-                replacement: Any
-                if keep_tunable:
-                    replacement = TunableCapacitive(
-                        reduced[label_a], reduced[label_b],
-                        g_0=edge_strength, label=direct.label,
-                    )
-                else:
-                    replacement = Capacitive(
-                        reduced[label_a], reduced[label_b],
-                        g=edge_strength, label=direct.label,
-                    )
-                kept_couplings[kept_couplings.index(direct)] = replacement
-                folded_into = replacement.label
-                if already_tunable:
-                    notes.append(
-                        f"Direct coupling '{direct.label}' (TunableCapacitive): mediated exchange "
-                        "folded into its existing g_0."
-                    )
-                elif mode_is_frequency_controlled:
-                    notes.append(
-                        f"Direct coupling '{direct.label}' ({type(direct).__name__}) upgraded to "
-                        "TunableCapacitive (net g_0 folds the mediated exchange)."
-                    )
-                else:
-                    notes.append(
-                        f"Direct coupling '{direct.label}' ({type(direct).__name__}): mediated exchange "
-                        "folded into its static g."
-                    )
-                if others:
-                    other_labels = ", ".join(f"'{edge.label}'" for edge in others)
-                    notes.append(
-                        f"Other preserved coupling(s) {other_labels} between '{label_a}' and "
-                        f"'{label_b}' also carry exchange for this pair; subtracted out of "
-                        f"'{direct.label}''s replacement strength to avoid double-counting."
-                    )
+            used_labels = set(survivor_labels) | {edge.label for edge in kept_couplings}
+            edge_label = fresh_label
+            suffix = 1
+            while edge_label in used_labels:
+                edge_label = f"{fresh_label}_{suffix}"
+                suffix += 1
+            mediated: Capacitive | TunableCapacitive
+            if mode_is_frequency_controlled:
+                mediated = TunableCapacitive(
+                    reduced[label_a], reduced[label_b], g_0=mediated_strength, label=edge_label,
+                )
             else:
-                mediated: Any
-                if mode_is_frequency_controlled:
-                    mediated = TunableCapacitive(
-                        reduced[label_a], reduced[label_b], g_0=edge_strength, label=fresh_label
-                    )
-                else:
-                    mediated = Capacitive(
-                        reduced[label_a], reduced[label_b], g=edge_strength, label=fresh_label
-                    )
-                kept_couplings.append(mediated)
-                folded_into = mediated.label
-                if others:
-                    other_labels = ", ".join(f"'{edge.label}'" for edge in others)
-                    notes.append(
-                        f"Preserved coupling(s) {other_labels} between '{label_a}' and "
-                        f"'{label_b}' do not declare folds_exchange; kept unchanged, with the "
-                        f"mediated exchange added as a parallel edge '{fresh_label}' carrying "
-                        "only the differential (no double count)."
-                    )
+                mediated = Capacitive(
+                    reduced[label_a], reduced[label_b], g=mediated_strength, label=edge_label,
+                )
+            kept_couplings.append(mediated)
 
             exchange_by_pair[(label_a, label_b)] = {
-                "j_eff": total_coupling - base_all,
+                "j_eff": mediated_strength,
                 "dJ_domega_c": dj_domega_c,
                 "between": (label_a, label_b),
-                "folded_into": folded_into,
+                "coupling": edge_label,
                 "zz": zz,
                 "pathways": pathways,
             }
@@ -471,7 +387,114 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
             next(iter(exchange_by_pair.values())) if single_pair else exchange_by_pair
         )
 
-    final = rebuild_chip(chip, devices=reduced_devices, couplings=kept_couplings)
+    port_replacements: dict[str, Port] = {}
+    if affected_ports:
+        assert transformed_mode_operator is not None
+        port_target = survivor_labels[0]
+        for port in affected_ports:
+            port_replacements[port.label] = Port(
+                port_target,
+                rate=port.rate_value(chip),
+                operator=transformed_mode_operator,
+                phase=port.phase,
+                label=port.label,
+            )
+        notes.append(
+            f"Transformed port(s) {sorted(port_replacements)} through the {method} reduction; "
+            "the PortNetwork scattering and exposure reference planes are retained."
+        )
+
+    final = rebuild_chip(
+        chip,
+        devices=reduced_devices,
+        couplings=kept_couplings,
+        port_replacements=port_replacements,
+        effective_terms=(),
+        baths=(),
+    )
+    # Keep every computed correction in the retained product coordinates.
+    # Scalar summaries and convenient exchange edges are only a decomposition
+    # of this matrix; they must not determine which elements survive.
+    retained_h = reduction.retained_hamiltonian(ctx)
+    source_bases = chip.resolve(frame="lab").bases
+    transforms = [source_bases[label].energy_vectors for label in survivor_labels]
+    lift = transforms[0]
+    for transform in transforms[1:]:
+        lift = jnp.kron(lift, transform)
+    final_resolved = final.resolve(frame="lab")
+    final_matrix = jnp.asarray(final_resolved.hamiltonian().matrix(backend=final.backend), dtype=complex)
+    final_lift = final_resolved.bases[survivor_labels[0]].vectors
+    for label in survivor_labels[1:]:
+        final_lift = jnp.kron(final_lift, final_resolved.bases[label].vectors)
+    correction = lift @ retained_h @ lift.conj().T - final_lift @ final_matrix @ final_lift.conj().T
+    inherited_channels = []
+
+    def inherit_channel(channel: CollapseChannel, support_labels: tuple[str, ...], name: str) -> None:
+        local = jnp.asarray(chip.backend.to_array(materialize_expr(channel.operator, chip.backend)))
+        transform = source_bases[support_labels[0]].energy_vectors
+        for label in support_labels[1:]:
+            transform = jnp.kron(transform, source_bases[label].energy_vectors)
+        local = transform.conj().T @ local @ transform
+        support = tuple(labels.index(label) for label in support_labels)
+        local_dims = [dims[index] for index in support]
+        native = chip.backend.from_array(local, dims=[local_dims, local_dims])
+        embedded = embed_on_support(chip.backend, native, support, dims)
+        transformed = reduction.transform_operator(ctx, jnp.asarray(chip.backend.to_array(embedded)))
+        inherited_channels.append(CollapseChannel(
+            lift @ transformed @ lift.conj().T,
+            materialize_expr(channel.rate, chip.backend), name,
+        ))
+
+    removed_owners = {id(mode), *(id(coupling) for coupling in touching)}
+    contributions = chip._collapse_contributions_with_owners(source_bases)
+    for operator, rate, support, owner_label, name, _paths, owner in contributions:
+        if id(owner) in removed_owners or isinstance(owner, EffectiveTerms):
+            support_labels = tuple(labels[index] for index in support) if support else tuple(labels)
+            inherit_channel(CollapseChannel(operator, rate, name), support_labels,
+                            name if owner is mode else f"{owner_label}.{name}")
+    source_lift = reduce(jnp.kron, (source_bases[label].energy_vectors for label in labels))
+    step_embedding = source_lift @ reduction.embedding(ctx) @ lift.conj().T
+    projected_baths = []
+    for bath in chip.baths:
+        copied = bath.copy()
+        copied._retained = {}
+        for label, frequency, lowering, number in bath._target_operators(chip, source_bases):
+            matrices = [jnp.asarray(chip.backend.to_array(materialize_expr(op, chip.backend)))
+                        for op in (lowering, number)]
+            if bath._retained is None:
+                for terms in chip.effective_terms:
+                    if terms.projection is not None:
+                        matrices = [jnp.asarray(chip.backend.to_array(materialize_expr(
+                            terms.projection.apply(op, tuple(labels)), chip.backend))) for op in matrices]
+            copied._retained[label] = (frequency, *[step_embedding.conj().T @ op @ step_embedding
+                                                   for op in matrices])
+        projected_baths.append(copied)
+    projection = OperatorProjection.capture(
+        chip, tuple(survivor_labels), tuple(final.authored_dims),
+        step_embedding,
+    ).with_current_operators(tuple(f"port:{label}" for label in port_replacements))
+    terms = EffectiveTerms(tuple(survivor_labels), tuple(final.authored_dims), correction,
+                           tuple(inherited_channels), label=f"retained_{mode_label}", projection=projection)
+    final = rebuild_chip(chip, devices=final.devices, couplings=final.couplings,
+                         port_replacements=port_replacements,
+                         effective_terms=(*final.effective_terms, terms), baths=projected_baths)
+    source_factors = tuple(
+        source_bases[label].vectors.conj().T @ source_bases[label].energy_vectors for label in labels
+    )
+    target_to_solver = final_lift.conj().T @ lift
+    mapping = ReductionMap(
+        source_labels=tuple(labels), source_dims=tuple(dims),
+        target_labels=tuple(survivor_labels), target_dims=tuple(final_resolved.dims),
+        _backend=chip.backend,
+        _embedding=DeferredValue(
+            lambda: reduce(jnp.kron, source_factors) @ reduction.embedding(ctx) @ target_to_solver.conj().T
+        ),
+    )
+    order = "second-order" if method == "sw" else "exact projected"
+    notes.append(f"Retained the full {order} Hamiltonian correction and each transformed channel "
+                 "from the removed components; inherited decay remains collective and separate "
+                 "from intrinsic survivor noise.")
+
     reattach_equipment(
         chip,
         final,
@@ -483,8 +506,8 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
         edges=exchange_by_pair if is_multi else None,
         notes=notes,
     )
-    detach_intermediate_clone(reduced_devices, reduced)
-    return EliminationResult(chip=final, effective_params=effective_params, validity=validity, notes=notes)
+    return EliminationResult(chip=final, effective_params=effective_params, validity=validity,
+                             notes=notes, mapping=mapping)
 
 
 register_elimination_target(EliminationTarget(

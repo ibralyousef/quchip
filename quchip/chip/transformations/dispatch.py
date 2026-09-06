@@ -9,13 +9,9 @@ transformation result exposes;
 :class:`~quchip.inverse_design.types.FitADressResult` already satisfies it with
 no changes.
 
-``eliminate`` performs **model reduction**: it removes a far-detuned mode (or
-an edge coupling) and replaces its effect on the survivors with ordinary
-owned-Hamiltonian physics — a Lamb shift folded into ``freq``, Purcell decay
-folded into ``T1``, mediated exchange folded into a coupling — so the engine
-never special-cases the reduction. The approximation
-is declared in :attr:`EliminationResult.notes` and
-:attr:`EliminationResult.validity`.
+``eliminate`` removes a mode or edge and retains its computed correction in
+``EffectiveTerms``. Surviving authored parameters stay unchanged. The result
+reports the approximation, diagnostics and captured coordinate map.
 
 Each target *kind* is an :class:`EliminationTarget` — a pair of ``(claims,
 reduce)`` closures registered in :data:`_ELIMINATION_TARGETS`. The dispatcher
@@ -88,32 +84,22 @@ def eliminate(chip: "Chip", target: Any, *, method: str = "sw") -> EliminationRe
     coupling label that collides with a device label) and dispatches to one
     of two model reductions:
 
-    - **Device target** — adiabatic elimination of a far-detuned mode, via
-      :mod:`quchip.chip.sw`. A mode touching **one** survivor folds into a
-      Lamb shift (and a Purcell channel when the mode dissipates). A mode
-      touching **two or more** survivors — bus / tunable-coupler (bridge) or
-      several at once — additionally induces a mediated exchange ``J =
-      g_a g_b / 2 · (1/Δ_a + 1/Δ_b)`` between every survivor pair (with
-      ``∂J/∂ω_c`` recorded alongside it), folded into the direct coupling
-      between that pair when one exists or added as a new edge otherwise.
-      A fixed eliminated mode emits a
-      :class:`~quchip.chip.couplings.Capacitive`; a mode that declares
-      frequency control, has a retargeted flux line, or folds into an
-      already-modulable edge emits a
-      :class:`~quchip.chip.couplings.TunableCapacitive`. At a tunable
-      coupler's idle point, its ``g_0`` is the net coupling the pair feels,
-      including any direct-edge cancellation. Eliminating several couplers
-      is sequential composition:
-      ``eliminate(eliminate(chip, "TC1").chip, "TC2")``.
-    - **Coupling target** — dispersive reduction of an exchange edge to its
-      dressed cross-Kerr shift: both endpoint devices survive (Lamb-shifted),
-      and the coupling itself is replaced by a
-      :class:`~quchip.chip.couplings.CrossKerr` carrying the dressed pull
-      (see :func:`~quchip.chip.transformations.eliminate_coupling.reduce_coupling`).
-      This is the effective-readout-chip flow — reduce a qubit-resonator
-      exchange edge to the diagonal interaction an ordinary charge line
-      probes. ``method`` has no effect here: no mode is removed, so the
-      reduction always reads the chip's exact dressed spectrum.
+    - **Device target** — remove a far-detuned mode while retaining its
+      computed Hamiltonian correction, transformed channels and interpretation
+      map. Surviving devices and direct couplings retain their authored values.
+      A mode connecting several survivors contributes a separate mediated
+      exchange edge per pair, with ``∂J/∂ω_c`` reported for control retargeting.
+      Fixed modes emit :class:`~quchip.chip.couplings.Capacitive`; modes with
+      frequency control or a retargeted flux line emit
+      :class:`~quchip.chip.couplings.TunableCapacitive`. Direct and mediated
+      contributions can cancel in the complete Hamiltonian. Successive
+      reductions compose through ``eliminate(eliminate(chip, "TC1").chip, "TC2")``.
+    - **Coupling target** — keep both endpoints and remove the selected edge.
+      A coordinate change derived from that isolated pair acts on the entire
+      Hamiltonian, including parallel and spectator interactions. The exact
+      route retains a full unitary transformation; SW retains terms through
+      second order. The correction preserves per-level shifts without folding
+      them into endpoint frequencies or a uniform cross-Kerr coefficient.
 
     Parameters
     ----------
@@ -122,15 +108,14 @@ def eliminate(chip: "Chip", target: Any, *, method: str = "sw") -> EliminationRe
     target
         The device or coupling to eliminate — label string or object.
     method
-        Device targets only. ``"sw"`` (default) is the 2nd-order
-        Schrieffer-Wolff reduction (Bravyi, DiVincenzo & Loss, Ann. Phys. 326,
-        2793 (2011)) — cheap, differentiable, and what every effective
-        parameter above is derived from perturbatively. ``"exact"`` instead
-        exactly diagonalizes the same resolved static model as the SW route
-        (exact-from-dressing, :func:`quchip.chip.sw.exact_reduction`) — exact
-        kept-block energies (what residual ZZ needs) at the cost of a full
-        diagonalization, and it raises when near-degenerate dressed states
-        make the bare labeling ambiguous. Any other value raises ``ValueError``.
+        ``"sw"`` (default) retains second-order Schrieffer-Wolff terms using
+        the chip's approximation. ``"exact"`` uses the unapproximated static
+        Hamiltonian. For device targets it diagonalizes the full chip and
+        selects a retained subspace, rejecting ambiguous computational labels.
+        For edge targets it diagonalizes the selected isolated pair and
+        transforms the full chip through that unitary. Surviving noise operators
+        follow the captured map while components retain rate ownership.
+        Control operators are not transformed yet.
 
     Returns
     -------
@@ -143,7 +128,7 @@ def eliminate(chip: "Chip", target: Any, *, method: str = "sw") -> EliminationRe
     >>> q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
     >>> r = Resonator(freq=7.0, levels=5, label="r")
     >>> chip = Chip([q, r], couplings=[Capacitive(q, r, g=0.05)])
-    >>> result = eliminate(chip, r)          # r removed; Lamb shift folded into q.freq
+    >>> result = eliminate(chip, r)          # r removed; its correction is retained
     >>> reduced = result.chip
     >>> [d.label for d in reduced.devices]
     ['q']

@@ -38,7 +38,6 @@ import numpy as np
 
 from quchip.backend import EigensystemData, Operator, State, _backend_context
 from quchip.chip.dressing import (
-    EigenstateReference,
     Labeling,
     assign_rowwise_greedy,
     label_eigensystem,
@@ -54,8 +53,9 @@ if TYPE_CHECKING:
     from quchip.engine.ir import EngineResult
 
 
+_STATE_OVERLAP_WARNING = 0.9
 _DRESS_TRACING_ERROR = (
-    "Chip.dress() returns a concrete dict-keyed DressedResult and is not "
+    "Dressing returns a concrete dict-keyed DressedResult and is not "
     "traceable under jax.jit/grad/vmap. Use Chip.energy(), Chip.freq(), "
     "Chip.dispersive_shift(), or Chip.state() inside transforms — they "
     "route through the array-only kernel in quchip.chip.dressing and stay "
@@ -143,6 +143,120 @@ class DressedResult:
         return self._eigensystem.eigenstates
 
 
+def _materialize_dressed_result(
+    eigenvalues: Any,
+    eigenvector_matrix: Any,
+    eigensystem: EigensystemData,
+    kernel_labeling: Labeling,
+    *,
+    overlap_threshold: float,
+    labeling: str,
+    warning_stacklevel: int,
+) -> DressedResult:
+    """Build the eager label-keyed result shared by chip and resolved dressing."""
+    if contains_tracer((kernel_labeling.indices, kernel_labeling.overlaps)):
+        raise RuntimeError(_DRESS_TRACING_ERROR)
+
+    bare_labels = kernel_labeling.keys
+    indices_np = np.asarray(kernel_labeling.indices)
+    overlaps_np = np.asarray(kernel_labeling.overlaps)
+    state_map: dict[tuple[int, ...], int] = {}
+    bare_labels_by_dressed_index: dict[int, tuple[int, ...]] = {}
+    assignment_overlaps: dict[tuple[int, ...], float] = {}
+    dressed_eigenvalues: dict[tuple[int, ...], Any] = {}
+    for k, bare_label in enumerate(bare_labels):
+        index = int(indices_np[k])
+        state_map[bare_label] = index
+        bare_labels_by_dressed_index[index] = bare_label
+        assignment_overlaps[bare_label] = float(overlaps_np[k])
+        dressed_eigenvalues[bare_label] = eigenvalues[index]
+
+    hybridized_labels = tuple(
+        bare_label
+        for bare_label in bare_labels
+        if assignment_overlaps[bare_label] < overlap_threshold
+    )
+    if hybridized_labels:
+        preview = ", ".join(
+            f"{label} ({assignment_overlaps[label]:.3f})"
+            for label in sorted(
+                hybridized_labels,
+                key=lambda item: assignment_overlaps[item],
+            )[:4]
+        )
+        warnings.warn(
+            "Strong hybridization detected during dressed-state assignment; "
+            "bare labels are approximate for "
+            f"{len(hybridized_labels)} states. Lowest-overlap labels: "
+            f"{preview}. Inspect DressedResult.assignment_overlaps for "
+            "full assignment quality.",
+            UserWarning,
+            stacklevel=warning_stacklevel,
+        )
+
+    return DressedResult(
+        eigenvalues=eigenvalues,
+        state_map=state_map,
+        dressed_eigenvalues=dressed_eigenvalues,
+        assignment_overlaps=assignment_overlaps,
+        hybridized_labels=hybridized_labels,
+        bare_labels=bare_labels,
+        bare_labels_by_dressed_index=bare_labels_by_dressed_index,
+        eigenvector_matrix=eigenvector_matrix,
+        overlap_threshold=float(overlap_threshold),
+        labeling=labeling,
+        _eigensystem=eigensystem,
+    )
+
+
+def dress_engine_result(
+    result: "EngineResult",
+    *,
+    at_time: Any | None = None,
+    overlap_threshold: float = 0.5,
+    labeling: str = "DE",
+) -> DressedResult:
+    """Materialize the instantaneous dressed eigensystem of an engine snapshot."""
+    if labeling != "DE":
+        raise ValueError(f"Unsupported labeling {labeling!r}. Only 'DE' is implemented.")
+    if result._dressing_context is None:
+        raise RuntimeError(
+            "EngineResult has no resolved dressing context; obtain it from Chip.resolve() "
+            "or a built solve problem."
+        )
+    if result.dynamic_terms and at_time is None:
+        raise ValueError(
+            "A dynamic EngineResult requires dress(at_time=...); this is an "
+            "instantaneous eigensystem, not a Floquet analysis."
+        )
+    context = result._dressing_context
+    backend = context.backend
+    hamiltonian = result.hamiltonian().matrix(t=at_time, backend=backend)
+    if contains_tracer((hamiltonian, context.reference.local_vectors)):
+        raise RuntimeError(_DRESS_TRACING_ERROR)
+    native_hamiltonian = backend.from_array(
+        hamiltonian,
+        dims=[list(result.dims), list(result.dims)],
+    )
+    eigensystem = backend.eigensystem_data(native_hamiltonian)
+    eigenvalues = eigensystem.eigenvalues
+    eigenvector_matrix = eigensystem.eigenvector_matrix
+    kernel_labeling = label_eigensystem(
+        jnp.asarray(eigenvector_matrix),
+        context.reference,
+        policy=assign_rowwise_greedy,
+    )
+    return _materialize_dressed_result(
+        eigenvalues,
+        eigenvector_matrix,
+        eigensystem,
+        kernel_labeling,
+        overlap_threshold=float(overlap_threshold),
+        labeling=labeling,
+        warning_stacklevel=4,
+    )
+
+
 @dataclass(frozen=True)
 class KerrMatrix:
     """Labeled dressed self-Kerr and cross-Kerr coefficients in GHz.
@@ -199,6 +313,37 @@ jtu.register_pytree_node(
 )
 
 
+def kerr_entry(
+    index_a: int,
+    index_b: int,
+    *,
+    dims: tuple[int, ...],
+    eigenvalues: Any,
+    labeling: Labeling,
+) -> Any:
+    """Read one self- or cross-Kerr coefficient from a captured labeled spectrum."""
+    n_devices = len(dims)
+    if not 0 <= index_a < n_devices or not 0 <= index_b < n_devices:
+        raise IndexError(f"Kerr matrix indices must be in [0, {n_devices}), got {(index_a, index_b)}.")
+
+    def energy(*excitations: tuple[int, int]) -> Any:
+        label = [0] * n_devices
+        for index, level in excitations:
+            label[index] = level
+        row = np.ravel_multi_index(tuple(label), dims)
+        eigen_index = labeling.indices[row]
+        values = jnp.asarray(eigenvalues) if contains_tracer(eigen_index) else eigenvalues
+        return values[eigen_index]
+
+    e0 = energy()
+    if index_a == index_b:
+        if dims[index_a] < 3:
+            dtype = jnp.real(jnp.asarray(eigenvalues)).dtype
+            return jnp.asarray(jnp.nan, dtype=dtype)
+        return energy((index_a, 2)) - 2.0 * energy((index_a, 1)) + e0
+    return energy((index_a, 1), (index_b, 1)) - energy((index_a, 1)) - energy((index_b, 1)) + e0
+
+
 class ChipAnalysis:
     """Dressed-state analysis, caching, and dressed-basis helpers.
 
@@ -226,21 +371,55 @@ class ChipAnalysis:
         self._bare_labels_signature: tuple[int, ...] | None = None
 
     def _analysis_signature(self) -> tuple[Any, ...]:
-        """Hashable fingerprint covering every structural input to dressing."""
+        """Hashable fingerprint covering every structural input to dressing.
+
+        Ports and the port network enter because cascades add coherent terms to
+        the dressed Hamiltonian. Traced values are keyed by identity; a traced
+        result is never cached anyway.
+        """
+        from quchip.chip.chip import _operator_cache_value
+        from quchip.declarative.parameters import component_fingerprint
+
         chip = self._chip
+
+        def scalar(value: Any) -> Any:
+            concrete = maybe_concrete_scalar(value)
+            return ("traced", id(value)) if concrete is None else concrete
+
+        def operator(value: Any) -> Any:
+            try:
+                return _operator_cache_value(value)
+            except ValueError:
+                return ("traced", id(value))
+
+        network = chip.port_network
+        try:
+            network_key = None if network is None else network.fingerprint()
+        except ValueError:
+            network_key = ("traced", id(network))
         return (
             f"{type(chip.backend).__module__}.{type(chip.backend).__qualname__}",
             chip.basis,
-            tuple((device.label, device.state_version) for device in chip.devices),
+            tuple(component_fingerprint(device) for device in chip.devices),
             tuple(
                 (
                     f"{type(coupling).__module__}.{type(coupling).__qualname__}",
                     coupling.device_a_label,
                     coupling.device_b_label,
-                    coupling.state_version,
+                    component_fingerprint(coupling),
                 )
                 for coupling in chip.couplings
             ),
+            tuple(
+                (
+                    port.label,
+                    tuple(port.resolve_targets(chip)),
+                    tuple((name, scalar(value)) for name, value in port.parameter_values().items()),
+                    operator(port.operator),
+                )
+                for port in chip.ports
+            ),
+            network_key,
         )
 
     def engine_result(self, *, _local_resolution: Any | None = None) -> EngineResult:
@@ -370,7 +549,6 @@ class ChipAnalysis:
         ):
             return self._array_cache
 
-        from quchip.engine.basis import semantic_to_solver_transform
         from quchip.engine.assembly import _analysis_matrix_ghz
 
         if engine_result is None:
@@ -391,21 +569,10 @@ class ChipAnalysis:
         evals_jax = jnp.asarray(eigenvalues)
         evecs_jax = jnp.asarray(eigenvector_matrix)
 
-        local_vectors: list[Any] = []
-        for device in chip.devices:
-            record = engine_result.bases[device.label]
-            transform = semantic_to_solver_transform(device, record)
-            if transform is None:
-                transform = jnp.eye(record.resolved_dim, dtype=jnp.complex128)
-            local_vectors.append(transform)
-        product_vectors = local_vectors[0]
-        for vectors in local_vectors[1:]:
-            product_vectors = jnp.kron(product_vectors, vectors)
-        reference = EigenstateReference(
-            vectors=product_vectors.T,
-            keys=tuple(itertools.product(*(range(dimension) for dimension in dims))),
-        )
-        labeling = label_eigensystem(evecs_jax, reference, policy=assign_rowwise_greedy)
+        context = engine_result._dressing_context
+        if context is None:
+            raise RuntimeError("Resolved analysis is missing its captured dressing reference.")
+        labeling = label_eigensystem(evecs_jax, context.reference, policy=assign_rowwise_greedy)
 
         # The 3rd slot carries the EigensystemData (lazy eigenstates) rather than
         # a materialized ket list — nothing on the hot path reads it. The cache
@@ -461,7 +628,12 @@ class ChipAnalysis:
             eigenvalues, _, _, kernel_labeling = self._compute_array_labeled()
         else:
             eigenvalues, kernel_labeling = precomputed
-        return eigenvalues[kernel_labeling.indices[bare_idx]]
+        index = kernel_labeling.indices[bare_idx]
+        if contains_tracer(index) and not contains_tracer(eigenvalues):
+            import jax.numpy as jnp
+
+            return jnp.asarray(eigenvalues)[index]
+        return eigenvalues[index]
 
     def dress(
         self,
@@ -472,7 +644,9 @@ class ChipAnalysis:
     ) -> DressedResult:
         """Diagonalize the lab-frame Hamiltonian and assign bare-state labels.
 
-        Assignment goes through the ``label_eigensystem`` kernel
+        Dressing keeps network-generated Hamiltonian terms, so the assigned
+        eigenstates match the solver Hamiltonian; degenerate cascaded modes
+        therefore dress into superpositions. Assignment goes through the ``label_eigensystem`` kernel
         (:mod:`quchip.chip.dressing`) with ``assign_rowwise_greedy`` —
         confidence-ordered row-greedy matching as a pure ``lax.scan``,
         ``O(D**2)`` in the Hilbert dimension versus the ``O(D**3)`` global
@@ -519,57 +693,14 @@ class ChipAnalysis:
 
         eigenvalues, eigenvector_matrix, eigensystem, kernel_labeling = self._compute_array_labeled()
 
-        if not self._array_labeled_concrete(kernel_labeling):
-            raise RuntimeError(_DRESS_TRACING_ERROR)
-
-        # The kernel already carries the local-energy product keys in
-        # Kronecker order; reuse them instead of rebuilding the product.
-        bare_labels = kernel_labeling.keys
-        indices_np = np.asarray(kernel_labeling.indices)
-        overlaps_np = np.asarray(kernel_labeling.overlaps)
-
-        state_map: dict[tuple[int, ...], int] = {}
-        bare_labels_by_dressed_index: dict[int, tuple[int, ...]] = {}
-        assignment_overlaps: dict[tuple[int, ...], float] = {}
-        dressed_eigenvalues: dict[tuple[int, ...], Any] = {}
-        for k, bare_label in enumerate(bare_labels):
-            idx = int(indices_np[k])
-            state_map[bare_label] = idx
-            bare_labels_by_dressed_index[idx] = bare_label
-            assignment_overlaps[bare_label] = float(overlaps_np[k])
-            dressed_eigenvalues[bare_label] = eigenvalues[idx]
-
-        hybridized_labels = tuple(
-            bare_label for bare_label in bare_labels
-            if assignment_overlaps[bare_label] < overlap_threshold
-        )
-        if hybridized_labels:
-            preview = ", ".join(
-                f"{label} ({assignment_overlaps[label]:.3f})"
-                for label in sorted(hybridized_labels, key=lambda item: assignment_overlaps[item])[:4]
-            )
-            warnings.warn(
-                "Strong hybridization detected during dressed-state assignment; "
-                "bare labels are approximate for "
-                f"{len(hybridized_labels)} states. Lowest-overlap labels: "
-                f"{preview}. Inspect DressedResult.assignment_overlaps for "
-                "full assignment quality.",
-                UserWarning,
-                stacklevel=2,
-            )
-
-        result = DressedResult(
-            eigenvalues=eigenvalues,
-            state_map=state_map,
-            dressed_eigenvalues=dressed_eigenvalues,
-            assignment_overlaps=assignment_overlaps,
-            hybridized_labels=hybridized_labels,
-            bare_labels=bare_labels,
-            bare_labels_by_dressed_index=bare_labels_by_dressed_index,
-            eigenvector_matrix=eigenvector_matrix,
+        result = _materialize_dressed_result(
+            eigenvalues,
+            eigenvector_matrix,
+            eigensystem,
+            kernel_labeling,
             overlap_threshold=float(overlap_threshold),
             labeling=labeling,
-            _eigensystem=eigensystem,
+            warning_stacklevel=3,
         )
         self._dressed_result = result
         self._dressed_signature = signature
@@ -621,7 +752,8 @@ class ChipAnalysis:
     def _dressed_state(self, **device_states: int) -> Any:
         """Dressed eigenstate (as a backend ket) for a bare-state label.
 
-        Eager: the cached dict view (with hybridization warnings).
+        Eager: the cached dict view (with the dress-time hybridization
+        warning and a per-label low-overlap warning).
         Traced: selects the assigned eigenvector column straight through
         the :func:`label_eigensystem` array kernel —
         ``evecs[:, labeling.indices[bare_idx]]`` — so dressed initial
@@ -645,6 +777,16 @@ class ChipAnalysis:
             raise KeyError(
                 f"State label {label_t} not found in state map. Available (first 10): {available}"
             ) from None
+        overlap = dressed.assignment_overlaps[label_t]
+        if overlap < _STATE_OVERLAP_WARNING:
+            # Hops: _dressed_state -> ChipAnalysis.state -> states.state -> Chip.state -> caller.
+            warnings.warn(
+                f"Dressed state label {label_t} has assignment overlap {overlap:.3f} "
+                f"(< {_STATE_OVERLAP_WARNING:.3f}); chip.state() returns the assigned dressed "
+                "eigenstate. Use chip.bare_state(...) for the product state.",
+                UserWarning,
+                stacklevel=5,
+            )
         return dressed.eigenstates[eigen_idx]
 
     def _dressed_frequencies(
@@ -950,43 +1092,13 @@ class ChipAnalysis:
         index_a, _ = self._chip._resolve_device_index(device_a)
         index_b, _ = self._chip._resolve_device_index(device_b)
         eigenvalues, _, _, kernel_labeling = self._compute_array_labeled()
-        return self._kerr_entry(
+        return kerr_entry(
             index_a,
             index_b,
+            dims=self._semantic_dims(),
             eigenvalues=eigenvalues,
             labeling=kernel_labeling,
         )
-
-    def _kerr_entry(
-        self,
-        index_a: int,
-        index_b: int,
-        *,
-        eigenvalues: Any,
-        labeling: Labeling,
-    ) -> Any:
-        """Evaluate one dressed Kerr coefficient from a labeled eigensystem."""
-        n_devices = len(self._chip.devices)
-        if not 0 <= index_a < n_devices or not 0 <= index_b < n_devices:
-            raise IndexError(f"Kerr matrix indices must be in [0, {n_devices}), got {(index_a, index_b)}.")
-
-        precomputed = (eigenvalues, labeling)
-        ground = (0,) * n_devices
-
-        def energy(*excitations: tuple[int, int]) -> Any:
-            label = list(ground)
-            for index, level in excitations:
-                label[index] = level
-            return self._eigenvalue_of_label(tuple(label), precomputed=precomputed)
-
-        e0 = energy()
-        if index_a == index_b:
-            if self._semantic_dims()[index_a] < 3:
-                dtype = jnp.real(jnp.asarray(eigenvalues)).dtype
-                return jnp.asarray(jnp.nan, dtype=dtype)
-            return energy((index_a, 2)) - 2.0 * energy((index_a, 1)) + e0
-
-        return energy((index_a, 1), (index_b, 1)) - energy((index_a, 1)) - energy((index_b, 1)) + e0
 
     def kerr_matrix(self) -> KerrMatrix:
         """Return the dressed self-Kerr and cross-Kerr matrix in GHz.
@@ -1004,9 +1116,10 @@ class ChipAnalysis:
         for row in range(n_devices):
             for column in range(row, n_devices):
                 entry = jnp.real(
-                    self._kerr_entry(
+                    kerr_entry(
                         row,
                         column,
+                        dims=self._semantic_dims(),
                         eigenvalues=eigenvalues,
                         labeling=labeling,
                     )
@@ -1071,9 +1184,10 @@ class ChipAnalysis:
         """Dressed anharmonicity (GHz): ``E_2 − 2·E_1 + E_0``, others grounded."""
         index, _ = self._chip._resolve_device_index(device)
         eigenvalues, _, _, kernel_labeling = self._compute_array_labeled()
-        return self._kerr_entry(
+        return kerr_entry(
             index,
             index,
+            dims=self._semantic_dims(),
             eigenvalues=eigenvalues,
             labeling=kernel_labeling,
         )
@@ -1185,6 +1299,10 @@ class ChipAnalysis:
         through :func:`~quchip.chip.states.normalize_device_state_mapping`
         when :meth:`Chip.set_state_order` has been called. Use
         :meth:`Chip.bare_state` for arbitrary kets.
+
+        If the requested label's assignment overlap is low, this method
+        warns and names :meth:`Chip.bare_state` as the product-state
+        alternative.
 
         Safe inside ``jax.jit``/``grad``/``vmap``: under tracing the
         eigenvector column is selected through the array kernel, so a
