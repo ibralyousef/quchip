@@ -1,93 +1,31 @@
-"""Base device model for quchip.
+"""Base class for finite local quantum devices.
 
-A device is a finite local quantum system owned by a chip. Subclasses declare
-their Hamiltonian on an explicit authored :class:`LocalSpace`; the engine may
-retain that basis or project it into local energy order.
+Devices own local Hamiltonians on an authored :class:`LocalSpace`; couplings
+and drives contribute separate terms. :meth:`unresolved_hamiltonian` returns
+the authored operator, while :meth:`hamiltonian` applies local basis and frame
+policies. Each model must state its approximations and physical references.
 
-Contract
---------
-* **Hamiltonian ownership.** A device owns its *local* Hamiltonian only;
-  couplings and drives own theirs. :meth:`unresolved_hamiltonian` returns
-  that authored operator; :meth:`hamiltonian` returns the engine-resolved
-  local view after basis and frame policies.
-* **JAX traceability.** Every parameter passed to a subclass's
-  ``__init__`` (frequency, anharmonicity, T1/T2, thermal population,
-  …) may be a JAX tracer. Validation routines must never force
-  concretization on a traced value; use
-  :func:`quchip.utils.jax_utils.maybe_concrete_scalar` to peek at
-  concrete scalars only.
-* **Approximation transparency.** Each concrete model must document its
-  approximation level and cite a reference. Examples: :class:`Resonator`
-  states "non-interacting harmonic mode"; :class:`DuffingTransmon` states
-  "Duffing expansion valid in the transmon regime ``E_J >> E_C``".
+Drive channels use the device's physical lowering, raising, and number
+operators. ``sigma_x``, ``sigma_y``, and ``sigma_z`` act on the two lowest
+isolated energy states of the current local Hamiltonian.
 
-Channels offered to drives
---------------------------
-Drives sit on top of a device and emit local Hamiltonians built from
-standard bosonic / projection operators the device exposes:
+Numerical physics parameters may be JAX tracers; structural dimensions and
+settings stay fixed during tracing. Validation must avoid concretizing traced
+values; use :func:`quchip.utils.jax_utils.maybe_concrete_scalar` for concrete
+checks. :class:`~quchip.utils.state_versioning.StateVersioned` tracks attribute
+writes, and :class:`~quchip.utils.registry.Registrable` dispatches deserialization.
 
-* :meth:`lowering_operator` (``a``) and :meth:`raising_operator`
-  (``a_dag``) — used by charge / coupling-type drives.
-* :meth:`number_operator` (``n_hat = a_dag @ a``) — used by
-  number-coupled (dispersive) drives.
-* :attr:`sigma_x`, :attr:`sigma_y`, :attr:`sigma_z` — the qubit
-  subspace projections onto ``|0>``, ``|1>`` (cached; invalidated
-  automatically when ``levels`` changes).
-
-State versioning
-----------------
-The engine caches assembled Hamiltonians keyed on :attr:`state_version`.
-Once construction finishes, every public mutation (anything not prefixed
-with ``_`` and not ``label``) increments ``_state_version`` so caches are
-invalidated deterministically. This machinery — the seed, the
-``__setattr__`` tracking hook, ``state_version``, and ``_finish_init`` —
-is owned by the shared :class:`~quchip.utils.state_versioning.StateVersioned`
-mixin; :class:`BaseDevice` only contributes its untracked-name set
-(``label``) and the ``levels`` cache-invalidation hook
-(:meth:`_on_attr_set`). Tracking switches on automatically exactly once
-after the outermost ``__init__`` returns; subclasses do not call
-``_finish_init`` directly.
-
-Auto-labeling
--------------
-Subclasses set ``_type_prefix`` (e.g. ``"duffing"``, ``"resonator"``)
-and a shared counter in :mod:`quchip.utils.labeling` yields labels like
-``"duffing_0"``, ``"resonator_0"``. Reset between tests via
-:func:`quchip.utils.labeling.reset_label_counters`.
-
-Serialization
--------------
-:meth:`to_dict` writes a JSON-safe snapshot (type fully-qualified name,
-``levels``, ``label``, concrete noise parameters). Deserialization
-dispatch to the registered concrete subclass is owned by the shared
-:class:`~quchip.utils.registry.Registrable` mixin — the registry is
-populated automatically at subclass-definition time, with no manual
-registration step.
-
-Units (immutable)
------------------
-* Frequencies: GHz, ordinary (not angular).
-* Times: ns.
-* Temperature: mK.
-* Energies: GHz (with ``hbar = 1``).
-
-Example
--------
->>> from quchip.devices import DuffingTransmon, Resonator
->>> from quchip.chip import Chip
->>> q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
->>> r = Resonator(freq=7.0, levels=6, label="r")
->>> chip = Chip(devices=[q, r])
->>> float((q.freq * q.number_operator()).norm())  # doctest: +SKIP
+Frequencies and energies ``E/h`` are in GHz, times in ns, and temperatures in
+mK. Engine assembly converts Hamiltonians to angular frequency.
 """
 
 from __future__ import annotations
 
+from types import MemberDescriptorType
+from operator import index
 import copy
-import weakref
 from abc import ABC, abstractmethod
-from functools import cached_property
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Mapping, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Mapping, Self, TypeVar
 
 import jax.numpy as jnp
 
@@ -102,8 +40,7 @@ from quchip.utils.state_versioning import StateVersioned
 
 if TYPE_CHECKING:
     from quchip.control.drive import BaseDrive
-    from quchip.chip.chip import Chip
-    from quchip.devices.spaces import LocalSpace
+    from quchip.devices.spaces import LocalSpace, TruncationBoundary
     from quchip.engine.basis import BasisRecord
     from quchip.engine.ir import EngineResult, FrameSpec
 
@@ -246,8 +183,7 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
     1. Set ``_type_prefix`` (used for auto-labeling).
     2. Expose a ``freq`` attribute — the bare ``0 -> 1`` transition
        frequency in GHz. Any JAX-traceable scalar is fine.
-    3. Implement :meth:`unresolved_hamiltonian` returning an operator on the
-       truncated Fock basis.
+    3. Implement :meth:`unresolved_hamiltonian` on the authored local space.
 
     Noise parameters (all optional; ``None`` means the channel is absent):
 
@@ -258,10 +194,10 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
       absorption and enhances emission.
 
     They are ordinary attributes: set them at construction or at any time
-    after — the next ``simulate``/``solve`` rebuilds collapse operators from
-    current values (no rebuild, no cache poking), and post-construction
-    writes get the same validation as the constructor. Setting a parameter
-    back to ``None`` removes its channel.
+    after. A newly built calculation uses the current noise parameters;
+    existing calculations retain their captured values. Writes get the same
+    validation as construction. Setting a parameter to ``None`` removes its
+    channel from subsequent calculations.
 
     Mutation tracking is enabled automatically once construction finishes
     (see :class:`~quchip.utils.state_versioning.StateVersioned`); subclasses
@@ -288,27 +224,11 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         kw_only=True,
     )
 
-    #: Bare parameters this device exposes as differentiable / tunable
-    #: scalars. ``fit_a_dress`` walks this tuple to discover what it is
-    #: allowed to optimize on each device, decoupling the inverse-design
-    #: surface from any specific device model. Three states, keyed on
-    #: whether the value is explicitly declared:
-    #:
-    #: * **No explicit declaration anywhere in the**
-    #:   :class:`~quchip.declarative.models.DeviceModel` **lineage** — the
-    #:   default is *derived*: every declared
-    #:   :func:`~quchip.declarative.parameters.parameter` field, in
-    #:   declaration order (see ``DeviceModel.__init_subclass__``).
-    #: * **Explicit tuple on the class or an ancestor** — exact curation,
-    #:   validated at class-definition time; authoritative and inherited
-    #:   until a subclass explicitly replaces it.
-    #: * **Explicit empty tuple** — deliberately freezes the device (and its
-    #:   subclasses, until one replaces it) out of inverse design.
-    #:
-    #: On a plain (non-``DeviceModel``) :class:`BaseDevice` subclass there is
-    #: no derivation; the default stays empty unless the subclass declares
-    #: its own tuple — e.g. :class:`~quchip.devices.fluxonium.Fluxonium` uses
-    #: ``("E_C", "E_J", "E_L", "phi_ext")``.
+    #: Parameters eligible for inverse design. DeviceModel derives these
+    #: from declared fields unless the class or an ancestor supplies a tuple.
+    #: Explicit tuples remain authoritative when inherited; an empty tuple
+    #: excludes the device from inverse design. Plain BaseDevice subclasses
+    #: default to an empty tuple without derivation.
     tunable_param_names: ClassVar[tuple[str, ...]] = ()
 
     #: ``(dressed_observable, declared_field)`` pairs used when this device
@@ -324,13 +244,11 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
     #: default dressed observables.
     dressed_fit_param_names: ClassVar[tuple[str, ...]] = ()
 
-    # A device's ``label`` is identity metadata, not a physics parameter, so
-    # rebinding it must not invalidate engine caches. Everything else public is
-    # tracked. (``levels`` is tracked *and* triggers the cache hook below.)
+    # Labels are fixed identity metadata. Other public assignments are tracked.
     _untracked_names = frozenset({"label"})
 
     # Per-device readout/rotating-frame reference override; ``None`` inherits
-    # :attr:`drive_freq`. Class-level default so the getter is safe even on the
+    # the calculation's dressed reference. Class-level default remains safe on the
     # JAX-pytree ``_unflatten`` path (which bypasses ``__init__``).
     _reference_freq_override: Any = None
     basis: Literal["native", "eigen"] | None = None
@@ -346,7 +264,7 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         T2: float | None = None,
         thermal_population: float | None = None,
     ) -> None:
-        if levels < 2:
+        if index(levels) < 2:
             raise ValueError(f"levels must be >= 2, got {levels}")
         self.levels = levels
 
@@ -357,17 +275,8 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
 
         self.label = label if label is not None else auto_label(type(self)._type_prefix)
 
-        self._owner_chips: weakref.WeakSet["Chip"] = weakref.WeakSet()
         self._connected_drives: list[BaseDrive] = []
         self._reference_freq_override: Any = None
-
-    def _on_attr_set(self, name: str) -> None:
-        # Invalidate cached Pauli projections when the Fock truncation changes.
-        # ``levels`` itself stays a tracked attribute (it bumps state_version
-        # via the StateVersioned hook); this only drops the derived caches.
-        if name == "levels":
-            for cached in ("sigma_x", "sigma_y", "sigma_z", "sigma_plus", "sigma_minus"):
-                self.__dict__.pop(cached, None)
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Give post-construction writes the same validation as the constructor.
@@ -381,6 +290,8 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         ``object.__setattr__`` and bypasses this hook entirely.
         """
         if getattr(self, "_tracking_enabled", False):
+            if name == "label":
+                raise AttributeError("Device label is fixed at construction; create a replacement device.")
             if not name.startswith("_"):
                 self._validate_param_write(name, value)
         super().__setattr__(name, value)
@@ -396,7 +307,7 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         Subclasses extend (``DeviceModel`` adds declared-parameter sign
         checks) and must call ``super()``.
         """
-        if name == "levels" and value < 2:
+        if name == "levels" and index(value) < 2:
             raise ValueError(f"levels must be >= 2, got {value}")
         if name in ("basis", "projection_levels"):
             self._validate_basis_request(
@@ -518,21 +429,21 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         """Drives wired to this device, as a fresh list (mutation-safe copy)."""
         return list(self._connected_drives)
 
-    def copy(self) -> "BaseDevice":
+    def copy(self) -> Self:
         """Structural copy detached from drive wiring (used by sweep cloning)."""
+        from quchip.declarative.parameters import copy_authored_fields
+
         cloned = copy.copy(self)
+        copy_authored_fields(self, cloned)
         object.__setattr__(cloned, "_connected_drives", [])
-        object.__setattr__(cloned, "_owner_chips", weakref.WeakSet())
         return cloned
 
     def parameter_values(self) -> dict[str, Any]:
-        """Return this device's active bindable values by local field name."""
+        """Return declared bindable values, including inactive optional fields."""
+        from quchip.declarative.parameters import parameter_fields
+
         values = dict(self.tunable_params())
-        values.update(
-            (name, value)
-            for name in type(self).noise_parameter_names()
-            if (value := getattr(self, name)) is not None
-        )
+        values.update((name, getattr(self, name)) for name in parameter_fields(type(self)))
         return values
 
     def set_parameter_value(self, name: str, value: Any) -> None:
@@ -541,47 +452,60 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         if name in tunable:
             self.set_tunable_param(name, value)
             return
-        if name in type(self).noise_parameter_names():
+        from quchip.declarative.parameters import parameter_fields
+
+        if name in parameter_fields(type(self)):
             setattr(self, name, value)
             return
         raise KeyError(name)
 
     def set_parameter_values(self, values: Mapping[str, Any]) -> None:
-        """Apply a group of local parameter values on an isolated device copy.
+        """Validate a complete candidate before applying a local parameter group."""
+        if not values:
+            return
+        from quchip.utils.jax_utils import contains_tracer
 
-        The default is equivalent to repeated :meth:`set_parameter_value`
-        calls. Devices with coupled parameter semantics may override this hook
-        so the result does not depend on mapping order.
-        """
+        if contains_tracer(tuple(values.values())):
+            changed = [
+                name for name, value in values.items()
+                if (getattr(self, name, None) is None) != (value is None)
+            ]
+            if changed:
+                raise ValueError(
+                    f"Activate or deactivate optional parameters {changed} with concrete values before tracing."
+                )
+        self._commit_parameter_candidate(self._parameter_candidate(values))
+
+    def _parameter_candidate(self, values: Mapping[str, Any]) -> "BaseDevice":
+        """Prepare validated state without changing this device or its ownership."""
+        from quchip.declarative.parameters import copy_authored_fields
+
+        candidate = copy.copy(self)
+        copy_authored_fields(self, candidate)
+        object.__setattr__(candidate, "_tracking_enabled", False)
         for name, value in values.items():
-            self.set_parameter_value(name, value)
+            candidate.set_parameter_value(name, value)
+        for name in values:
+            candidate._validate_param_write(name, getattr(candidate, name))
+        candidate.validate()
+        object.__setattr__(candidate, "_tracking_enabled", self._tracking_enabled)
+        object.__setattr__(candidate, "_state_version", self.state_version + 1)
+        return candidate
 
-    def _attach_chip(self, chip: "Chip") -> None:
-        """Register *chip* as an owner for context-dependent device properties."""
-        self._owner_chips.add(chip)
+    def _commit_parameter_candidate(self, candidate: "BaseDevice") -> None:
+        """Adopt validated attribute storage, including slots declared by extensions."""
+        for cls in type(self).__mro__:
+            for descriptor in vars(cls).values():
+                if isinstance(descriptor, MemberDescriptorType) and hasattr(candidate, descriptor.__name__):
+                    descriptor.__set__(self, descriptor.__get__(candidate))
+        object.__setattr__(self, "__dict__", candidate.__dict__)
 
-    def _detach_chip(self, chip: "Chip") -> None:
-        """Remove *chip* from the owner registry (mirror of :meth:`_attach_chip`).
+    def validate(self) -> None:
+        """Validate cross-field constraints at construction and grouped rebinding.
 
-        Needed by transformations that build a scratch chip around a device on
-        the way to the one the user receives: a ``Chip`` participates in a
-        chip↔analysis reference cycle, so an abandoned scratch chip dies only
-        when the *cyclic* GC runs — until then it would shadow the real owner
-        in :meth:`_single_owner_chip`.
+        Subclasses implement their joint constraints here. Gate numerical
+        checks on concrete scalars so traced parameters remain supported.
         """
-        self._owner_chips.discard(chip)
-
-    def _single_owner_chip(self) -> "Chip | None":
-        owners = list(self._owner_chips)
-        if not owners:
-            return None
-        if len(owners) > 1:
-            labels = [owner.label for owner in owners]
-            raise RuntimeError(
-                f"Device {self.label!r} belongs to multiple live Chip instances "
-                f"({labels}); use chip.freq(device) to choose the chip context explicitly."
-            )
-        return owners[0]
 
     # -- Drive lookup -------------------------------------------------------
 
@@ -597,65 +521,19 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
             return any(d.label == item for d in self._connected_drives)
         return item in self._connected_drives
 
-    # -- Dressed / drive frequency -----------------------------------------
-
-    @property
-    def dressed_freq(self) -> float | None:
-        """Chip-derived dressed 0→1 transition frequency in GHz, or ``None`` without a chip context."""
-        chip = self._single_owner_chip()
-        if chip is None:
-            return None
-        return chip.freq(self)
-
-    @property
-    def drive_freq(self) -> float:
-        """Operational 0→1 drive frequency in GHz.
-
-        When the device belongs to exactly one chip this is the chip-derived
-        dressed frequency. Standalone devices fall back to their bare ``freq``
-        because no chip Hamiltonian exists to dress against. Returned values
-        may be JAX tracers during traced / differentiated flows.
-        """
-        chip = self._single_owner_chip()
-        if chip is not None:
-            return chip.freq(self)
-        try:
-            return self.freq  # type: ignore[attr-defined]
-        except AttributeError as exc:
-            raise AttributeError(
-                f"{type(self).__name__!s} must expose a `freq` attribute "
-                "(bare 0->1 transition frequency in GHz) for drive_freq to be defined."
-            ) from exc
-
     @property
     def reference_freq(self) -> Any:
-        """Readout / rotating-frame reference frequency in GHz — the device's LO.
+        """Return the authored readout/frame reference in GHz, or ``None``.
 
-        This is the frequency the default (``frame="rotating"``) frame
-        co-rotates at *and* the reference the readout is reported in:
-        ``result.expect`` is expressed in this frame in every integration
-        frame, and in the default rotating frame ``result.states`` are too. So
-        transverse observables (``<a>``, ``<sigma_x>``) come back as the slow
-        demodulated envelope a lab readout produces — non-oscillatory when the
-        device sits at its reference, and turning at ``omega - reference_freq``
-        when detuned (idle Ramsey). Diagonal observables (populations, ``<n>``)
-        are frame-invariant and unaffected either way.
-
-        Defaults to :attr:`drive_freq` (the dressed 0->1 frequency), so an
-        unset device co-rotates at its own transition. Set it to model a
-        control/LO reference that differs
-        from the qubit frequency (a calibration detuning). It is a *frame /
-        readout* reference only: it does **not** detune drives — the drive
-        carrier is a separate choice, so a real LO error must also set the
-        drive frequency. May be a JAX tracer in traced / differentiated /
-        swept flows. Assign ``None`` to restore the default.
+        ``None`` lets each chip calculation resolve its dressed reference.
+        An explicit value fixes the readout reference independently of pulse
+        carriers and is captured in each calculation's resolved frame.
         """
-        override = self._reference_freq_override
-        return self.drive_freq if override is None else override
+        return self._reference_freq_override
 
     @reference_freq.setter
     def reference_freq(self, value: Any | None) -> None:
-        """Set the readout/rotating-frame reference (``None`` restores ``drive_freq``)."""
+        """Set the readout/rotating-frame reference (``None`` restores automatic resolution)."""
         self._reference_freq_override = value
 
     # -- Serialization ------------------------------------------------------
@@ -669,7 +547,7 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
             value = getattr(self, attr)
             if value is not None:
                 data[attr] = float(value)
-        # Persist an explicit reference_freq override (not the drive_freq
+        # Persist an explicit reference_freq override (not the resolved
         # default). Skip a traced override — it has no concrete serializable
         # value, matching how the rest of to_dict emits concrete scalars only.
         override = self._reference_freq_override
@@ -688,7 +566,7 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         """Restore a serialized ``reference_freq`` override (helper for from_dict).
 
         Sets the override only when the key is present (an absent key keeps the
-        ``drive_freq`` default). Returns ``self`` (typed as the concrete
+        automatic default). Returns ``self`` (typed as the concrete
         subclass) so ``from_dict`` can ``return cls(...)._restore_reference_freq(d)``.
         """
         if "reference_freq" in d:
@@ -707,32 +585,24 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         return self.resolve().hamiltonian()
 
     def resolve(self, *, frame: FrameSpec | None = None) -> EngineResult:
-        """Resolve this device through the same engine path used by solves.
+        """Resolve isolated device physics with its own basis and explicit frame.
 
-        An owned device inherits its chip's basis and frame policy unless
-        ``frame`` overrides this snapshot. The local result remains a
-        one-device snapshot; couplings to the rest of the chip are
-        intentionally outside a device Hamiltonian's boundary.
+        The default frame is the lab frame. Chip membership does not affect
+        this local calculation; use the chip for coupled-system queries.
         """
         from quchip.chip.chip import Chip
 
-        owner = self._single_owner_chip()
-        if owner is None:
-            return Chip([self.copy()]).resolve(frame=frame)
-
-        from quchip.engine.frames import resolve_frame
-
-        resolved_frame = resolve_frame(owner, owner.frame if frame is None else frame)
-        local_frame: Any = {self.label: resolved_frame.frequencies[self.label]}
-        return Chip(
-            [self.copy()],
-            frame=local_frame,
-            approximation=owner.approximation,
-            basis=owner.basis,
-            backend=owner.backend,
-        ).resolve()
+        return Chip([self.copy()]).resolve(frame=frame)
 
     # -- Declared approximations --------------------------------------------
+
+    def truncation_boundary(self) -> TruncationBoundary | None:
+        """Return the authored-space cutoff used by sampled truncation checks.
+
+        Intrinsically finite models override this to return None. Custom spaces
+        with a numerical cutoff return a TruncationBoundary describing its indices.
+        """
+        return self.local_space().truncation_boundary()
 
     def _truncation_note(self) -> str:
         """Return the Hilbert-truncation physics note.
@@ -805,7 +675,7 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
             raise ValueError("levels is not valid when basis='native'.")
         if basis == "eigen" and cls.requires_projection_levels and levels is None:
             raise ValueError("levels is required when basis='eigen'.")
-        if levels is not None and not 1 <= levels <= native_dimension:
+        if levels is not None and not 1 <= index(levels) <= native_dimension:
             raise ValueError(
                 f"levels must be between 1 and {native_dimension}, got {levels}"
             )
@@ -845,14 +715,11 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
 
     def energy_level_operator(self) -> Operator:
         """Return the energy-level index expressed in the authored local basis."""
-        from quchip.devices.spaces import FockSpace
-
-        space = self.local_space()
-        if isinstance(space, FockSpace):
-            return space.matrix("n")
         from quchip.engine.basis import resolve_device_basis
+        import jax
 
-        return resolve_device_basis(self, basis="native").level_operator()
+        with jax.ensure_compile_time_eval():
+            return resolve_device_basis(self, basis="native").level_operator()
 
     def identity(self) -> Operator:
         """Identity operator on the truncated Fock basis."""
@@ -869,13 +736,23 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         Recognized names: ``"X"`` / ``"Y"`` / ``"Z"`` (Pauli projections on
         the computational ``|0>, |1>`` subspace), ``"n"`` (number), ``"a"``
         (lowering), ``"a_dag"`` (raising), ``"I"`` (identity). The device owns
-        this vocabulary, so a subclass exposing extra named
+        this vocabulary. ``"charge"``, ``"phase"`` and ``"flux"`` use
+        the corresponding physical coupling operator when declared.
+        A subclass exposing extra named
         operators overrides this method — extending
         :attr:`_LOCAL_OPERATOR_NAMES` and delegating to
         ``super().local_operator(name)`` for the base set — and the chip's
         observable surface (:meth:`Chip.observable`, :meth:`Chip.e_ops`) gains
         the operator without any engine or :class:`Chip` change.
         """
+        physical = {
+            "charge": "charge_coupling_operator",
+            "phase": "phase_coupling_operator",
+            "flux": "flux_coupling_operator",
+        }
+        method = getattr(self, physical.get(name, ""), None)
+        if method is not None:
+            return method()
         if name == "X":
             return self.sigma_x
         if name == "Y":
@@ -890,9 +767,10 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
             return self.raising_operator()
         if name == "I":
             return self.identity()
+        available = [*self._LOCAL_OPERATOR_NAMES, *(key for key, field in physical.items() if hasattr(self, field))]
         raise ValueError(
             f"Unknown operator '{name}' for device '{self.label}'. "
-            f"Available: {sorted(self._LOCAL_OPERATOR_NAMES)}"
+            f"Available: {sorted(available)}"
         )
 
     def basis_state(self, n: int) -> State:
@@ -913,32 +791,42 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         from quchip.viz.device import plot_wavefunction
         return plot_wavefunction(self, n, ax=ax, **kwargs)
 
-    # -- Pauli projections into |0>, |1> (cached, invalidated on `levels`) ---
+    # -- Pauli operators on the two lowest isolated energy states -----------
 
-    @cached_property
+    def _pauli_operator(self, name: str, *, basis: BasisRecord | None = None) -> Operator:
+        from quchip.devices.spaces import FockSpace
+        from quchip.engine.basis import resolve_device_basis
+
+        basis = resolve_device_basis(self, basis="native") if basis is None else basis
+        vectors = basis.energy_vectors[:, :2]
+        matrix = vectors @ FockSpace(2).matrix(name) @ vectors.conj().T
+        dimension = self.local_space().dimension
+        return get_default_backend().from_array(matrix, dims=[[dimension], [dimension]])
+
+    @property
     def sigma_x(self) -> Operator:
-        """``|0><1| + |1><0|`` on the computational ``|0>, |1>`` subspace."""
-        return self.transition(0, 1)
+        """Return ``|0><1| + |1><0|`` on isolated energy levels, zero elsewhere."""
+        return self._pauli_operator("sigma_x")
 
-    @cached_property
+    @property
     def sigma_y(self) -> Operator:
-        """``-i|0><1| + i|1><0|`` on the computational ``|0>, |1>`` subspace."""
-        return -1j * self.projector(0, 1) + 1j * self.projector(1, 0)
+        """Return ``-i|0><1| + i|1><0|`` on isolated energy levels, zero elsewhere."""
+        return self._pauli_operator("sigma_y")
 
-    @cached_property
+    @property
     def sigma_z(self) -> Operator:
-        """``|0><0| - |1><1|`` on the computational ``|0>, |1>`` subspace."""
-        return self.projector(0, 0) - self.projector(1, 1)
+        """Return ``|0><0| - |1><1|`` on isolated energy levels, zero elsewhere."""
+        return self._pauli_operator("sigma_z")
 
-    @cached_property
+    @property
     def sigma_plus(self) -> Operator:
-        """Raising operator on the computational ``|0>, |1>`` subspace: ``|1><0|``."""
-        return self.projector(1, 0)
+        """Return ``|1><0|`` between the lowest isolated energy levels."""
+        return self._pauli_operator("sigma_plus")
 
-    @cached_property
+    @property
     def sigma_minus(self) -> Operator:
-        """Lowering operator on the computational ``|0>, |1>`` subspace: ``|0><1|``."""
-        return self.projector(0, 1)
+        """Return ``|0><1|`` between the lowest isolated energy levels."""
+        return self._pauli_operator("sigma_minus")
 
     def projector(self, i: int, j: int) -> Operator:
         """``|i><j|`` on the authored local basis.
@@ -1226,17 +1114,10 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
                 return
         self._connected_drives.append(drive)
 
-    def _repr_dressed_freq(self) -> str:
-        try:
-            return repr(self.dressed_freq)
-        except RuntimeError:
-            return "<multiple chip contexts>"
-
     def __repr__(self) -> str:
         return (
             f"{type(self).__name__}(label={self.label!r}, "
-            f"freq={getattr(self, 'freq', None)!r}, levels={self.levels}, "
-            f"dressed_freq={self._repr_dressed_freq()})"
+            f"freq={getattr(self, 'freq', None)!r}, levels={self.levels})"
         )
 
 

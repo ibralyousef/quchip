@@ -2,6 +2,60 @@
 
 This file records notable user-visible changes to quchip.
 
+## [0.3.0] - 2026-09-06
+
+### Fixes
+
+- Fixed solver selection so density-matrix initial states use `mesolve` even without collapse terms. QuTiP and dynamiqs now reject a density matrix passed explicitly to `sesolve`.
+- QuTiP no longer selects `method="diag"` automatically when the resolved SLH Hamiltonian contains network-generated static terms, avoiding diagonal-propagator failures for cascaded degenerate modes. Solver failure messages now include the underlying exception details.
+- Replaced the local eigensolver's custom VJP with a custom JVP. `jax.jacfwd` and `jax.hessian` now work through traced device parameters, while `jax.grad` is unchanged; exact degeneracies mask the eigenvector connection to zero, and second derivatives through a degeneracy remain undefined.
+- Automatic QuTiP `method="diag"` now covers open systems up to Hilbert dimension 32 (Liouvillian dimension 1024), up from 12. It made a static 20-dimensional transmon-resonator chip 100× faster than adaptive stepping.
+
+### Network and state diagnostics
+
+- `chip.state()` now warns when the requested label's assignment overlap is below `0.9` and points to `chip.bare_state()` for the product state. Degenerate cascaded modes can dress into superpositions and weaken the product-state assignment.
+- `PHYSICS.md` now states the multi-port Lamb-shift convention: `phase_shift(phase=2π f τ)` gives `+γ sin φ`, matching Kockum et al. It also states that the SLH core is Markovian: `delay()` shifts reference planes and is not retardation.
+- `Port` now documents that `rate` and `external_quality_factor` remain constant within each solve. Shaped emission uses an explicit buffer or coupler device with a static `Port` and a modulated Hamiltonian coupling.
+- Added `SimulationResult.collapse_channels`, `collapse_flux()`, and `collapse_integral()` for resolved per-channel jump rates and cumulative expected jump counts. Batch results provide the same methods with `reduce=`; an exposed plane's `raw_photon_flux` matches its collapse flux only for vacuum input.
+
+### Frames
+
+- Added opt-in `frame="auto"`, which chooses per-device frame frequencies from retained couplings and delivered scheduled signals. Drive tones include control gain, attenuation, delay, and crosstalk; coherent-input tones include network scattering and the `2π` conversion to ordinary GHz. Frequencies, pins, clusters, and residual oscillations are available through `resolved_frame.plan`, `chip.describe()`, and `sequence.describe()`.
+- `QuantumSequence.build_problem()`, `build_solve_problem()`, and `prepare_solve_problem_context()` now accept `frame=`. Entry-axis batches resolve `"auto"` at each point and use per-point problems when the selected frames differ. Stationary VNA and steady-state analyses retain their existing errors for incompatible tones or dynamic Hamiltonians; chips still default to `"lab"`, and `"rotating"` is unchanged.
+
+### Input-output architecture
+
+- Added an immutable, input-free scalar-S SLH normal form to every resolved engine snapshot. With no ports, ordinary closed/open-system quchip workflows retain their existing behavior.
+- Added public `series_product`, `concatenate`, and `feedback_reduce` helpers in `quchip.engine` for textbook composition of resolved SLH triples.
+- Added `PortNetwork` for symbolic series composition, named exposures, convenient scalar scattering, and unitary vacuum dilation of attenuation. Two-sided reference sections use `network.delay(...)`; their sweepable, differentiable duration lives at `network.component.<label>.duration`, outside the Markovian `S`, `L`, and `H`. The engine applies their reference-plane factors, so backends no longer apply reference-plane phases. `network.filter(...)` adds passive two-sided reference sections with sweepable, differentiable transfer parameters; continuous-wave response uses `H(f)` exactly, while transients use its narrowband carrier value. `network.amplifier(...)` adds phase-preserving output-line gain with sweepable, differentiable input-referred added noise.
+- `VNA(chip)` selects every external plane, while `VNA(chip, ports=...)` selects a subset. Each sweep returns the complete small-signal matrix as `result.matrix`; `result.s(output, input)` selects one entry. Backends solve all input columns from one factorization per frequency. Ordinary chip-parameter `Sweep` axes are accepted beside pump axes and rebind the chip at each point.
+- `VNA.sweep()` now also reports the phase-conjugating small-signal matrix `T` as `result.conjugate_matrix`, with the same `[..., output, input]` layout as `result.matrix`; `result.t(output, input)` selects one entry. Around a phase-sensitive operating point, `delta <b_out> = S delta beta + T conj(delta beta)`. The stationary route obtains both matrices from one shifted-Liouvillian factorization, while the passive-linear route returns zero for `T`.
+- Added `vna.finite_power(...)`, which solves the stationary Liouvillian for a finite coherent probe and returns a `MeanFieldResponseResult` containing `<b_out>`, `<b_out>/beta`, and the broadcast incident field at every selected plane.
+- `PortNetwork.cascade(*items)` accepts variadic chains of ports, single-channel components, and explicit field terminals; `PortNetwork.expose(...)` accepts ports or components as shorthand for their sole or signal terminals. VNA pump tones own their frequency and amplitude axes through `pump.vary(...)`, with `name=` setting the result axis name; `vna.zip(...)` pairs axes point by point.
+- Added physical connector sides through `port.side` and `component.side(k)`, bidirectional cabling through `PortNetwork.link(...)`, side exposures through `PortNetwork.expose(..., at=...)`, and ideal `PortNetwork.circulator(...)` and `PortNetwork.isolator(...)` components. `PortNetwork.attenuator(...)` is two-sided and reciprocal, with two hidden vacuum channels.
+- `PortNetwork` now compiles instantaneous feedback loops inside the Markov core. It reduces each connection cycle with the scalar Gough–James feedback rule, including loop gain in `S`, `L`, structural reachability, and the generated series/feedback Hamiltonian; closing the same connections in turn with `feedback_reduce` gives the same resolved triple. Reference sections cannot lie inside a loop. Concrete singular loops raise, while traced JAX scattering produces non-finite values at the singular point.
+- Added external-plane input scheduling through `network.expose(...).input`; coherent amplitudes are in `sqrt(photons/ns)` and are not stored on `ResolvedSLH`.
+- Added complete transient field traces through `result.output(plane)`, with complex amplitude, arbitrary post-solve quadratures, normally ordered photon flux, and the Markov-boundary values before outbound reference sections derived from the same `b_out = S b_in + L` model. `VNA.sweep()` remains small signal, while `VNA.finite_power()` reports the stationary mean field.
+- Renamed the `OutputSpectrumResult` fields to distinguish `total_fluctuation_spectrum` from `signal_fluctuation_spectrum` and `added_noise_spectrum`, and to mark `signal_photon_flux`, `signal_coherent_flux`, and `signal_incoherent_flux` as signal-only fluxes. Added amplifier noise remains a spectral density because converting it to flux requires a detection bandwidth; `total_flux` was removed.
+- `beam_splitter` now uses the directional convention `[[sqrt(eta), sqrt(1-eta)], [-sqrt(1-eta), sqrt(eta)]]`; directional splitters and 90-degree hybrids have no physical sides, so `component.side(...)` points callers to terminals or `cascade()`.
+- `PortNetwork.to_dict()` now records every built-in component by factory `kind` and `parameters`, and `PortNetwork.from_dict()` rebuilds it through that factory. Generic `component(...)` entries retain their terminals and scattering matrix; unknown kinds raise `TypeError`.
+- Added `PortNetwork.restrict(ports)`, which copies the independent field-graph components reached from selected ports, including their connections, exposures, tracked parameters, filter callables, and boundary scattering. `Chip.partition()` now carries separable field lines into their device-group sub-chips; if a field graph spans groups, contains components unreachable from any one group's ports, or has boundary scattering that mixes groups, it keeps one joint solve and records why in `partition.notes`. This includes a passive swap between otherwise independent ports.
+- Added reusable network blocks through `host.include(template, prefix=...)`. A portless template without boundary scattering can be copied repeatedly under distinct label prefixes; its exposures become interfaces reached through `block.side()`, `block.input()`, or `block.output()`, and copied parameters use paths such as `network.component.<prefix>/<label>.<name>`. Exposure membership checks are now direction-aware, so one side's input and output may belong to different asymmetric planes.
+
+### Visualization
+
+- Added `plot_port_network(...)` for field-network schematics and `plot_sparameters(...)` for magnitude, dB-and-phase, and complex-plane views of small-signal scattering results.
+
+### Resolved analysis and transformations
+
+- Added `EngineResult.dress(at_time=...)`. Static snapshots may omit the time; dynamic snapshots require it and return an instantaneous eigensystem rather than a Floquet spectrum. `Chip.dress()` keeps its exact intrinsic lab-static meaning.
+- Partition connectivity now records resolved multi-device support, including Hamiltonian terms generated by SLH cascade composition. Passive scattering alone does not connect independent devices, and field-reference-plane requests safely use the joint solve.
+- `eliminate()` can transform default ports on a linear resonator into an effective lowering channel on one unprojected Fock-space survivor while preserving the attached network and exposure. Custom or collective ports, active cascades, projected bases, and multi-survivor field reductions raise rather than dropping or double-counting field physics.
+
+### Current scope
+
+- Scattering is scalar and instantaneous in 0.3; operator-valued scattering, time-dependent collapse channels, Floquet dressing, and thermal input fields remain outside this release. Static composition of several quantum-port couplings requires a shared rotating-frame frequency.
+
 ## [0.2.1] - 2026-08-28
 
 ### Fixed
@@ -107,6 +161,7 @@ This file records notable user-visible changes to quchip.
 - Included device, coupling, control, frame, RWA, dissipation, transformation, sweep, visualization, and inverse-design APIs; QuTiP and dynamiqs backends; and JAX-compatible differentiation paths.
 - Published the README, contribution guide, code of conduct, physics reference, and test suite.
 
+[0.3.0]: https://github.com/quchip/quchip/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/quchip/quchip/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/quchip/quchip/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/quchip/quchip/compare/v0.1.0...v0.1.1

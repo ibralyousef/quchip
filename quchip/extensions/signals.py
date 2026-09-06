@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
+from quchip.declarative.parameters import parameter, setting
 from quchip.control.signal import SignalMap, SignalTransform
 from quchip.declarative import qnp
 from quchip.utils.labeling import resolve_label
 
 
-@dataclass(frozen=True)
-class CableLoss(SignalTransform):
+class CableLoss(SignalTransform, serializable=True):
     """Attenuate one control line by a power loss specified in dB."""
 
-    line: str
-    loss_db: Any
-    _parameter_names = ("loss_db",)
+    line: str = setting()
+    loss_db: Any = parameter()
 
     def __init__(self, line: str | Any, loss_db: Any) -> None:
         object.__setattr__(self, "line", resolve_label(line))
@@ -31,12 +29,3 @@ class CableLoss(SignalTransform):
 
     def referenced_lines(self) -> tuple[str, ...]:
         return (self.line,)
-
-    def to_dict(self) -> dict[str, Any]:
-        data = super().to_dict()
-        data.update(line=self.line, loss_db=float(self.loss_db))
-        return data
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "CableLoss":
-        return cls(line=str(data["line"]), loss_db=float(data["loss_db"]))
