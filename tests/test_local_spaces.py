@@ -111,3 +111,11 @@ def test_local_basis_gradient_ignores_degeneracy_confined_to_discarded_levels() 
 
     assert jnp.isfinite(gradient)
     assert gradient == pytest.approx(finite_difference, rel=1e-5)
+
+
+def test_local_spaces_require_integer_dimensions():
+    """Fractional dimensions fail at construction; NumPy integers remain supported."""
+    for make in (FockSpace, ChargeSpace, lambda n: PhaseGridSpace(n, 2.0), lambda n: CustomSpace(n, {})):
+        with pytest.raises(TypeError):
+            make(3.5)
+        assert make(np.int64(3)).dimension == 3

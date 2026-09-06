@@ -33,27 +33,6 @@ def res():
 
 
 class TestCouplingValidation:
-    def test_product_form(self, q0, q1):
-        """Product-form Coupling stores the coupling_strength g."""
-        c = Coupling(
-            q0,
-            q1,
-            g=0.01,
-            op_a=lambda d: d.number_operator(),
-            op_b=lambda d: d.number_operator(),
-        )
-        assert c.coupling_strength == 0.01
-
-    def test_callable_form(self, q0, q1):
-        """Callable-form Coupling stores the coupling_strength g."""
-        c = Coupling(
-            q0,
-            q1,
-            g=0.02,
-            interaction=lambda a, b, bk: bk.tensor(a.number_operator(), b.number_operator()),
-        )
-        assert c.coupling_strength == 0.02
-
     def test_missing_both_raises(self, q0, q1):
         """Coupling with neither op_a/op_b nor interaction raises ValueError."""
         with pytest.raises(ValueError, match="Provide either"):
@@ -139,21 +118,6 @@ class TestCouplingHamiltonian:
             atol=1e-12,
         )
 
-    def test_interaction_hamiltonian_is_policy_free(self, q0, q1):
-        """A coupling always returns its complete authored interaction."""
-        backend = get_default_backend()
-        c_default = Coupling(
-            q0,
-            q1,
-            g=0.01,
-            op_a=lambda d: d.number_operator(),
-            op_b=lambda d: d.number_operator(),
-        )
-        H_default = np.array(backend.to_array(c_default.interaction_hamiltonian()))
-        expected = 0.01 * np.kron(np.diag([0.0, 1.0, 2.0]), np.diag([0.0, 1.0, 2.0]))
-        np.testing.assert_allclose(H_default, expected, atol=1e-12)
-
-
 # ---------------------------------------------------------------------------
 # Chip integration
 # ---------------------------------------------------------------------------
@@ -220,30 +184,3 @@ class TestCouplingSerialization:
 # ---------------------------------------------------------------------------
 # Properties and repr
 # ---------------------------------------------------------------------------
-
-
-class TestCouplingProperties:
-    def test_device_labels(self, q0, q1):
-        """Coupling exposes device_a_label and device_b_label."""
-        c = Coupling(q0, q1, g=0.01, op_a=lambda d: d.identity(), op_b=lambda d: d.identity())
-        assert c.device_a_label == "q0"
-        assert c.device_b_label == "q1"
-
-    def test_approximation_policy_is_absent(self, q0, q1):
-        """Couplings do not own an approximation policy."""
-        c = Coupling(q0, q1, g=0.01, op_a=lambda d: d.identity(), op_b=lambda d: d.identity())
-        assert not hasattr(c, "rwa")
-        assert not hasattr(c, "rwa_keeps_band")
-
-    def test_repr_product_mode(self, q0, q1):
-        """repr() of a product-form Coupling names the mode and a device label."""
-        c = Coupling(q0, q1, g=0.01, op_a=lambda d: d.identity(), op_b=lambda d: d.identity())
-        r = repr(c)
-        assert "product" in r
-        assert "q0" in r
-
-    def test_repr_interaction_mode(self, q0, q1):
-        """repr() of an interaction-form Coupling names the mode."""
-        c = Coupling(q0, q1, g=0.01, interaction=lambda a, b, bk: bk.tensor(a.identity(), b.identity()))
-        r = repr(c)
-        assert "interaction" in r

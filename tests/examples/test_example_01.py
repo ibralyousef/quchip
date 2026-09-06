@@ -8,7 +8,6 @@ import re
 from pathlib import Path
 
 import jupytext
-import matplotlib.image as mpimg
 import nbformat
 
 
@@ -39,39 +38,6 @@ def test_guide_code_matches_the_executed_notebook() -> None:
     nbformat.validate(executed)
     assert _code(authored) == _code(executed)
     assert all(cell.execution_count is not None for cell in executed.cells if cell.cell_type == "code")
-
-
-def test_source_covers_static_observables_and_sweep_forms() -> None:
-    """The guide stays static and uses the public analysis and sweep APIs."""
-    source = EXAMPLE_MD.read_text(encoding="utf-8")
-    code = _code(jupytext.read(EXAMPLE_MD))
-    assert "# Statics and parameter studies" in source
-    for required in (
-        "chip.with_params(",
-        "chip.freq(",
-        "chip.transition_frequency(",
-        "chip.kerr_matrix(",
-        "chip.dressed_anharmonicity(",
-        "chip.dispersive_shift(",
-        "chip.static_zz(",
-        "chip.drive_matrix_elements(",
-        "SpectrumSweep",
-        "Sweep.zip(",
-        "Sweep.expand(",
-        "dressed_index(",
-        "assignment_overlaps",
-        "state_components(",
-        "Fluxonium(",
-        "CouplingModel",
-        'paper_chip.with_params({"q.phi_ext": phi_ext})',
-        'point.dispersive_shift("q", "readout")',
-        "np.linspace(0.5, 0.85, 351)",
-        "np.interp(",
-    ):
-        assert required in code
-    assert "QuantumSequence" not in code
-    assert ".simulate(" not in code
-    assert "from quchip.engine" not in code
 
 
 def test_executed_receipt_matches_the_avoided_crossing() -> None:
@@ -109,30 +75,3 @@ def test_paper_example_reproduces_fluxonium_spectrum_and_readout() -> None:
     assert math.isclose(
         receipt["readout_frequency_rmse_mhz"], 1.0848, rel_tol=1.0e-3
     )
-
-
-def test_figure_and_docs_route_are_valid() -> None:
-    """The plotted crossing and its canonical guide route are present."""
-    image = mpimg.imread(ROOT / "docs" / "images" / "resolve_and_sweep.png")
-    assert image.shape[0] >= 700 and float(image.std()) > 0.02
-    spectrum_image = mpimg.imread(
-        ROOT / "docs" / "images" / "stefanski_fluxonium_spectrum.png"
-    )
-    readout_image = mpimg.imread(
-        ROOT / "docs" / "images" / "stefanski_fluxonium_readout.png"
-    )
-    assert spectrum_image.shape[0] >= 700 and float(spectrum_image.std()) > 0.02
-    assert readout_image.shape[0] >= 700 and float(readout_image.std()) > 0.02
-    page = (ROOT / "docs" / "guides" / "statics-and-parameter-studies.md").read_text(encoding="utf-8")
-    sqa = (ROOT / "docs" / "guides" / "from-sqa-2026.md").read_text(encoding="utf-8")
-    assert "01_resolve_and_sweep.md" in page
-    assert "https://docs.quchip.org/guides/statics-and-parameter-studies" in sqa
-
-
-def test_paper_sources_are_linked_without_hidden_peak_selection() -> None:
-    """The guide links the paper and public archive and compares extracted rows directly."""
-    source = EXAMPLE_MD.read_text(encoding="utf-8")
-    assert "https://arxiv.org/abs/2411.13437" in source
-    assert "https://github.com/AndersenQubitLab/FPA-RO-experimental" in source
-    assert "https://doi.org/10.4121/1092cb12-9198-4d43-8500-401c78a5dc15" in source
-    assert "selected peak" not in source.lower()

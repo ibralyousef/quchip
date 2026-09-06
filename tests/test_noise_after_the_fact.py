@@ -52,29 +52,16 @@ def test_posthoc_t1_and_internal_quality_factor_reflected_in_next_simulate():
     assert np.real(before.expect("q"))[-1] == pytest.approx(1.0, abs=1e-9)
     assert np.real(before.expect("r"))[-1] == pytest.approx(1.0, abs=1e-9)
 
+    assert before.solver == "sesolve"
     q.T1 = 51_600.0
     r.internal_quality_factor = 5_000.0
 
     after = simulate(chip, [], TLIST, initial_state=excited, e_ops=e_ops)
+    assert after.solver == "mesolve"
     t_final = TLIST[-1]
     assert np.real(after.expect("q"))[-1] == pytest.approx(np.exp(-t_final / 51_600.0), rel=1e-3)
     kappa = 2 * np.pi * 7.0 / 5_000.0
     assert np.real(after.expect("r"))[-1] == pytest.approx(np.exp(-kappa * t_final), rel=1e-3)
-
-
-def test_posthoc_noise_flips_default_solver():
-    """Adding T1 after construction alone flips the default solver from sesolve to mesolve."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    chip = Chip([q])
-    tlist = np.linspace(0.0, 10.0, 5)
-    excited = chip.bare_state({q: 1})
-
-    before = simulate(chip, [], tlist, initial_state=excited)
-    q.T1 = 51_600.0
-    after = simulate(chip, [], tlist, initial_state=excited)
-
-    assert before.solver == "sesolve"  # noise-free -> state-vector solve
-    assert after.solver == "mesolve"  # the mutation alone selects the density-matrix solve
 
 
 def test_noise_removed_posthoc_restores_lossless_evolution():
@@ -346,6 +333,15 @@ def test_set_noise_matches_equivalent_attribute_writes():
     b = simulate(chip_b, [], TLIST, initial_state=chip_b.bare_state({qb: 1, rb: 1}), e_ops=e_ops_b)
     np.testing.assert_allclose(np.real(a.expect("q")), np.real(b.expect("q")), atol=1e-12)
     np.testing.assert_allclose(np.real(a.expect("r")), np.real(b.expect("r")), atol=1e-12)
+
+
+def test_set_noise_can_reduce_relaxation_and_coherence_times_together():
+    """Replace-all noise configuration validates the final joint decay model."""
+    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, T1=100.0, T2=150.0, label="q")
+    chip = Chip([q])
+    chip.set_noise({q: {"T1": 20.0, "T2": 30.0}})
+    assert q.T1 == 20.0
+    assert q.T2 == 30.0
 
 
 def test_set_noise_is_atomic_on_invalid_input():

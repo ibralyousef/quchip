@@ -18,6 +18,26 @@ from quchip import (
 from quchip.chip.transformations import eliminate
 
 
+@pytest.mark.parametrize("method", ["sw", "exact"])
+def test_deferred_chi_has_the_same_compiled_gradient_as_the_source_spectrum(method):
+    import jax
+
+    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
+    r = Resonator(freq=7.0, levels=4, label="r")
+    chip = Chip([q, r], [Capacitive(q, r, g=0.08, label="qr")], backend="dynamiqs")
+
+    def reported(frequency):
+        variant = chip.with_params({"q.freq": frequency})
+        return eliminate(variant, "r", method=method).effective_params["q"]["chi"]
+
+    step = 1e-4
+    expected = (
+        chip.with_params({"q.freq": 5.0 + step}).dispersive_shift("q", "r")
+        - chip.with_params({"q.freq": 5.0 - step}).dispersive_shift("q", "r")
+    ) / (2 * step)
+    assert jax.jit(jax.grad(reported))(5.0) == pytest.approx(float(expected), rel=1e-5, abs=1e-9)
+
+
 def _bridge_chip():
     q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
     q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.24, levels=3, label="q1")
@@ -42,21 +62,18 @@ def test_describe_reports_correct_before_after_freq_for_bridge():
     assert "dropped:" in report
 
 
-def test_describe_reports_correct_purcell_folded_t1():
-    """A leaf elimination's Purcell fold shows the exact before/after T1 in microseconds."""
+@pytest.mark.parametrize("method", ["sw", "exact"])
+def test_describe_reports_intrinsic_t1_separately_from_inherited_loss(method):
+    """A shared transformed channel is not presented as a change in intrinsic T1."""
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q", T1=30_000.0)
     r = Resonator(freq=7.0, internal_quality_factor=5000.0, levels=4, label="r")
     chip = Chip([q, r], couplings=[Capacitive(q, r, g=0.08, label="cap0")])
-
-    res = eliminate(chip, "r")
+    res = eliminate(chip, "r", method=method)
     report = res.describe()
-
-    t1_after = float(res.chip["q"].T1)
-    purcell_rate = float(res.effective_params["q"]["purcell_rate"])
-    t1_before = 1.0 / (1.0 / t1_after - purcell_rate)
-
-    assert f"{t1_before / 1e3:.4g} → {t1_after / 1e3:.4g} µs" in report
-    assert "Purcell" in report
+    assert res.chip["q"].T1 == 30_000.0
+    assert "intrinsic T1: 30" in report
+    assert "Purcell contribution to 1→0 lowering:" in report
+    assert "1/ns (separate channel)" in report
 
 
 def test_describe_zz_availability_depends_on_method():
@@ -95,7 +112,7 @@ def test_describe_exchange_edge_names_the_capacitive_strength_g():
     res = eliminate(_bridge_chip(), "bus")
     report = res.describe()
 
-    edge_label = res.effective_params["exchange"]["folded_into"]
+    edge_label = res.effective_params["exchange"]["coupling"]
     edge = res.chip.coupling_map[edge_label]
     assert type(edge).__name__ == "Capacitive"
     assert f"{edge_label}': Capacitive(g = " in report
@@ -113,7 +130,7 @@ def test_describe_exchange_edge_names_the_tunable_capacitive_strength_g_0():
     res = eliminate(chip, "fc")
     report = res.describe()
 
-    edge_label = res.effective_params["exchange"]["folded_into"]
+    edge_label = res.effective_params["exchange"]["coupling"]
     edge = res.chip.coupling_map[edge_label]
     assert type(edge).__name__ == "TunableCapacitive"
     assert f"{edge_label}': TunableCapacitive(g_0 = " in report
@@ -143,3 +160,22 @@ def test_describe_never_raises_on_a_fully_traced_result():
         return jnp.real(res.effective_params["exchange"]["j_eff"])
 
     jax.grad(run)(0.08)
+
+
+@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
+def test_deferred_chi_retains_original_model_after_source_edits(backend):
+    """Deferred diagnostics retain their model across edits and traced reads."""
+    import jax
+
+    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
+    r = Resonator(freq=7.0, levels=4, label="r")
+    coupling = Capacitive(q, r, g=0.08)
+    chip = Chip([q, r], [coupling], backend=backend)
+    expected = float(chip.dispersive_shift("q", "r"))
+    reduced = eliminate(chip, "r")
+    q.freq = 5.5
+    r.freq = 6.9
+    coupling.g = 0.04
+    q.levels = 4
+    assert float(jax.jit(lambda: reduced.effective_params["q"]["chi"])()) == pytest.approx(expected, abs=1e-12)
+    assert float(reduced.effective_params["q"]["chi"]) == pytest.approx(expected, abs=1e-12)

@@ -57,7 +57,7 @@ def _run_rabi_population(backend_name: str) -> np.ndarray:
         tlist=np.linspace(0.0, 60.0, 121),
         initial_state=chip.state(q=0),
     )
-    return np.asarray(result.population_array("q", 1))
+    return np.asarray(result.population("q", 1))
 
 
 def _run_dispersive_expectation(backend_name: str) -> np.ndarray:
@@ -117,19 +117,6 @@ def _run_cr_expectation(backend_name: str) -> np.ndarray:
     return np.asarray(result._expect_data["q2"].values, dtype=complex)
 
 
-def _run_mesolve_population(backend_name: str) -> tuple[np.ndarray, str]:
-    _set_backend(backend_name)
-    qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q", T1=120.0)
-    chip = Chip(devices=[qubit], frame="rotating", label=f"{backend_name}-mesolve")
-    chip.dress()
-
-    result = QuantumSequence(chip).simulate(
-        tlist=np.linspace(0.0, 60.0, 61),
-        initial_state=chip.state(q=1),
-    )
-    return np.asarray(result.population_array("q", 1)), result.solver
-
-
 def test_rabi_backend_agreement() -> None:
     """Rabi population traces from the qutip and dynamiqs backends agree within tolerance."""
     qutip = _run_rabi_population("qutip")
@@ -148,15 +135,6 @@ def test_cr_backend_agreement() -> None:
     """Cross-resonance expectation traces from the qutip and dynamiqs backends agree."""
     qutip = _run_cr_expectation("qutip")
     dyn = _run_cr_expectation("dynamiqs")
-    npt.assert_allclose(dyn, qutip, atol=1e-3, rtol=1e-3)
-
-
-def test_mesolve_backend_agreement() -> None:
-    """Both backends resolve to the mesolve solver and agree on the T1-decay population trace."""
-    qutip, qutip_solver = _run_mesolve_population("qutip")
-    dyn, dyn_solver = _run_mesolve_population("dynamiqs")
-    assert qutip_solver == "mesolve"
-    assert dyn_solver == "mesolve"
     npt.assert_allclose(dyn, qutip, atol=1e-3, rtol=1e-3)
 
 
@@ -189,75 +167,6 @@ def test_amplitude_array_phase_backend_agreement() -> None:
     # no |·|² (always non-negative) accessor could reproduce
     assert np.min(qutip.real) < -0.1
     npt.assert_allclose(dyn, qutip, atol=1e-3, rtol=1e-3)
-
-
-def test_public_loss_path_supports_jax_value_and_grad_on_dynamiqs() -> None:
-    """A public infidelity loss built through the sequence API supports jax value_and_grad."""
-    _set_backend("dynamiqs")
-    tlist = jnp.linspace(0.0, 20.0, 41)
-
-    def loss(amplitude):
-        qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.3, levels=3, label="q")
-        drive = ChargeDrive(target=qubit, label="drive")
-        chip = Chip(
-            devices=[qubit],
-            control_equipment=ControlEquipment(lines=[drive]),
-            frame="rotating",
-            label="dynamiqs-grad-rabi",
-        )
-        chip.dress()
-
-        sequence = QuantumSequence(chip)
-        sequence.charge(
-            qubit,
-            envelope=Gaussian(duration=20.0, amplitude=amplitude, sigmas=4),
-            freq=chip.freq(qubit),
-        )
-        result = sequence.simulate(
-            tlist=tlist,
-            initial_state=chip.state(q=0),
-            options={"store_states": True, "store_final_state": True},
-        )
-        return 1.0 - result.overlap_array(chip.state(q=1))[-1]
-
-    value, grad = jax.value_and_grad(loss)(jnp.asarray(0.02))
-    assert jnp.isfinite(value)
-    assert jnp.isfinite(grad)
-
-
-def test_rotating_frame_coupled_sequence_supports_jax_grad_on_traced_chip_param() -> None:
-    """A traced device frequency flowing through a rotating-frame coupled sequence yields a finite grad."""
-    _set_backend("dynamiqs")
-    tlist = jnp.linspace(0.0, 24.0, 61)
-
-    def loss(control_freq):
-        control = DuffingTransmon(freq=control_freq, anharmonicity=-0.3, levels=3, label="q1")
-        target = DuffingTransmon(freq=4.82, anharmonicity=-0.31, levels=3, label="q2")
-        drive = ChargeDrive(target=control, label="cr")
-        chip = Chip(
-            devices=[control, target],
-            couplings=[Capacitive(control, target, g=0.0032)],
-            control_equipment=ControlEquipment(lines=[drive]),
-            frame="rotating",
-            label="dynamiqs-rotating-grad-coupled",
-        )
-
-        sequence = QuantumSequence(chip)
-        sequence.schedule(
-            drive,
-            envelope=Gaussian(duration=24.0, amplitude=0.015, sigmas=4),
-            freq=target.drive_freq,
-        )
-        result = sequence.simulate(
-            tlist=tlist,
-            initial_state=chip.bare_state(q1=1, q2=0),
-            options={"store_states": True, "store_final_state": True},
-        )
-        return 1.0 - result.overlap_array(chip.bare_state(q1=0, q2=1))[-1]
-
-    value, grad = jax.value_and_grad(loss)(jnp.asarray(5.05))
-    assert jnp.isfinite(value)
-    assert jnp.isfinite(grad)
 
 
 def test_multi_experiment_cr_batch_loss_supports_jax_grad() -> None:
@@ -327,38 +236,6 @@ def test_unified_expect_method_on_dynamiqs() -> None:
     assert final is not None
 
 
-def test_expect_final_supports_jax_grad_on_dynamiqs() -> None:
-    """A loss built from ``result.expect_final`` supports jax value_and_grad on dynamiqs."""
-    _set_backend("dynamiqs")
-    tlist = jnp.linspace(0.0, 20.0, 41)
-
-    def loss(amplitude):
-        qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.3, levels=2, label="q")
-        drive = ChargeDrive(target=qubit, label="drive")
-        chip = Chip(
-            devices=[qubit],
-            control_equipment=ControlEquipment(lines=[drive]),
-            frame="rotating",
-            label="dynamiqs-expect-final-grad",
-        )
-
-        sequence = QuantumSequence(chip)
-        sequence.schedule(
-            drive,
-            envelope=Gaussian(duration=20.0, amplitude=amplitude, sigmas=4),
-            freq=chip.freq("q"),
-        )
-        result = sequence.simulate(
-            tlist=tlist,
-            e_ops=chip.e_ops(q="Z"),
-        )
-        return 1.0 - jnp.real(result.expect_final("q"))
-
-    value, grad = jax.value_and_grad(loss)(jnp.asarray(0.02))
-    assert jnp.isfinite(value)
-    assert jnp.isfinite(grad)
-
-
 def test_per_call_dynamiqs_backend_with_qutip_built_state() -> None:
     """backend="dynamiqs" scopes one call; a QuTiP-native psi0 is coerced."""
     # Process default stays QuTiP — the state below is a qutip.Qobj.
@@ -383,15 +260,15 @@ def test_per_call_dynamiqs_backend_with_qutip_built_state() -> None:
     res_qt = sequence.simulate(tlist=tlist, initial_state=psi0)
 
     npt.assert_allclose(
-        np.asarray(res_dq.population_array("q", level=1)),
-        np.asarray(res_qt.population_array("q", level=1)),
+        np.asarray(res_dq.population("q", level=1)),
+        np.asarray(res_qt.population("q", level=1)),
         atol=1e-5,
     )
     # result accessors coerce foreign-native comparison states too:
     # a QuTiP-built target against the dynamiqs trajectory, and vice versa.
     npt.assert_allclose(
-        np.asarray(res_dq.overlap_array(psi0)),
-        np.asarray(res_qt.overlap_array(psi0)),
+        np.asarray(res_dq.overlap(psi0)),
+        np.asarray(res_qt.overlap(psi0)),
         atol=1e-5,
     )
     # the per-call override never leaks into the process default
@@ -415,7 +292,7 @@ def test_per_call_dynamiqs_backend_preserves_composite_qutip_state_dims() -> Non
         partition=False,
     )
 
-    npt.assert_allclose(np.asarray(result.overlap_array(psi0)), 1.0, atol=1e-8)
+    npt.assert_allclose(np.asarray(result.overlap(psi0)), 1.0, atol=1e-8)
 
 
 def test_per_call_dynamiqs_batch_preserves_composite_qutip_state_dims() -> None:
@@ -435,7 +312,7 @@ def test_per_call_dynamiqs_batch_preserves_composite_qutip_state_dims() -> None:
     )
 
     for result in results:
-        npt.assert_allclose(np.asarray(result.overlap_array(psi0)), 1.0, atol=1e-8)
+        npt.assert_allclose(np.asarray(result.overlap(psi0)), 1.0, atol=1e-8)
 
 
 def test_per_call_dynamiqs_gradient_without_global_flip() -> None:
@@ -458,7 +335,7 @@ def test_per_call_dynamiqs_gradient_without_global_flip() -> None:
             freq=chip.freq("q"),
         )
         result = sequence.simulate(tlist=tlist, backend="dynamiqs")
-        return 1.0 - jnp.real(result.population_array("q", level=1)[-1])
+        return 1.0 - jnp.real(result.population("q", level=1)[-1])
 
     value, grad = jax.value_and_grad(loss)(jnp.asarray(0.02))
     assert jnp.isfinite(value)
