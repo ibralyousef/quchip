@@ -1,0 +1,10 @@
+/* Give wide scientific figures room while retaining readable prose. */
+@media (min-width: 67em) {
+  .page:has(.wide-figure) .sidebar-drawer { width: 15em; }
+  .content:has(.wide-figure) { width: min(68em, calc(100vw - 21em)); }
+  .content:has(.wide-figure) article p { max-width: 46em; }
+}
+@media (min-width: 82em) {
+  .content:has(.wide-figure) { width: min(68em, calc(100vw - 36em)); }
+}
+img.wide-figure { width: 100%; height: auto; }

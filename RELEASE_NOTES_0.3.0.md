@@ -1,60 +1,33 @@
 # quchip 0.3.0
 
-quchip 0.3 makes input-output physics part of the same resolved model used for
-Hamiltonians, damping, controls, simulations, and measured fields.
+Changes since 0.2.1.
 
-## One resolved SLH boundary
+## New features
 
-Every resolved chip now carries an immutable, input-free `(S, L, H)` normal
-form. A chip without ports still resolves and simulates as before. A
-`PortNetwork` can bind quantum coupling ports to passive components and named
-external exposures; series composition generates its Hamiltonian terms rather
-than hiding them in an analysis helper. Scattering uses the `(output, input)`
-matrix convention and is scalar and instantaneous in this release.
+- Added steady-state solves and batches with observables and numerical diagnostics.
+- Added `PortNetwork` for coherent inputs, measured output fields, passive components, reference-plane delays, filters, and amplifiers. Includes reusable network blocks, SLH composition, instantaneous algebraic feedback, and network/S-parameter plots.
+- Added VNA scattering matrices, phase-conjugate response, parameter and pump sweeps, finite-power spectroscopy, output spectra, and correlations.
+- Added pulse-aware automatic time grids and `frame="auto"`.
+- Added explicit state-storage choices, saved-state lookup, and observable interpolation.
+- Added per-channel jump rates and cumulative jump counts from stored states.
+- Added forward-mode JAX differentiation through local eigensystems.
 
-Static composition of several quantum-port couplings requires a shared
-rotating-frame frequency. Use the lab or a common frame otherwise;
-time-dependent collapse channels are outside this release.
+## Improvements and fixes
 
-Lossy propagation uses a unitary vacuum dilation. Exposure delays move the
-external reciprocal reference plane only. They do not enter the Markov model.
+- Accelerated eligible static QuTiP simulations with automatic diagonal propagation and passive-linear VNA calculations with mode-space solves.
+- Fixed density-matrix solver routing and excluded cascades from automatic diagonal propagation.
+- Made calculation snapshots independent of later model edits and parameter updates independent of binding order.
+- Retained Hamiltonian corrections, controls, and loss channels through supported reductions; added composable state/operator maps.
+- Corrected partitioning for interactions spanning multiple devices and made failed batches identify the failing point.
+- Updated examples, backend guidance, and extension documentation. Added `py.typed` and removed the unused Optax dependency.
 
-## Drives and measured fields
+## Breaking changes
 
-`network.expose(...)` returns the external reference plane used for both
-directions. Schedule `plane.input` with the normal sequence grammar; its
-complex amplitude is bound when a solve is built, outside immutable
-`ResolvedSLH`, and `abs(beta)**2` is photon flux in photons/ns.
+- Component labels are immutable. Create a replacement component to rename it.
+- Local state indices and Pauli observables use isolated energy levels.
+- Removed deprecated fitting arguments `coupling_targets`, `observable_targets`, and `fit_parameters`. Use `constraints`, `vary`, and `start`; full-model evaluation is the default.
+- Set `states="all"`, `"final"`, or `"none"` on simulation requests instead of native `store_states` options. Explicit `tlist` specifies the solver grid; states are never interpolated.
+- Updated signal-transform declarations and custom reduction hooks.
+- Saved models require `format_version: 1`. Recreate older models from their Python declarations.
 
-Request `plane.output` once, then read the complex amplitude, any quadrature,
-and normally ordered photon flux from `result.output(plane)`. All three come
-from the resolved `b_out = S b_in + L` relation. The VNA remains a strict
-small-signal derivative about fixed operating fields. Finite-power
-spectroscopy uses the same external-plane input.
-
-## Analysis and reductions
-
-`chip.dress()` continues to mean the complete intrinsic static Hamiltonian in
-the lab frame. `chip.resolve(...).dress()` instead analyzes the selected frame
-and approximation. Dynamic engine results require `dress(at_time=...)`; this
-is an instantaneous eigensystem, not a Floquet calculation.
-
-Partitioning follows resolved multi-device support. In particular, cascade
-Hamiltonians connect their endpoint devices, while passive scattering does not
-merge otherwise independent port channels. Field inputs and outputs stay on a
-joint solve when their complete reference plane is required.
-
-The existing `eliminate()` API is preserved. A port-coupled linear resonator
-can now be reduced while carrying its full transformed lowering channel into the
-survivor space and retaining the network exposure. Unsupported connected
-reductions fail explicitly instead of losing `S`, `L`, or field metadata.
-
-## Deliberate 0.3 limits
-
-- scalar, instantaneous scattering only;
-- no operator-valued scattering or instantaneous feedback loops;
-- no Floquet dressing;
-- no thermal input-field object; and
-- field-aware elimination is limited to default ports on a linear resonator
-  with one unprojected Fock-space survivor; active quantum-port cascades are
-  rejected on that reduction path.
+See the [migration guide](docs/guides/migrating-to-0.3.md) for replacements and reduction limits, and the [microwave guide](docs/guides/steady-state-and-vna.md) for supported network and response calculations.
