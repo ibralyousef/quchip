@@ -19,7 +19,7 @@ extensions = [
 ]
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build"]
+exclude_patterns = ["_build", "superpowers/**"]
 
 # -- Autodoc / autosummary ---------------------------------------------------
 
@@ -34,6 +34,7 @@ autodoc_typehints = "description"
 
 napoleon_google_docstring = False
 napoleon_numpy_docstring = True
+napoleon_use_ivar = True
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
@@ -46,11 +47,9 @@ intersphinx_mapping = {
 myst_enable_extensions = ["dollarmath", "amsmath", "colon_fence", "attrs_inline"]
 myst_heading_anchors = 4
 
-# The API is documented both at its public re-export location (`quchip`) and at
-# the defining module; the resulting duplicate-index and ambiguous-reference
-# warnings are inherent to that layout. Docstring RST nits (docutils) and
-# repository-relative source links inside included markdown (myst.xref_missing)
-# are cosmetic on the rendered pages.
+# Package pages list submodules; defining modules own the API entries.
+# Attribute sections use field lists so autodoc indexes each attribute once.
+# Existing source-link and docstring cross-reference allowances remain below.
 suppress_warnings = ["docutils", "ref.python", "myst.xref_missing", "ref.ref", "ref.footnote"]
 
 # -- HTML --------------------------------------------------------------------
@@ -58,7 +57,7 @@ suppress_warnings = ["docutils", "ref.python", "myst.xref_missing", "ref.ref", "
 html_theme = "furo"
 html_title = f"quchip {version}"
 html_static_path = ["_static"]
-html_css_files = ["custom.css"]
+html_css_files = ["figures.css"]
 html_favicon = "_static/favicon.png"
 # Colors come from the quchip identity system (see the wordmark assets):
 # ink #16181c / paper #fafbfc, #f2f4f6 / accent #c92f33 in light mode;

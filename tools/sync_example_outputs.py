@@ -136,6 +136,18 @@ def main() -> int:
         notebook_path = ROOT / "examples" / f"{stem}.ipynb"
         synchronized = synchronized_markdown(markdown_path, notebook_path)
         current = markdown_path.read_text(encoding="utf-8")
+        notebook = nbformat.read(notebook_path, as_version=4)
+        duplicated = [cell for cell in notebook.cells
+                      if cell.cell_type == "markdown" and OUTPUT_START in cell.source]
+        if duplicated:
+            if args.check:
+                stale.append(notebook_path)
+            else:
+                for cell in duplicated:
+                    cell.source = OUTPUT_RE.sub("\n\n", cell.source).strip()
+                notebook.cells = [cell for cell in notebook.cells if cell.source.strip()]
+                nbformat.write(notebook, notebook_path)
+                print(f"removed duplicate displayed outputs from {notebook_path.relative_to(ROOT)}")
         if current == synchronized:
             continue
         if args.check:
