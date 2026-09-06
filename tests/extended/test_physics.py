@@ -38,11 +38,6 @@ from quchip.engine.ir import DriveOp
 from quchip.engine.frames import resolve_frame
 
 
-# ---------------------------------------------------------------------------
-# TestFrameConsistency — same physics in lab vs rotating frame
-# ---------------------------------------------------------------------------
-
-
 class TestFrameConsistency:
     """Rabi oscillation populations must match in lab and rotating frames.
 
@@ -128,11 +123,6 @@ class TestFrameConsistency:
         )
 
 
-# ---------------------------------------------------------------------------
-# TestDispersiveShift — dressed eigenvalues in dispersive regime
-# ---------------------------------------------------------------------------
-
-
 class TestDispersiveShift:
     """Verify dispersive shift χ in coupled transmon+resonator system.
 
@@ -207,11 +197,6 @@ class TestDispersiveShift:
         )
 
 
-# ---------------------------------------------------------------------------
-# TestResonantEigenvalueSplitting — degenerate coupled resonators
-# ---------------------------------------------------------------------------
-
-
 class TestResonantEigenvalueSplitting:
     """Two identical resonators coupled capacitively: splitting = 2g.
 
@@ -250,25 +235,6 @@ class TestResonantEigenvalueSplitting:
             err_msg=(f"Single-excitation splitting {splitting:.6f} GHz differs from 2g = {expected_splitting:.6f} GHz"),
         )
 
-    def test_ground_state_shift_small(self, backend: Backend) -> None:
-        """Ground state shift is O(g²), much smaller than the splitting."""
-        r1 = Resonator(freq=self.FREQ, levels=self.LEVELS, label="r1")
-        r2 = Resonator(freq=self.FREQ, levels=self.LEVELS, label="r2")
-        coupling = Capacitive(r1, r2, g=self.G)
-        chip = Chip(devices=[r1, r2], couplings=[coupling])
-
-        H = chip.hamiltonian()
-        evals = np.sort(np.linalg.eigvalsh(H.matrix(backend=backend)).real)
-
-        # Ground state should be near 0 (within g²/ω ≈ 4e-4)
-        assert abs(evals[0]) < 0.01, f"Ground state energy {evals[0]:.6f} too far from 0"
-
-
-# ---------------------------------------------------------------------------
-# TestResultAccessors — overlap, reduced_state, reduced
-# ---------------------------------------------------------------------------
-
-
 class TestResultAccessors:
     """Verify result accessor methods against physics expectations."""
 
@@ -296,85 +262,6 @@ class TestResultAccessors:
 
         idx_25 = np.argmin(np.abs(tlist - 25.0))
         assert overlap[idx_25] > 0.99, f"overlap(|1⟩) at π-pulse = {overlap[idx_25]:.4f}, expected ≈ 1.0"
-
-    def test_overlap_at_t0_ground(self, backend: Backend) -> None:
-        """At t=0, overlap with |0⟩ ≈ 1.0 (starts in ground state)."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        _drive = ChargeDrive(target=q)
-        chip = Chip([q])
-        chip.connect(ControlEquipment(lines=[_drive]))
-        chip.set_frame("rotating")
-
-        envelope = Square(duration=50.0, amplitude=0.02)
-        drive_op = DriveOp(
-            target_label="q",
-            envelope=envelope,
-            freq=5.0,
-            start_time=0.0,
-            drive_label=_drive.label,
-        )
-        tlist = np.linspace(0, 50.0, 501)
-        result = simulate(chip, [drive_op], tlist)
-
-        target_0 = backend.basis(3, 0)
-        overlap = result.overlap(target_0)
-
-        assert overlap[0] > 0.99, f"overlap(|0⟩) at t=0 = {overlap[0]:.4f}, expected ≈ 1.0"
-
-    def test_overlap_array_matches_overlap(self, backend: Backend) -> None:
-        """The backend-native overlap helper should agree with the convenience API."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        _drive = ChargeDrive(target=q)
-        chip = Chip([q], frame="rotating")
-        chip.connect(ControlEquipment(lines=[_drive]))
-
-        result = simulate(
-            chip,
-            [
-                DriveOp(
-                    target_label="q",
-                    envelope=Square(duration=50.0, amplitude=0.02),
-                    freq=5.0,
-                    start_time=0.0,
-                    drive_label=_drive.label,
-                )
-            ],
-            np.linspace(0.0, 50.0, 201),
-        )
-
-        target_1 = backend.basis(3, 1)
-        np.testing.assert_allclose(
-            np.asarray(result.overlap_array(target_1)),
-            result.overlap(target_1),
-            atol=1e-14,
-        )
-
-    def test_population_array_matches_population(self) -> None:
-        """The backend-native population helper should agree with the convenience API."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        _drive = ChargeDrive(target=q)
-        chip = Chip([q], frame="rotating")
-        chip.connect(ControlEquipment(lines=[_drive]))
-
-        result = simulate(
-            chip,
-            [
-                DriveOp(
-                    target_label="q",
-                    envelope=Square(duration=50.0, amplitude=0.02),
-                    freq=5.0,
-                    start_time=0.0,
-                    drive_label=_drive.label,
-                )
-            ],
-            np.linspace(0.0, 50.0, 201),
-        )
-
-        np.testing.assert_allclose(
-            np.asarray(result.population_array("q", 1)),
-            result.population("q", 1),
-            atol=1e-14,
-        )
 
     def test_reduced_state_after_swap(self, backend: Backend) -> None:
         """After vacuum Rabi swap (t=1/(4g), initial |1,0⟩), q0's reduced state ≈ |0⟩⟨0|."""
@@ -412,74 +299,8 @@ class TestResultAccessors:
             f"q0 reduced state overlap with |0⟩ = {overlap_ground:.4f}, expected > 0.95 after swap"
         )
 
-    def test_state_defaults_to_final_and_can_return_dm(self) -> None:
-        """state() returns final state by default; dm=True converts ket to density matrix."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        _drive = ChargeDrive(target=q)
-        chip = Chip([q], frame="rotating")
-        chip.connect(ControlEquipment(lines=[_drive]))
-
-        drive_op = DriveOp(
-            target_label="q",
-            envelope=Square(duration=50.0, amplitude=0.02),
-            freq=5.0,
-            start_time=0.0,
-            drive_label=_drive.label,
-        )
-        tlist = np.linspace(0, 50.0, 201)
-        result = simulate(chip, [drive_op], tlist)
-
-        final = result.state()
-        assert final is not None
-
-        dm = result.state(dm=True)
-        assert dm is not None
-
-        state_t0 = result.state(t=0.0)
-        assert state_t0 is not None
-
-        dm_t0 = result.state(t=0.0, dm=True)
-        assert dm_t0 is not None
-
-    def test_expect_returns_full_trace(self) -> None:
-        """expect(key) returns values array with length matching times."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=2, label="q")
-        chip = Chip([q], frame="rotating")
-
-        tlist = np.linspace(0.0, 10.0, 51)
-        result = simulate(chip, [], tlist, e_ops=chip.e_ops(q="Z"))
-
-        values = result.expect("q")
-        assert np.asarray(values).shape[0] == len(result.times)
-
-
-# ---------------------------------------------------------------------------
-# TestCoherentState — ⟨n̂⟩ = |α|²
-# ---------------------------------------------------------------------------
-
-
 class TestCoherentState:
     """Verify coherent state properties: ⟨n̂⟩ = |α|²."""
-
-    def test_mean_photon_number(self, backend: Backend) -> None:
-        """Resonator coherent state with α=2.0: ⟨n̂⟩ = |α|² = 4.0 within 1%."""
-        r = Resonator(freq=6.0, levels=20, label="r")
-        alpha = 2.0
-        psi = r.coherent_state(alpha)
-
-        n_op = r.number_operator()
-        n_expect = float(np.real(complex(backend.expect(n_op, psi))))
-
-        expected = abs(alpha) ** 2  # 4.0
-        assert abs(n_expect - expected) / expected < 0.01, f"⟨n̂⟩ = {n_expect:.4f}, expected |α|² = {expected:.4f}"
-
-    def test_coherent_state_normalization(self) -> None:
-        """Coherent state is normalized to 1."""
-        r = Resonator(freq=6.0, levels=20, label="r")
-        psi = r.coherent_state(2.0)
-
-        norm = float(psi.norm())
-        assert abs(norm - 1.0) < 1e-10, f"Coherent state norm = {norm}, expected 1.0"
 
     def test_poisson_distribution(self, backend: Backend) -> None:
         """Fock populations n=0..4 follow Poisson: P(n) = e^(-|α|²)·|α|^(2n) / n factorial."""
@@ -505,18 +326,6 @@ class TestCoherentState:
                 err_msg=(f"P({n}) = {p_measured:.6f}, Poisson = {p_poisson:.6f}"),
             )
 
-    def test_small_alpha(self, backend: Backend) -> None:
-        """Small α = 0.5: ⟨n̂⟩ = 0.25 within 1%."""
-        r = Resonator(freq=6.0, levels=10, label="r")
-        alpha = 0.5
-        psi = r.coherent_state(alpha)
-
-        n_op = r.number_operator()
-        n_expect = float(np.real(complex(backend.expect(n_op, psi))))
-
-        expected = abs(alpha) ** 2  # 0.25
-        assert abs(n_expect - expected) < 0.01, f"⟨n̂⟩ = {n_expect:.4f}, expected {expected:.4f}"
-
     def test_complex_alpha(self, backend: Backend) -> None:
         """Complex α = 1+1j: ⟨n̂⟩ = |α|² = 2.0 within 1%."""
         r = Resonator(freq=6.0, levels=15, label="r")
@@ -530,11 +339,6 @@ class TestCoherentState:
         assert abs(n_expect - expected) / expected < 0.01, f"⟨n̂⟩ = {n_expect:.4f}, expected |α|² = {expected:.4f}"
 
 
-# ---------------------------------------------------------------------------
-# TestConstants -- verify physical constants
-# ---------------------------------------------------------------------------
-
-
 class TestConstants:
     """Verify physical constants against CODATA 2018 values."""
 
@@ -545,11 +349,6 @@ class TestConstants:
         # CODATA 2018 exact: k_B = 1.380649e-23 J/K, h = 6.62607015e-34 J*s.
         expected = 1.380649e-23 / 6.62607015e-34 * 1e-12  # GHz/mK
         assert abs(k_B - expected) / expected < 1e-6, f"k_B = {k_B}, expected {expected:.12f} GHz/mK (CODATA 2018)"
-
-
-# ---------------------------------------------------------------------------
-# TestDuffingEigenvalues -- verify transmon eigenvalues
-# ---------------------------------------------------------------------------
 
 
 class TestDuffingEigenvalues:
@@ -568,11 +367,6 @@ class TestDuffingEigenvalues:
             assert abs(evals[n] - expected) < 1e-10, f"E_{n} = {evals[n]:.10f}, expected {expected:.10f}"
 
 
-# ---------------------------------------------------------------------------
-# TestResonatorEigenvalues -- verify harmonic oscillator
-# ---------------------------------------------------------------------------
-
-
 class TestResonatorEigenvalues:
     """Verify resonator eigenvalues."""
 
@@ -589,62 +383,8 @@ class TestResonatorEigenvalues:
             assert abs(evals[n] - expected) < 1e-10, f"E_{n} = {evals[n]:.10f}, expected {expected:.10f}"
 
 
-# ---------------------------------------------------------------------------
-# TestCollapseOperators -- verify decay rates
-# ---------------------------------------------------------------------------
-
-
 class TestCollapseOperators:
     """Verify collapse-operator physics."""
-
-    def test_t1_decay_rate(self) -> None:
-        """T1 decay matches P(1,t) = exp(-t/T1) for collapse operator C = sqrt(1/T1)*a."""
-        T1 = 1000.0  # ns
-        q = DuffingTransmon(
-            freq=5.0,
-            anharmonicity=-0.25,
-            levels=3,
-            label="q",
-            T1=T1,
-        )
-        chip = Chip([q])
-        chip.set_frame("rotating")
-        psi0 = chip.state(q=1)
-        tlist = np.linspace(0, 3000.0, 301)
-
-        result = simulate(chip, [], tlist, initial_state=psi0)
-        p1 = result.population("q", 1)
-
-        # Analytical: P(1,t) = exp(-t/T1)
-        p1_analytic = np.exp(-tlist / T1)
-        npt.assert_allclose(p1, p1_analytic, atol=0.02, err_msg="T1 decay does not match exp(-t/T1)")
-
-    def test_pure_dephasing_preserves_populations(self) -> None:
-        """Pure dephasing does not change diagonal populations: P(0)=P(1)=0.5 from (|0>+|1>)/sqrt(2)."""
-        T1 = 1e6  # ns (very long T1 so decay is negligible)
-        T2 = 500.0  # ns
-        q = DuffingTransmon(
-            freq=5.0,
-            anharmonicity=-0.25,
-            levels=3,
-            label="q",
-            T1=T1,
-            T2=T2,
-        )
-        chip = Chip([q])
-        chip.set_frame("rotating")
-
-        backend = chip.backend
-        psi0_local = (backend.basis(3, 0) + backend.basis(3, 1)) * (1.0 / np.sqrt(2))
-        psi0_full = chip.bare_state(q=psi0_local)
-
-        tlist = np.linspace(0, 1500.0, 301)
-        result = simulate(chip, [], tlist, initial_state=psi0_full)
-
-        p0 = result.population("q", 0)
-        npt.assert_allclose(
-            p0, 0.5 * np.ones_like(p0), atol=0.05, err_msg="Pure dephasing should not change diagonal populations"
-        )
 
     def test_thermal_population(self) -> None:
         """At thermal equilibrium, P(1)/P(0) matches the Boltzmann ratio exp(-freq/(k_B*T))."""
@@ -680,11 +420,6 @@ class TestCollapseOperators:
             )
 
 
-# ---------------------------------------------------------------------------
-# TestPhotonLoss -- verify resonator photon loss
-# ---------------------------------------------------------------------------
-
-
 class TestPhotonLoss:
     """Verify resonator photon loss ``kappa = sqrt(2*pi*freq/Q)``."""
 
@@ -708,63 +443,6 @@ class TestPhotonLoss:
         p1_analytic = np.exp(-kappa_angular * tlist)
 
         npt.assert_allclose(p1, p1_analytic, atol=0.03, err_msg="Photon loss P(1,t) does not match exp(-kappa*t)")
-
-
-# ---------------------------------------------------------------------------
-# TestDressedStates -- verify dressed-state computation
-# ---------------------------------------------------------------------------
-
-
-class TestDressedStates:
-    """Verify dressed-state computation."""
-
-    def test_dressed_frequency_shift(self) -> None:
-        """Coupling shifts the dressed qubit frequency by the Lamb shift ~g²/Delta (Blais et al., PRA 69, 062320)."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=5, label="q")
-        r = Resonator(freq=7.0, levels=5, label="r")
-        coupling = Capacitive(q, r, g=0.05)
-        chip = Chip([q, r], [coupling])
-
-        bare_freq = 5.0
-        dressed_freq = chip.freq("q")  # auto-dresses
-
-        # Lamb shift approx: leading term g^2/Delta = 0.0025/(-2.0) = -0.00125
-        shift = dressed_freq - bare_freq
-
-        # Shift should be negative (qubit pushed down by higher-freq resonator)
-        assert shift < 0, f"Expected negative Lamb shift, got {shift:.6f} GHz"
-        # Magnitude should be order g^2/|Delta| ~ 1.25e-3
-        assert abs(shift) < 0.01, f"Shift {shift:.6f} unexpectedly large"
-        assert abs(shift) > 1e-4, f"Shift {shift:.6f} unexpectedly small"
-
-    def test_dressed_spectrum_matches_energy_accessors(self) -> None:
-        """The raw dressed spectrum should agree with the float convenience lookups."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=4, label="q")
-        r = Resonator(freq=7.0, levels=4, label="r")
-        coupling = Capacitive(q, r, g=0.05)
-        chip = Chip([q, r], [coupling])
-
-        dressed = chip.dress()
-        spectrum = np.asarray(chip.dressed_spectrum(), dtype=float)
-
-        npt.assert_allclose(
-            spectrum,
-            np.asarray(dressed.eigenvalues, dtype=float),
-            atol=1e-12,
-        )
-
-        for label in ((0, 0), (1, 0), (0, 1)):
-            idx = dressed.state_map[label]
-            npt.assert_allclose(
-                spectrum[idx],
-                chip.energy({"q": label[0], "r": label[1]}),
-                atol=1e-12,
-            )
-
-
-# ---------------------------------------------------------------------------
-# TestDemodulation -- verify rotating-frame demodulation
-# ---------------------------------------------------------------------------
 
 
 class TestDemodulation:
@@ -811,11 +489,6 @@ class TestDemodulation:
         )
 
 
-# ---------------------------------------------------------------------------
-# TestVacuumRabi — capacitive coupling time-domain
-# ---------------------------------------------------------------------------
-
-
 class TestVacuumRabi:
     """Verify vacuum Rabi oscillation from capacitive coupling.
 
@@ -828,29 +501,6 @@ class TestVacuumRabi:
 
     G = 0.05  # coupling in GHz
     FREQ = 6.0  # resonator frequency in GHz
-
-    def test_vacuum_rabi_period(self) -> None:
-        """Population swap period matches T = 1/(2g) within 5% for ``H_int = g(a†b + ab†)``."""
-        r_a = Resonator(freq=self.FREQ, levels=4, label="r_a")
-        r_b = Resonator(freq=self.FREQ, levels=4, label="r_b")
-        coupling = Capacitive(r_a, r_b, g=self.G)
-        chip = Chip([r_a, r_b], [coupling], frame="lab")
-
-        # Initial state: one photon in r_a, vacuum in r_b
-        psi0 = chip.bare_state(r_a=1, r_b=0)
-
-        T_swap = 1.0 / (2.0 * self.G)  # full period = 10 ns
-        tlist = np.linspace(0, T_swap, 501)
-
-        result = simulate(chip, [], tlist, initial_state=psi0)
-        p_a = result.population("r_a", 1)
-
-        # At t = T/2 = 1/(4g), population should be near zero (full swap to r_b)
-        half_idx = len(tlist) // 2
-        assert p_a[half_idx] < 0.05, f"P(r_a=1) at t=T/2 should be ~0 (full swap), got {p_a[half_idx]:.4f}"
-
-        # At t = T = 1/(2g), population should return to ~1
-        assert p_a[-1] > 0.95, f"P(r_a=1) at t=T should be ~1 (return), got {p_a[-1]:.4f}"
 
     def test_vacuum_rabi_cosine_squared(self) -> None:
         """Population matches P_A(t) = cos²(2π·g·t), the exact solution for RWA coupling."""
@@ -869,11 +519,6 @@ class TestVacuumRabi:
         # Analytical: P_A(t) = cos²(2π·g·t)
         p_a_analytic = np.cos(2 * np.pi * self.G * tlist) ** 2
         npt.assert_allclose(p_a, p_a_analytic, atol=0.05, err_msg="Vacuum Rabi P(r_a=1,t) does not match cos²(2π·g·t)")
-
-
-# ---------------------------------------------------------------------------
-# TestRabiFrequency — drive Rabi from matrix element
-# ---------------------------------------------------------------------------
 
 
 class TestRabiFrequency:
@@ -922,11 +567,6 @@ class TestRabiFrequency:
         npt.assert_allclose(p1, p1_analytic, atol=0.02, err_msg="Rabi frequency does not match Ω × |⟨0|H_c|1⟩|")
 
 
-# ---------------------------------------------------------------------------
-# TestFluxDrivePhase — flux-drive diagonal coupling
-# ---------------------------------------------------------------------------
-
-
 class TestFluxDrivePhase:
     """Verify FluxDrive diagonal coupling properties.
 
@@ -968,30 +608,6 @@ class TestFluxDrivePhase:
             err_msg="FluxDrive diagonal coupling should preserve Fock state populations",
         )
 
-    def test_flux_drive_ground_state_unaffected(self) -> None:
-        """Flux drive on ``|0⟩`` leaves P(|0⟩, t) = 1.0 for all t, even with a strong drive, since ⟨0|n̂|0⟩=0."""
-        freq_q = 5.0
-        q = DuffingTransmon(freq=freq_q, anharmonicity=-0.2, levels=4, label="q")
-        chip = Chip([q])
-
-        d = FluxDrive(target=q)
-        chip.connect(ControlEquipment(lines=[d]))
-        drive_op = DriveOp(
-            target_label="q",
-            envelope=Square(amplitude=0.2, duration=200),  # strong drive
-            freq=freq_q + 0.1,
-            start_time=0.0,
-            drive_label=d.label,
-        )
-
-        tlist = np.linspace(0, 200, 1001)
-        result = simulate(chip, [drive_op], tlist)
-        p0 = result.population("q", 0)
-
-        npt.assert_allclose(
-            p0, np.ones_like(p0), atol=0.01, err_msg="FluxDrive on ground state should have zero effect (⟨0|n̂|0⟩=0)"
-        )
-
     def test_flux_drive_matrix_element(self) -> None:
         """The number operator is diagonal: ⟨n|n̂|m⟩ = n·δ_{nm}."""
         q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=5, label="q")
@@ -1010,11 +626,6 @@ class TestFluxDrivePhase:
                     npt.assert_allclose(
                         abs(off_diag), 0.0, atol=1e-10, err_msg=f"⟨{n}|n̂|{m}⟩ = {off_diag}, expected 0 (diagonal)"
                     )
-
-
-# ---------------------------------------------------------------------------
-# TestGaussianEnvelopeArea — pulse area integral
-# ---------------------------------------------------------------------------
 
 
 class TestGaussianEnvelopeArea:

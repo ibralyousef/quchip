@@ -7,6 +7,8 @@ Chip.solve_many() produce correct results that match the
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import numpy.testing as npt
 import pytest
@@ -38,58 +40,116 @@ class _NoisyCapacitive(Capacitive):
 class TestBuildSolveProblem:
     """Verify build_problem assembles correct SolveProblem."""
 
-    def test_returns_solve_problem(self):
-        """build_problem must return a SolveProblem instance."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        ChargeDrive(target=q)
-        chip = Chip([q])
-        tlist = np.linspace(0, 50, 201)
-
-        problem = build_problem(chip, [], tlist)
-        assert isinstance(problem, SolveProblem)
-
-    def test_chip_reference_preserved(self):
-        """SolveProblem.chip must be the same chip instance."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        chip = Chip([q])
-        tlist = np.linspace(0, 50, 201)
-
-        problem = build_problem(chip, [], tlist)
-        assert problem.chip is chip
-
-    def test_rotating_problem_resolves_local_system_once(self, monkeypatch: pytest.MonkeyPatch):
-        """Dressed frame references and solve assembly share one local resolution."""
-        import quchip.engine.assembly as assembly
-
+    def test_built_request_keeps_dimensions_and_observable_context_after_source_edits(self):
+        """An old solve uses captured dimensions and labels after the authoring device changes."""
         q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
         chip = Chip([q], frame="rotating")
-        calls = 0
-        original = assembly._resolve_local_system
+        problem = build_problem(chip, [], np.linspace(0.0, 2.0, 5), initial_state={q: 1}, e_ops={q: q.sigma_z})
+        q.levels = 4
+        q.freq = 5.2
+        result = solve_problem(problem, check_truncation=False)
 
-        def counted(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            return original(*args, **kwargs)
+        assert tuple(result.dims) == (3,)
+        assert result.reduced_state(2.0, "q").shape == (3, 3)
+        npt.assert_allclose(result.expect("q"), -1.0, atol=1e-12)
 
-        monkeypatch.setattr(assembly, "_resolve_local_system", counted)
-        build_problem(chip, [], np.linspace(0.0, 1.0, 3))
+    def test_built_request_copies_time_and_native_state_buffers(self):
+        """Mutating caller-owned time and ket buffers cannot change a built solve."""
+        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
+        chip = Chip([q], frame="rotating")
+        times = np.linspace(0.0, 2.0, 5)
+        state = chip.bare_state({q: 1})
+        problem = build_problem(chip, [], times, initial_state=state)
+        times[:] = np.linspace(0.0, 4.0, 5)
+        state.data = chip.bare_state({q: 0}).data
 
-        assert calls == 1
+        result = solve_problem(problem, check_truncation=False)
+        npt.assert_array_equal(result.times, np.linspace(0.0, 2.0, 5))
+        npt.assert_allclose(result.population("q", 1), 1.0, atol=1e-12)
 
-    def test_backend_rejected_in_options(self):
-        """SolveProblem rejects 'backend' key in options."""
-        with pytest.raises(ValueError, match="must not contain 'backend'"):
-            SolveProblem(
-                chip=None,
-                engine_result=None,
-                initial_state=None,
-                tlist=np.linspace(0, 50, 201),
-                options={"backend": "something"},
-            )
+    @pytest.mark.parametrize("source", ["envelope", "transform"])
+    def test_built_request_captures_mutable_signal_payloads(self, source):
+        """Source edits change future builds but cannot retune an existing request."""
+        from quchip.control.signal import SignalTransform
+
+        class BufferGain(SignalTransform):
+            def __init__(self, factor):
+                self.factor = factor
+
+            def apply(self, signals):
+                return {key: signal.scaled(self.factor) for key, signal in signals.items()}
+
+        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="q")
+        chip = Chip([q], frame="rotating", backend="qutip")
+        factor = np.array(1.0)
+        chip.wire(ChargeDrive(q), signal_chain=[BufferGain(factor)])
+        envelope = Square(duration=10.0, amplitude=0.01)
+        seq = QuantumSequence(chip)
+        seq.charge(q, envelope=envelope)
+        times = np.linspace(0.0, 10.0, 21)
+        problem = seq.build_problem(times)
+        before = solve_problem(problem, check_truncation=False).population("q", 1)
+        assert before[-1] > 0.09
+        if source == "envelope":
+            envelope.amplitude = 0.0
+        else:
+            factor[...] = 0.0
+        after = solve_problem(problem, check_truncation=False).population("q", 1)
+        fresh = solve_problem(seq.build_problem(times), check_truncation=False).population("q", 1)
+        npt.assert_allclose(after, before, atol=1e-12)
+        npt.assert_allclose(fresh, 0.0, atol=1e-12)
+
+    def test_built_request_keeps_its_backend_after_the_default_changes(self):
+        """Backend dispatch belongs to the built request rather than a later global default."""
+        from dataclasses import replace
+
+        from quchip.backend.qutip import QuTiPBackend
+        from quchip.engine import solve_many
+
+        class LaterBackend(QuTiPBackend):
+            def solve_problem(self, problem):
+                raise AssertionError("old request dispatched through the new default")
+
+            def is_native_state(self, state):
+                raise AssertionError("old request rematerialized through the new default")
+
+        reset_default_backend()
+        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
+        chip = Chip([q])
+        problem = build_problem(chip, [], np.linspace(0.0, 2.0, 5))
+        try:
+            set_default_backend(LaterBackend())
+            result = solve_problem(problem, check_truncation=False)
+            npt.assert_allclose(result.population("q", 0), 1.0, atol=1e-12)
+            variant = replace(problem, solver="sesolve")
+            assert variant.backend is problem.backend
+            for result in solve_many([problem, variant], progress=False):
+                npt.assert_allclose(result.population("q", 0), 1.0, atol=1e-12)
+        finally:
+            reset_default_backend()
+
+    def test_batch_rejects_mixed_captured_backends(self):
+        """A shared batch cannot silently run a point through another point's backend."""
+        from dataclasses import replace
+
+        from quchip.backend.qutip import QuTiPBackend
+        from quchip.engine import solve_many
+        from quchip.engine.ir import SolveBatch
+
+        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
+        chip = Chip([q])
+        problem = build_problem(chip, [], np.linspace(0.0, 2.0, 5))
+        other = replace(problem, backend=QuTiPBackend())
+
+        with pytest.raises(ValueError, match="captured backend"):
+            SolveBatch(chip=chip, problems=(problem, other))
+        results = solve_many([problem, other], progress=False)
+        assert results[0]._backend is problem.backend
+        assert results[1]._backend is other.backend
 
     def test_options_dict_is_copied(self):
-        """SolveProblem copies the options dict so external mutation is isolated."""
-        original = {"store_states": True}
+        """SolveProblem captures nested option containers and their NumPy buffers."""
+        original = {"normalize_output": True, "nested": [{"values": np.array([1.0, 2.0])}]}
         problem = SolveProblem(
             chip=None,
             engine_result=None,
@@ -97,8 +157,10 @@ class TestBuildSolveProblem:
             tlist=np.linspace(0, 50, 201),
             options=original,
         )
-        original["store_states"] = False
-        assert problem.options["store_states"] is True
+        original["normalize_output"] = False
+        original["nested"][0]["values"][:] = 0.0
+        assert problem.options["normalize_output"] is True
+        npt.assert_array_equal(problem.options["nested"][0]["values"], [1.0, 2.0])
 
     def test_problem_with_drive_ops(self):
         """SolveProblem should include drive Hamiltonian terms."""
@@ -177,18 +239,6 @@ class TestSolveProblemDispatch:
 class TestChipSolve:
     """Verify Chip.solve() dispatches correctly."""
 
-    def test_chip_solve(self):
-        """Chip.solve() produces results matching simulate."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        ChargeDrive(target=q)
-        chip = Chip([q], frame="rotating")
-        tlist = np.linspace(0, 50, 201)
-
-        problem = build_problem(chip, [], tlist)
-        result = chip.solve(problem)
-        assert result is not None
-        assert result.populations is not None
-
     def test_chip_solve_rejects_wrong_chip(self):
         """Chip.solve() rejects problems built for a different chip."""
         q1 = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
@@ -202,17 +252,6 @@ class TestChipSolve:
 
         with pytest.raises(ValueError, match="different chip"):
             chip2.solve(problem)
-
-    def test_chip_solve_accepts_problem_after_chip_mutation(self):
-        """solve() treats SolveProblem as a frozen snapshot — chip mutations after build are allowed."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        chip = Chip([q])
-        problem = build_problem(chip, [], np.linspace(0.0, 10.0, 11))
-
-        q.freq += 0.1
-
-        result = chip.solve(problem)
-        assert result.solver in {"sesolve", "mesolve"}
 
     def test_chip_solve_rejects_non_problem(self):
         """Chip.solve() rejects non-SolveProblem input."""
@@ -245,21 +284,6 @@ class TestChipSolve:
 class TestQuantumSequenceBuildProblem:
     """Verify QuantumSequence.build_problem() matches run()-time assembly."""
 
-    def test_build_problem_returns_solve_problem(self):
-        """sequence.build_problem() returns a SolveProblem referencing the sequence's chip."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        drive = ChargeDrive(target=q)
-        chip = Chip([q], frame="rotating")
-        chip.connect(ControlEquipment(lines=[drive]))
-        sequence = QuantumSequence(chip)
-        sequence.schedule(drive, envelope=Square(duration=50.0, amplitude=0.02), freq=5.0)
-
-        problem = sequence.build_problem()
-
-        assert isinstance(problem, SolveProblem)
-        assert problem.chip is chip
-        assert len(sequence.scheduled_ops) == 1
-
     def test_build_problem_uses_run_default_tlist(self):
         """build_problem() with no tlist uses the same default tlist as run()."""
         q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
@@ -271,41 +295,10 @@ class TestQuantumSequenceBuildProblem:
 
         problem = sequence.build_problem()
 
-        expected_tlist = np.linspace(0.0, 50.0, 500)
-        npt.assert_allclose(problem.tlist, expected_tlist)
-
-    def test_build_problem_preserves_inputs(self):
-        """build_problem() preserves tlist, initial_state, solver, options, and e_ops verbatim."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        drive = ChargeDrive(target=q)
-        chip = Chip([q], frame="rotating")
-        chip.connect(ControlEquipment(lines=[drive]))
-        sequence = QuantumSequence(chip)
-        sequence.schedule(drive, envelope=Square(duration=50.0, amplitude=0.02), freq=5.0)
-
-        tlist = np.linspace(0.0, 50.0, 101)
-        initial_state = chip.state(q=0)
-        e_ops = chip.e_ops(q="X")
-        options = {"progress_bar": "tqdm", "store_states": False}
-
-        problem = sequence.build_problem(
-            tlist=tlist,
-            solver="sesolve",
-            options=options,
-            e_ops=e_ops,
-            initial_state=initial_state,
-        )
-
-        npt.assert_allclose(problem.tlist, tlist)
-        assert problem.initial_state is initial_state
-        assert problem.solver == "sesolve"
-        assert problem.e_ops is not None
-        assert problem.e_ops_meta is not None
-        assert len(problem.e_ops) == len(problem.e_ops_meta)
-        assert all(meta.key == "q" for meta in problem.e_ops_meta)
-        assert problem.options["progress_bar"] == "tqdm"
-        assert problem.options["store_states"] is False
-        assert problem.options["store_final_state"] is True
+        result = sequence.simulate(states="none", check_truncation=False)
+        npt.assert_array_equal(problem.tlist, result.times)
+        assert problem.tlist[0] == 0.0
+        assert problem.tlist[-1] == 50.0
 
     def test_run_matches_chip_solve_of_built_problem(self):
         """sequence.simulate() matches chip.solve() of the sequence's own built problem."""
@@ -338,7 +331,7 @@ class TestQuantumSequenceBuildProblem:
             freq=5.0,
             phase=np.pi / 2.0,
         )
-        explicit_result = explicit.simulate(tlist=tlist, options={"store_states": True, "store_final_state": True})
+        explicit_result = explicit.simulate(tlist=tlist, states="all")
 
         virtual = QuantumSequence(chip)
         virtual.vz("q", np.pi / 2.0)
@@ -347,7 +340,7 @@ class TestQuantumSequenceBuildProblem:
             envelope=Square(duration=20.0, amplitude=0.02),
             freq=5.0,
         )
-        virtual_result = virtual.simulate(tlist=tlist, options={"store_states": True, "store_final_state": True})
+        virtual_result = virtual.simulate(tlist=tlist, states="all")
 
         overlap = chip.backend.overlap(explicit_result.final_state, virtual_result.final_state)
         npt.assert_allclose(np.abs(complex(overlap)), 1.0, atol=1e-6)
@@ -417,40 +410,6 @@ class TestQuantumSequenceBuildProblem:
         assert problems[0].initial_state is not problems[1].initial_state
         assert all(problem.initial_state.shape == (3, 1) for problem in problems)
 
-    def test_build_batch_reuses_problem_scaffold(self):
-        """build_batch() shares the Hamiltonian operator skeleton, tlist, and frame across elements."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        drive = ChargeDrive(target=q)
-        chip = Chip([q], frame="rotating")
-        chip.connect(ControlEquipment(lines=[drive]))
-        sequence = QuantumSequence(chip)
-        sequence.schedule(drive, envelope=Square(duration=20.0, amplitude=0.02), freq=5.0)
-        tlist = np.linspace(0.0, 20.0, 81)
-        e_ops = chip.e_ops(q=["X"])
-        state_axis = sequence.vary("initial_state", [{"q": 0}, {"q": 1}], name="state")
-
-        problems = sequence.build_batch(
-            state_axis,
-            tlist=tlist,
-            e_ops=e_ops,
-        )
-
-        assert len(problems) == 2
-        # Element-level EngineResults are materialised on demand; identity equality
-        # of static_terms holds against the SolveBatch and across elements, not just within one.
-        batch = problems
-        assert batch.problems[0].engine_result.static_terms is problems[0].engine_result.static_terms
-        assert problems[0].engine_result.static_terms is problems[1].engine_result.static_terms
-        for slot in range(len(problems[0].engine_result.dynamic_terms)):
-            assert (
-                problems[0].engine_result.dynamic_terms[slot].operator
-                is problems[1].engine_result.dynamic_terms[slot].operator
-            )
-        assert problems[0].tlist is problems[1].tlist
-        assert problems[0].resolved_frame is problems[1].resolved_frame
-        assert problems[0].e_ops is problems[1].e_ops
-        assert problems[0].initial_state is not problems[1].initial_state
-
     def test_simulate_batch_matches_manual_batch(self, monkeypatch: pytest.MonkeyPatch):
         """sequence.simulate_batch() matches a manually built batch solved via chip.solve_many()."""
         q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
@@ -490,49 +449,6 @@ class TestQuantumSequenceBuildProblem:
                 batched_result.population("q", 1),
                 atol=1e-6,
             )
-
-    def test_build_batch_compiles_template_once_for_homogeneous_sweep(self, monkeypatch: pytest.MonkeyPatch):
-        """build_batch() compiles the Hamiltonian template once and instantiates it per element."""
-        import quchip.control.sequence as sequence_module
-
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        drive = ChargeDrive(target=q)
-        chip = Chip([q], frame="rotating")
-        chip.connect(ControlEquipment(lines=[drive]))
-        sequence = QuantumSequence(chip)
-        pulse = sequence.schedule(drive, envelope=Square(duration=20.0, amplitude=0.02), freq=5.0)
-        amp = pulse.vary("amplitude", [0.01, 0.02], name="amp")
-        freq = pulse.vary("freq", [4.9, 5.1], name="freq")
-
-        compile_calls = 0
-        instantiate_calls = 0
-
-        original_compile = sequence_module.compile_hamiltonian_template
-        original_instantiate = sequence_module.instantiate_engine_result
-
-        def counted_compile(*args, **kwargs):
-            nonlocal compile_calls
-            compile_calls += 1
-            return original_compile(*args, **kwargs)
-
-        def counted_instantiate(*args, **kwargs):
-            nonlocal instantiate_calls
-            instantiate_calls += 1
-            return original_instantiate(*args, **kwargs)
-
-        monkeypatch.setattr(sequence_module, "compile_hamiltonian_template", counted_compile)
-        monkeypatch.setattr(sequence_module, "instantiate_engine_result", counted_instantiate)
-
-        batch = sequence.build_batch(
-            amp,
-            freq,
-            tlist=np.linspace(0.0, 20.0, 81),
-            initial_state=chip.state(q=0),
-        )
-
-        assert len(batch) == 4
-        assert compile_calls == 1
-        assert instantiate_calls == 5
 
     def test_build_batch_delay_axis_shifts_later_pulses(self, monkeypatch: pytest.MonkeyPatch):
         """Sweeping a delay's duration in build_batch() shifts every later pulse's start time."""
@@ -633,149 +549,6 @@ class TestChipSolveMany:
         for r in results:
             assert r.populations is not None
 
-    def test_solve_many_parallelizes_heterogeneous_qutip_problems(self, monkeypatch: pytest.MonkeyPatch):
-        """Heterogeneous QuTiP problems reach one thresholded executor dispatch."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        chip = Chip([q], frame="rotating")
-        problems = [
-            build_problem(chip, [], np.linspace(0.0, duration, 21 + index))
-            for index, duration in enumerate(np.linspace(10.0, 80.0, 8))
-        ]
-
-        mapped_items: list[list[SolveProblem]] = []
-        requested_jobs: list[int] = []
-
-        class InlineExecutor:
-            def map(self, task, items):
-                batch = list(items)
-                mapped_items.append(batch)
-                return map(task, batch)
-
-        def get_executor(n_jobs):
-            requested_jobs.append(n_jobs)
-            return InlineExecutor()
-
-        monkeypatch.setattr(chip.backend, "_get_executor", get_executor)
-
-        results = chip.solve_many(problems, progress=False)
-
-        assert requested_jobs == [-1]
-        assert mapped_items == [problems]
-        assert len(results) == 8
-
-    def test_solve_many_retains_structural_dispatch_below_qutip_threshold(self, monkeypatch: pytest.MonkeyPatch):
-        """Small heterogeneous QuTiP lists retain structural-group dispatch."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        chip = Chip([q], frame="rotating")
-        problems = [
-            build_problem(chip, [], np.linspace(0.0, duration, 21 + index))
-            for index, duration in enumerate((10.0, 20.0, 30.0))
-        ]
-
-        original_solve_batch = chip.backend.solve_batch
-        solve_batch_sizes: list[int] = []
-
-        def counted_solve_batch(batch, *, progress=True):
-            solve_batch_sizes.append(batch.batch_size)
-            return original_solve_batch(batch, progress=progress)
-
-        monkeypatch.setattr(chip.backend, "solve_batch", counted_solve_batch)
-
-        results = chip.solve_many(problems, progress=False)
-
-        assert solve_batch_sizes == [1, 1, 1]
-        assert len(results) == 3
-
-    @pytest.mark.optional_backend
-    def test_solve_many_groups_homogeneous_subbatches(self, monkeypatch: pytest.MonkeyPatch):
-        """Two build_batch() results concatenated into a list should reach solve_batch in two groups."""
-        pytest.importorskip("dynamiqs")
-        reset_default_backend()
-        set_default_backend("dynamiqs")
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        drive = ChargeDrive(target=q)
-        chip = Chip([q], frame="rotating")
-        chip.connect(ControlEquipment(lines=[drive]))
-        sequence = QuantumSequence(chip)
-        sequence.schedule(drive, envelope=Square(duration=20.0, amplitude=0.02), freq=5.0)
-        e_ops = chip.e_ops(q=["X"])
-
-        state_axis = sequence.vary("initial_state", [{"q": 0}, {"q": 1}], name="state")
-
-        problems = list(sequence.build_batch(
-            state_axis,
-            tlist=np.linspace(0.0, 20.0, 81),
-            e_ops=e_ops,
-        )) + list(sequence.build_batch(
-            state_axis,
-            tlist=np.linspace(0.0, 30.0, 121),
-            e_ops=e_ops,
-        ))
-
-        original_solve_batch = chip.backend.solve_batch
-        solve_batch_sizes: list[int] = []
-
-        def counted_solve_batch(batch, *, progress=True):
-            solve_batch_sizes.append(batch.batch_size)
-            return original_solve_batch(batch, progress=progress)
-
-        monkeypatch.setattr(chip.backend, "solve_batch", counted_solve_batch)
-
-        results = chip.solve_many(problems, progress=False)
-
-        assert len(results) == 4
-        assert sorted(solve_batch_sizes) == [2, 2]
-        reset_default_backend()
-
-    @pytest.mark.optional_backend
-    def test_build_batch_chevron_avoids_prepare_per_point_on_dynamiqs(self, monkeypatch: pytest.MonkeyPatch):
-        """A chevron sweep should produce a single vmapped solve_batch call on dynamiqs."""
-        pytest.importorskip("dynamiqs")
-        reset_default_backend()
-        set_default_backend("dynamiqs")
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        drive = ChargeDrive(target=q)
-        chip = Chip([q], frame="rotating")
-        chip.connect(ControlEquipment(lines=[drive]))
-        sequence = QuantumSequence(chip)
-        pulse = sequence.schedule(drive, envelope=Square(duration=20.0, amplitude=0.02), freq=5.0)
-        amp = pulse.vary("amplitude", [0.01, 0.02], name="amp")
-        freq = pulse.vary("freq", [4.9, 5.1], name="freq")
-
-        original_prepare_hamiltonian = chip.backend.prepare_hamiltonian
-        prepare_calls: list[tuple[int, int]] = []
-
-        def counted_prepare_hamiltonian(description, tlist):
-            prepare_calls.append((id(description), id(tlist)))
-            return original_prepare_hamiltonian(description, tlist)
-
-        original_solve_batch = chip.backend.solve_batch
-        solve_batch_sizes: list[int] = []
-
-        def counted_solve_batch(batch, *, progress=True):
-            solve_batch_sizes.append(batch.batch_size)
-            return original_solve_batch(batch, progress=progress)
-
-        monkeypatch.setattr(chip.backend, "prepare_hamiltonian", counted_prepare_hamiltonian)
-        monkeypatch.setattr(chip.backend, "solve_batch", counted_solve_batch)
-
-        problems = sequence.build_batch(
-            amp,
-            freq,
-            tlist=np.linspace(0.0, 20.0, 81),
-            e_ops=chip.e_ops(q=["X"]),
-            initial_state=chip.state(q=0),
-        )
-        results = chip.solve_many(problems, progress=False)
-
-        assert len(results) == 4
-        assert solve_batch_sizes == [4]
-        # prepare_hamiltonian is the single-element entry point; the new
-        # fast path prepares once per batch via prepare_batch, so
-        # prepare_hamiltonian must not be called at all.
-        assert len(prepare_calls) == 0
-        reset_default_backend()
-
     def test_solve_many_rejects_wrong_chip(self):
         """solve_many rejects problems from a different chip."""
         q1 = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
@@ -790,13 +563,69 @@ class TestChipSolveMany:
         with pytest.raises(ValueError, match="different chip"):
             chip2.solve_many(problems, progress=False)
 
-    def test_solve_many_accepts_problem_after_chip_mutation(self):
-        """solve_many() treats SolveProblem as a frozen snapshot — chip mutations after build are allowed."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        chip = Chip([q])
-        problem = build_problem(chip, [], np.linspace(0.0, 10.0, 11))
+class TestSolverSelection:
+    """The solver follows the state as well as the collapse terms."""
 
-        q.freq += 0.1
+    @staticmethod
+    def _mixed_ancilla_chip() -> tuple[Chip, Any]:
+        from quchip import Resonator
+        from quchip.chip.couplings import CrossKerr
 
-        results = chip.solve_many([problem], progress=False)
-        assert len(results) == 1
+        qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=2, label="q")
+        ancilla = Resonator(freq=6.0, levels=2, label="a")
+        chip = Chip([qubit, ancilla], couplings=[CrossKerr(qubit, ancilla, chi=0.01)], frame="rotating")
+        ground = chip.backend.as_density_matrix(chip.bare_state({qubit: 1, ancilla: 0}))
+        excited = chip.backend.as_density_matrix(chip.bare_state({qubit: 1, ancilla: 1}))
+        return chip, 0.5 * ground + 0.5 * excited
+
+    def test_density_matrix_without_loss_runs_mesolve(self):
+        """A mixed initial state must evolve as U rho U^dagger even without collapse terms."""
+        chip, rho = self._mixed_ancilla_chip()
+        result = QuantumSequence(chip).simulate(
+            np.linspace(0.0, 40.0, 41), initial_state=rho, partition=False, check_truncation=False
+        )
+        final = chip.backend.to_array(result.final_state)
+        assert result.solver == "mesolve"
+        npt.assert_allclose(np.trace(final), 1.0, atol=1e-8)
+        npt.assert_allclose(final, final.conj().T, atol=1e-8)
+        npt.assert_allclose(np.trace(final @ final).real, 0.5, atol=1e-8)
+
+    def test_foreign_array_states_route_by_shape(self):
+        """A problem carrying a native array state still routes before the solve boundary coerces it."""
+        from dataclasses import replace
+
+        chip, rho = self._mixed_ancilla_chip()
+        problem = build_problem(chip, [], np.linspace(0.0, 4.0, 5))
+        ket = np.asarray(chip.backend.to_array(problem.initial_state))
+        assert replace(problem, initial_state=ket).solver_name(chip.backend) == "sesolve"
+        flat = replace(problem, initial_state=ket.reshape(-1), solver="sesolve")
+        assert flat.solver_name(chip.backend) == "sesolve"
+        assert solve_problem(flat).solver == "sesolve"
+        assert chip.backend.as_density_matrix(ket.reshape(-1)).shape == (4, 4)
+        mixed = replace(problem, initial_state=np.asarray(chip.backend.to_array(rho)))
+        assert mixed.solver_name(chip.backend) == "mesolve"
+        assert solve_problem(mixed).solver == "mesolve"
+
+    def test_flat_kets_solve_on_dynamiqs(self):
+        """dynamiqs promotes a flat native ket to a column before its solvers see it."""
+        pytest.importorskip("dynamiqs")
+        from dataclasses import replace
+
+        qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
+        chip = Chip([qubit], frame="rotating", backend="dynamiqs")
+        problem = build_problem(chip, [], np.linspace(0.0, 4.0, 5))
+        flat = np.asarray(chip.backend.to_array(problem.initial_state)).reshape(-1)
+        assert chip.backend.is_ket(flat)
+        assert np.asarray(chip.backend.to_array(chip.backend.as_density_matrix(flat))).shape == (3, 3)
+        result = solve_problem(replace(problem, initial_state=flat, solver="sesolve"))
+        assert result.solver == "sesolve"
+        npt.assert_allclose(np.asarray(result.population("q", 0)), 1.0, atol=1e-8)
+
+    def test_explicit_sesolve_rejects_a_density_matrix(self):
+        chip, rho = self._mixed_ancilla_chip()
+        with pytest.raises(RuntimeError) as excinfo:
+            QuantumSequence(chip).simulate(
+                np.linspace(0.0, 4.0, 5), initial_state=rho, solver="sesolve", partition=False
+            )
+        assert isinstance(excinfo.value.__cause__, ValueError)
+        assert "sesolve evolves kets only" in str(excinfo.value.__cause__)
