@@ -3,7 +3,8 @@
 from typing import Any
 
 from quchip import CouplingDrive, DeviceDrive, Envelope, TimeCoefficient
-from quchip.declarative import CouplingModel, DeviceModel, Scalar, parameter, qnp
+from quchip.control import SignalTransform
+from quchip.declarative import CouplingModel, DeviceModel, Scalar, parameter, setting, qnp
 
 
 class ExternalMode(DeviceModel):
@@ -68,3 +69,18 @@ device_drive = ExternalDeviceDrive(mode_a, gain=0.5, label=None)
 coupling_drive = ExternalCouplingDrive(coupling, gain=0.4, label="pump")
 envelope = ExternalEnvelope(duration=10.0, amplitude=0.2)
 coefficient = ExternalCoefficient(amplitude=0.3)
+
+
+class ExternalAttenuator(SignalTransform, serializable=True):
+    line: str = setting()
+    loss: float = parameter(nonnegative=True)
+
+    def apply(self, signals: Any) -> Any:
+        return {key: signal.scaled(qnp.exp(-self.loss)) if key[0] == self.line else signal
+                for key, signal in signals.items()}
+
+    def referenced_lines(self) -> tuple[str, ...]:
+        return (self.line,)
+
+
+attenuator = ExternalAttenuator(line="pump", loss=0.5)

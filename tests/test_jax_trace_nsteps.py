@@ -7,15 +7,6 @@ from quchip.approximations import RWA
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def _reset_labels():
-    from quchip.utils.labeling import reset_label_counters
-
-    reset_label_counters()
-    yield
-    reset_label_counters()
-
-
 @pytest.mark.optional_backend
 def test_jit_and_grad_through_sesolve():
     """@jax.jit + jax.grad must work through a full seq.simulate() loss."""
@@ -101,7 +92,7 @@ def test_jit_and_grad_through_driven_mesolve_matches_finite_difference():
             tlist=tlist,
             initial_state=chip.bare_state({q: 0}),
             e_ops=chip.e_ops(q="n"),
-            options={"store_states": False, "store_final_state": False, "method": method},
+            states="none", options={"method": method},
             check_truncation=False,
             partition=False,
         )

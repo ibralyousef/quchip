@@ -323,7 +323,7 @@ class TestPhysicsMatch:
             [],
             tlist,
             initial_state=psi0_lab,
-            options={"store_states": True, "nsteps": 10000},
+            states="all", options={"nsteps": 10000},
         )
 
         # Rotating frame
@@ -342,7 +342,7 @@ class TestPhysicsMatch:
             [],
             tlist,
             initial_state=psi0_rot,
-            options={"store_states": True, "nsteps": 10000},
+            states="all", options={"nsteps": 10000},
         )
 
         pops_lab = result_lab.populations

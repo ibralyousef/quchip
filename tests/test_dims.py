@@ -1,43 +1,25 @@
-"""Tests for the backend-free dims-normalization helpers."""
-
-from __future__ import annotations
+"""Normalization of flat, nested, and inferred subsystem dimensions."""
 
 import pytest
 
 from quchip.backend._dims import normalize_dims_from_list
 
 
-def test_none_dims_uses_fallback():
-    """``None`` dims fall back to a single subsystem of size ``fallback``."""
-    assert normalize_dims_from_list(None, fallback=3) == (3,)
+@pytest.mark.parametrize(
+    "dims,fallback,expected",
+    [
+        (None, 3, (3,)),
+        ([[2, 3], [2, 3]], None, (2, 3)),
+        ([[2, 3]], None, (2, 3)),
+        ([2, 3, 4], None, (2, 3, 4)),
+    ],
+)
+def test_normalize_supported_dimension_forms(dims, fallback, expected):
+    """Flat and nested layouts retain subsystem order; missing dims use the fallback."""
+    assert normalize_dims_from_list(dims, fallback=fallback) == expected
 
 
-def test_none_dims_without_fallback_raises():
-    """``None`` dims with no ``fallback`` raise ValueError."""
+def test_missing_dims_without_fallback_raises():
+    """Dimensions cannot be inferred without a fallback."""
     with pytest.raises(ValueError):
         normalize_dims_from_list(None, fallback=None)
-
-
-def test_nested_two_part_dims():
-    """QuTiP-style ``[[rows], [cols]]`` dims normalize to the shared flat dims tuple."""
-    assert normalize_dims_from_list([[2, 3], [2, 3]]) == (2, 3)
-
-
-def test_nested_single_part_dims():
-    """A single nested ``[[dims]]`` list unwraps to its flat dims tuple."""
-    assert normalize_dims_from_list([[2, 3]]) == (2, 3)
-
-
-def test_flat_single_dim():
-    """A flat single-element dims list normalizes to a 1-tuple."""
-    assert normalize_dims_from_list([2]) == (2,)
-
-
-def test_flat_two_dims():
-    """A flat two-element dims list normalizes to a 2-tuple."""
-    assert normalize_dims_from_list([2, 3]) == (2, 3)
-
-
-def test_flat_three_dims():
-    """A flat three-element dims list normalizes to a 3-tuple."""
-    assert normalize_dims_from_list([2, 3, 4]) == (2, 3, 4)

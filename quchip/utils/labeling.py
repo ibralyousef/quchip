@@ -1,43 +1,9 @@
-"""Shared auto-labeling and label resolution for quchip components.
+"""Component labels and object-or-label lookup.
 
-quchip devices, couplings, and drives never require users to invent unique
-identifiers. Each component class declares a short ``_type_prefix`` (e.g.
-``"duffing"`` for :class:`~quchip.devices.transmon.duffing.DuffingTransmon`,
-``"charge"`` for :class:`~quchip.control.drive.ChargeDrive`,
-``"capacitive"`` for :class:`~quchip.chip.couplings.Capacitive`), and when
-the user constructs one without passing an explicit ``label`` the component
-calls :func:`auto_label` to obtain ``"{prefix}_{n}"`` — where ``n`` is a
-per-prefix counter that increments on each call.
-
-Labels are strings that uniquely identify a component inside a
-:class:`~quchip.chip.chip.Chip`. They are used as:
-
-- Keys in :class:`~quchip.control.sequence.QuantumSequence` drive schedules.
-- Keys in :class:`~quchip.control.signal.Crosstalk` matrices.
-- Keys in expectation-value dictionaries.
-- The user-facing identifier in plots, ``__repr__``, and error messages.
-
-Any public API that accepts a component reference accepts either the
-string label *or* the component object itself. :func:`resolve_label` is
-the single helper that normalizes both into a string — call it wherever
-you'd otherwise write a manual ``isinstance(..., str)`` branch.
-
-Examples
---------
->>> from quchip.utils.labeling import auto_label, reset_label_counters, resolve_label
->>> reset_label_counters()
->>> auto_label("duffing")
-'duffing_0'
->>> auto_label("duffing")
-'duffing_1'
->>> auto_label("capacitive")
-'capacitive_0'
->>> class FakeDevice:
-...     label = "duffing_0"
->>> resolve_label(FakeDevice())
-'duffing_0'
->>> resolve_label("duffing_0")
-'duffing_0'
+Components without an explicit label receive ``"{prefix}_{n}"``, with a
+process-wide counter per prefix starting at zero. Labels identify components
+within a chip; :func:`resolve_label` accepts either the component or its label.
+Use :func:`reset_label_counters` for deterministic labels in tests.
 """
 
 from __future__ import annotations
@@ -50,49 +16,21 @@ _label_counters: dict[str, int] = {}
 
 
 def auto_label(prefix: str) -> str:
-    """Return the next ``"{prefix}_{n}"`` label and advance the per-prefix counter.
-
-    Parameters
-    ----------
-    prefix
-        The component's ``_type_prefix`` (e.g. ``"duffing"``, ``"charge"``).
-
-    Returns
-    -------
-    str
-        ``f"{prefix}_{n}"`` where ``n`` starts at ``0`` and increments on
-        each call with the same prefix.
-    """
+    """Return the next ``"{prefix}_{n}"`` label; each prefix starts at zero."""
     idx = _label_counters.get(prefix, 0)
     _label_counters[prefix] = idx + 1
     return f"{prefix}_{idx}"
 
 
 def reset_label_counters() -> None:
-    """Reset every auto-label counter to zero.
-
-    Intended for test fixtures — tests rely on deterministic labels, and the
-    module-level counter dict is otherwise process-global.
-    """
+    """Reset the process-wide label counters, typically in test fixtures."""
     _label_counters.clear()
 
 
 def resolve_label(obj: str | Any) -> str:
-    """Return a label string from either a string or a labeled component.
+    """Return a string label from a string or labeled component.
 
-    Used wherever quchip's public API accepts *"component or its label"*
-    interchangeably.
-
-    Parameters
-    ----------
-    obj
-        Either a label string, or any object exposing a non-``None``
-        ``.label`` attribute (devices, drives, couplings all qualify).
-
-    Raises
-    ------
-    TypeError
-        If *obj* is neither a string nor an object with a usable ``.label``.
+    Raise ``TypeError`` if the object has no usable label.
     """
     if isinstance(obj, str):
         return obj
@@ -108,22 +46,10 @@ def merge_labeled_values(
     mapping: Mapping[Any, Any] | None,
     kwargs: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Resolve a ``{device-or-label: value}`` mapping + kwargs into one ``{label: value}`` dict.
+    """Merge object-or-label keys and keyword arguments into a label-keyed dict.
 
-    Keys in *mapping* are resolved through :func:`resolve_label`, so device
-    objects and label strings are interchangeable. Two mapping keys that
-    resolve to the same label, or a label supplied through both *mapping*
-    and *kwargs*, are duplicates and raise :class:`ValueError`. Values are
-    placed verbatim (no ``int`` cast) — callers that need type or bound
-    validation layer it on top.
-
-    The single resolve-and-dedup step shared by the bare-tuple builder
-    (:func:`bare_label_from_mapping`) and the chip state-factory normalizer
-    (:func:`quchip.chip.states.normalize_device_state_mapping`), so the rule for
-    what counts as a duplicate device specification can never drift between
-    spectroscopy sweeps and single-point state construction. *mapping* must be a
-    :class:`~collections.abc.Mapping` (or ``None``); the public state factory
-    type-checks user input before delegating here.
+    Duplicate labels, including a label supplied through both inputs, raise
+    ``ValueError``. Values are unchanged; callers validate their types and bounds.
     """
     merged: dict[str, Any] = {}
     if mapping is not None:
@@ -144,19 +70,10 @@ def bare_label_from_mapping(
     mapping: Mapping[Any, Any] | None,
     kwargs: Mapping[str, Any],
 ) -> tuple[int, ...]:
-    """Merge a ``{device: Fock}`` spec into a full bare-state tuple.
+    """Build a bare-state tuple in ``device_labels`` order from a partial mapping.
 
-    The single canonical definition of how a partial ``{device: Fock}``
-    specification becomes a complete bare-state tuple in *device_labels*
-    order: keys are resolved and de-duplicated via
-    :func:`merge_labeled_values`, any label outside *device_labels* is
-    unknown and raises, and devices not mentioned default to Fock index ``0``.
-
-    Both :class:`~quchip.sweep.SpectrumSweepResult` and the chip-side
-    dressed analysis (:mod:`quchip.chip.analysis`) route through here, so
-    the spec-to-tuple mapping lives in exactly one place. Values are
-    placed verbatim (no ``int`` cast): callers that need type or Fock-bound
-    validation layer it on top of the returned tuple.
+    Keys may be devices or labels; unspecified devices default to Fock index zero.
+    Unknown or duplicate labels raise ``ValueError``. Callers validate values.
     """
     merged = merge_labeled_values(mapping, kwargs)
 
@@ -168,14 +85,10 @@ def bare_label_from_mapping(
 
 
 class LabelKeyedDict(dict):
-    """Result mapping keyed by labels (or label tuples) that also accepts the objects themselves.
+    """Label-keyed result mapping that also accepts component objects.
 
-    Wherever a reduction or analysis result is keyed by a component's label,
-    the component object is an equally good key. Tuple keys (survivor pairs)
-    additionally match in
-    either order — a pair is unordered physics; the stored order is
-    bookkeeping. Iteration, ``items()``, and serialization see the plain
-    stored keys; only lookup is widened.
+    Two-element tuple keys match in either order. Iteration and serialization expose the
+    stored keys.
     """
 
     @staticmethod
@@ -218,19 +131,10 @@ def top_components(
     dressed_idx: int,
     n: int,
 ) -> dict[tuple[int, ...], float]:
-    """Return the leading bare-basis probabilities ``|⟨bare|dressed⟩|²`` of one dressed column.
+    """Return the top ``n`` bare-basis probabilities of a dressed eigenvector.
 
-    Squares the amplitudes of column *dressed_idx* of *eigenvector_matrix*
-    (dressed eigenvectors expressed in the bare product basis), sorts them
-    descending, and maps the top *n* to their bare labels. This is the
-    squared-amplitude / argsort / label-map kernel shared by
-    :meth:`quchip.chip.analysis.ChipAnalysis.state_components` and
-    :meth:`quchip.sweep.SpectrumSweepResult.state_components_at`; each call
-    site keeps only its own dressed-index resolution.
-
-    Operates on a concrete eigenvector matrix — both call sites resolve the
-    dressed index off an already-materialized (non-traced) dressing, so the
-    NumPy reduction here never sits on a differentiable path.
+    Squared amplitudes from column ``dressed_idx`` are paired with bare labels
+    in descending order. Requires a concrete eigenvector matrix.
     """
     probs = np.asarray(np.abs(eigenvector_matrix[:, dressed_idx]) ** 2, dtype=float)
     order = np.argsort(probs)[::-1][:n]

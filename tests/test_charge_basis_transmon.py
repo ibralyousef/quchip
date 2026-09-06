@@ -8,15 +8,8 @@ import jax
 import numpy as np
 import pytest
 
-from quchip.utils.labeling import reset_label_counters
 from quchip.devices.protocols import ChargeCoupled, FluxCoupled, PhaseCoupled
 from quchip.devices.transmon.charge_basis import ChargeBasisTransmon
-
-
-@pytest.fixture(autouse=True)
-def _reset():
-    reset_label_counters()
-    yield
 
 
 # ----------------------------------------------------------------------
@@ -43,6 +36,14 @@ def test_num_basis_must_be_odd():
     """num_basis must be odd; an even charge-basis cutoff raises ValueError."""
     with pytest.raises(ValueError, match="num_basis"):
         ChargeBasisTransmon(E_C=0.25, E_J=20.0, num_basis=60)
+    for field in ("num_basis", "levels"):
+        with pytest.raises(TypeError):
+            ChargeBasisTransmon(E_C=0.25, E_J=20.0, **{field: 3.5})
+    device = ChargeBasisTransmon(E_C=0.25, E_J=20.0, num_basis=7, levels=3)
+    for field in ("num_basis", "projection_levels"):
+        with pytest.raises(TypeError):
+            setattr(device, field, 3.5)
+    assert (device.num_basis, device.projection_levels) == (7, 3)
 
 
 def test_is_charge_coupled_and_phase_coupled():

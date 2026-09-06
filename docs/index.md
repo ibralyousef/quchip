@@ -16,9 +16,8 @@
 
 `quchip` is an open-source Python toolkit for modelling superconducting quantum chips.
 
-A predictive chip model needs more than a Hamiltonian: device physics, control-line transformations, frames and approximations, dissipation, and measured observables all belong to it. quchip represents each part explicitly. Declare the chip once; the same declaration drives dressed-state analysis, model reduction, control sequencing, open-system simulation, parameter sweeps, and exact JAX gradients.
-
-The declared and resolved physics remain inspectable. `chip.unresolved_hamiltonian()` shows the authored static model, while `chip.hamiltonian()` applies the same basis, frame, and approximation strategy used by simulation. A sequence's Hamiltonian also includes its scheduled drives.
+Declare devices, couplings, controls, and losses once. Use the same chip for
+dressed spectra, pulse experiments, model reduction, and JAX gradients.
 
 ## Install
 
@@ -34,17 +33,15 @@ The {doc}`backend guide <guides/choosing-a-backend>` shows how to select QuTiP
 or dynamiqs, choose an integration method, and set tolerances, step controls,
 batching, and gradients.
 
-## Start with a physical question
+## Learn quchip
 
-The guides begin with a small runnable calculation and add one idea at a time:
-
-- {doc}`Define and inspect a chip <guides/defining-and-inspecting-a-chip>`
-- {doc}`Backend and solver options <guides/choosing-a-backend>`
-- {doc}`Steady state and microwave ports <guides/steady-state-and-vna>`
-- {doc}`Statics and parameter studies <guides/statics-and-parameter-studies>`
-- {doc}`Dynamics, pulses, observables, and readout <guides/dynamics-pulses-and-readout>`
-- {doc}`Chip transformations <guides/chip-transformations>`
-- {doc}`Differentiability <guides/differentiability>`
+1. {doc}`Declare and inspect a chip <guides/defining-and-inspecting-a-chip>`
+2. {doc}`Sweep spectra and compare measurements <guides/statics-and-parameter-studies>`
+3. {doc}`Schedule pulses and read observables <guides/dynamics-pulses-and-readout>`
+4. {doc}`Measure resonator reflection through a fridge <guides/steady-state-and-vna>`
+5. {doc}`Compare Purcell filtering and T1 <guides/slh-networks>`
+6. {doc}`Reduce a chip and replay its controls <guides/chip-transformations>`
+7. {doc}`Differentiate observables and fit parameters <guides/differentiability>`
 
 The {doc}`cookbook` defines the conventions used by executable quchip examples.
 
@@ -62,9 +59,7 @@ The {doc}`cookbook` defines the conventions used by executable quchip examples.
 
 ## Start from the SQA 2026 talk
 
-The {doc}`post-talk page <guides/from-sqa-2026>` contains a short runnable
-snippet and one documentation link for each topic. The guides stand on their
-own; no knowledge of the presentation is required.
+The {doc}`post-talk page <guides/from-sqa-2026>` collects five runnable entry points.
 
 The accompanying paper is [quchip: A Differentiable Toolkit for Modeling Quantum Devices](https://arxiv.org/abs/2607.17081) (arXiv:2607.17081); citation metadata is in the repository's [CITATION.cff](https://github.com/quchip/quchip/blob/main/CITATION.cff).
 
@@ -72,14 +67,16 @@ The accompanying paper is [quchip: A Differentiable Toolkit for Modeling Quantum
 :maxdepth: 1
 :hidden:
 
-guides/from-sqa-2026
 guides/defining-and-inspecting-a-chip
-guides/choosing-a-backend
-guides/steady-state-and-vna
 guides/statics-and-parameter-studies
 guides/dynamics-pulses-and-readout
+guides/steady-state-and-vna
+guides/slh-networks
 guides/chip-transformations
 guides/differentiability
+guides/choosing-a-backend
+guides/migrating-to-0.3
+guides/from-sqa-2026
 cookbook
 extensions
 physics

@@ -233,21 +233,21 @@ load optional scqubits modules.
 
 Subclass `SignalTransform` for a classical hardware effect that acts on complete
 analytic signals. Implement `apply(signals)` and return a new signal map. Declare
-numeric fields in `_parameter_names` so sweeps can rebind them without mutating
-the transform.
+numeric fields with `parameter()` and structural fields with `setting()`.
+Opt into persistence with `serializable=True`; import the extension before loading
+a saved chip that uses it. Sweeps rebind parameters on independent transforms.
+Generated transform constructors use keyword arguments. Override `validate()`
+for relationships between fields; construction and binding call it after all
+candidate values have been assigned. Numerical validation must preserve tracing.
 
 ```python
-from dataclasses import dataclass
-
 from quchip.control import SignalTransform
-from quchip.declarative import qnp
+from quchip.declarative import parameter, setting, qnp
 
 
-@dataclass(frozen=True)
-class CableLoss(SignalTransform):
-    line: str
-    loss_db: float
-    _parameter_names = ("loss_db",)
+class CableLoss(SignalTransform, serializable=True):
+    line: str = setting()
+    loss_db: float = parameter()
 
     def apply(self, signals):
         factor = qnp.power(10.0, -self.loss_db / 20.0)
@@ -255,7 +255,13 @@ class CableLoss(SignalTransform):
             key: signal.scaled(factor) if key[0] == self.line else signal
             for key, signal in signals.items()
         }
+
+    def referenced_lines(self):
+        return (self.line,)
 ```
+
+This lets wiring and partitioning validate the reference. Construct the example
+with `CableLoss(line="drive", loss_db=3.0)`.
 
 Transforms receive the output of the preceding transform. `CrosstalkMatrix`
 reads one shared input snapshot so its off-diagonal paths mix simultaneously.

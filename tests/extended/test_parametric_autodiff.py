@@ -39,9 +39,9 @@ def test_grad_through_pump_amplitude():
         result = seq.simulate(
             tlist=jnp.linspace(0.0, 50.0, 51),
             initial_state={"q0": 1, "q1": 0},
-            options={"store_states": True, "store_final_state": True},
+            states="all",
         )
-        return result.population_array(q1, 1)[-1]
+        return result.population(q1, 1)[-1]
 
     g = jax.grad(loss)(0.004)
     assert np.isfinite(float(g))

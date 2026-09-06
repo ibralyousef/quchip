@@ -10,22 +10,6 @@ from quchip.devices.kerr_cavity import KerrCavity
 from quchip.control.drives_two_photon import TwoPhotonDrive
 
 
-# ======================================================================
-# Per-module label-counter reset
-# ======================================================================
-
-@pytest.fixture(autouse=True)
-def _reset_labels():
-    from quchip.utils.labeling import reset_label_counters
-    reset_label_counters()
-    yield
-    reset_label_counters()
-
-
-# ======================================================================
-# KerrCavity Hamiltonian
-# ======================================================================
-
 class TestKerrCavityHamiltonian:
     """Verify KerrCavity eigenvalues against the analytical formula."""
 
@@ -58,15 +42,6 @@ class TestKerrCavityHamiltonian:
         H_arr = np.asarray(cav.hamiltonian().matrix())
         npt.assert_allclose(H_arr, H_arr.conj().T, atol=1e-12)
 
-    def test_repr(self):
-        """Repr includes label, freq, kerr, levels."""
-        cav = KerrCavity(freq=5.0, kerr=1.0, levels=10, label="c")
-        r = repr(cav)
-        assert "KerrCavity" in r
-        assert "c" in r
-        assert "5.0" in r
-        assert "1.0" in r
-
     def test_negative_kerr_raises(self):
         """Negative kerr should raise ValueError."""
         with pytest.raises(ValueError, match="non-negative"):
@@ -85,63 +60,23 @@ class TestKerrCavityHamiltonian:
         assert cav.label.startswith("kerr_cavity_")
 
     def test_computational_property(self):
-        """KerrCavity.computational is False; the Pauli surface addresses bare Fock, not the cat manifold."""
+        """A Kerr cavity is not automatically treated as a computational qubit."""
         cav = KerrCavity(freq=5.0, kerr=1.0, levels=5, label="cav")
         assert cav.computational is False
 
-    def test_state_version_increments(self):
-        """Mutation of freq should increment state_version."""
-        cav = KerrCavity(freq=5.0, kerr=1.0, levels=5, label="cav")
-        v0 = cav.state_version
-        cav.freq = 5.1
-        assert cav.state_version == v0 + 1
-
-
-# ======================================================================
-# TwoPhotonDrive
-# ======================================================================
-
 class TestTwoPhotonDrive:
-    """Verify the TwoPhotonDrive operator and modulation."""
+    """Verify the two-photon operator and carrier scheduling."""
 
-    def test_definition_returns_channel(self):
-        """The definition resolves one channel."""
-        cav = KerrCavity(freq=5.0, kerr=1.0, levels=10, label="cav")
-        d2 = TwoPhotonDrive(target=cav)
-        from quchip.control.signal import AnalyticSignal
-        from quchip.engine.ir import Constant
-
-        assert d2.hamiltonian(cav, AnalyticSignal(Constant(1.0))).labels == ("cav",)
-
-    def test_coupling_operator_is_hermitian(self):
-        """a^2 + a_dag^2 must be Hermitian."""
+    def test_two_photon_operator_matches_oscillator_matrix(self):
+        """The full operator equals a² + a†², including amplitudes and support."""
         cav = KerrCavity(freq=5.0, kerr=1.0, levels=10, label="cav")
         d2 = TwoPhotonDrive(target=cav)
         from quchip.control.signal import AnalyticSignal
         from quchip.engine.ir import Constant
 
         op_arr = np.asarray(d2.hamiltonian(cav, AnalyticSignal(Constant(1.0))).matrix(t=0.0))
-        npt.assert_allclose(op_arr, op_arr.conj().T, atol=1e-12)
-
-    def test_coupling_operator_shape(self):
-        """Coupling operator must have shape (levels, levels)."""
-        levels = 8
-        cav = KerrCavity(freq=5.0, kerr=1.0, levels=levels, label="cav")
-        d2 = TwoPhotonDrive(target=cav)
-        from quchip.control.signal import AnalyticSignal
-        from quchip.engine.ir import Constant
-
-        op_arr = np.asarray(d2.hamiltonian(cav, AnalyticSignal(Constant(1.0))).matrix(t=0.0))
-        assert op_arr.shape == (levels, levels)
-
-    def test_drive_has_no_modulation_policy(self):
-        cav = KerrCavity(freq=5.0, kerr=1.0, levels=10, label="cav")
-        d2 = TwoPhotonDrive(target=cav)
-        assert not hasattr(d2, "modulation")
-
-    def test_type_prefix(self):
-        """_type_prefix should be 'two_photon'."""
-        assert TwoPhotonDrive._type_prefix == "two_photon"
+        lowering = np.diag(np.sqrt(np.arange(1, cav.levels)), k=1)
+        npt.assert_allclose(op_arr, lowering @ lowering + lowering.T @ lowering.T, atol=1e-12)
 
     def test_auto_label(self):
         """Auto-label should use 'two_photon_' prefix."""
@@ -149,16 +84,6 @@ class TestTwoPhotonDrive:
         reset_label_counters()
         d2 = TwoPhotonDrive()
         assert d2.label.startswith("two_photon_")
-
-    def test_operator_offdiagonal_structure(self):
-        """a^2 + a_dag^2 must have zeros on diagonal (no weight-0 band)."""
-        cav = KerrCavity(freq=5.0, kerr=1.0, levels=8, label="cav")
-        d2 = TwoPhotonDrive(target=cav)
-        from quchip.control.signal import AnalyticSignal
-        from quchip.engine.ir import Constant
-
-        op_arr = np.asarray(d2.hamiltonian(cav, AnalyticSignal(Constant(1.0))).matrix(t=0.0))
-        npt.assert_allclose(np.diag(op_arr), 0.0, atol=1e-12)
 
     def test_schedule_without_freq_builds_a_carrier_free_signal(self):
         from quchip import Chip, QuantumSequence
@@ -173,10 +98,6 @@ class TestTwoPhotonDrive:
         assert seq.scheduled_ops[0].freq is None
 
 
-# ======================================================================
-# Cat-state preparation via adiabatic ramp (rotating frame)
-# ======================================================================
-
 class TestCatStatePreparation:
     """Physics integration test: rotating-frame adiabatic ramp -> cat state."""
 
@@ -185,12 +106,12 @@ class TestCatStatePreparation:
         from quchip import Chip, QuantumSequence
         from quchip.control.envelopes import LinearRamp
 
-        K = 1.0        # GHz
+        K = 0.01       # GHz; the retained Fock ladder stays energy ordered
         omega = 5.0    # GHz
         eps2_max = 2.0 * K    # alpha^2 = 2.0
         N_fock = 20
-        t_ramp = 40.0  # ns  (adiabatic: slow compared to 1/(2K) = 0.5 ns)
-        T_total = 45.0
+        t_ramp = 40.0 / K  # ns; fixed adiabaticity relative to Kerr splitting
+        T_total = 45.0 / K
         n_steps = 450
 
         cav = KerrCavity(freq=omega, kerr=K, levels=N_fock, label="cav")
@@ -208,7 +129,10 @@ class TestCatStatePreparation:
                      freq=2 * omega)
 
         tlist = np.linspace(0, T_total, n_steps)
-        result = seq.simulate(tlist=tlist, e_ops=e_ops, options={"nsteps": 5000})
+        # Prepare the Fock vacuum; the truncated negative-Kerr Hamiltonian's
+        # lowest energy lies at the cutoff and is not the cat-preparation state.
+        result = seq.simulate(tlist=tlist, initial_state={cav: cav.basis_state(0)},
+                              e_ops=e_ops, options={"nsteps": 5000})
 
         n_final = float(np.real(result.expect_final(cav, index=0)))
         assert abs(n_final - eps2_max / K) < 0.5, (

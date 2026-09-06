@@ -3,27 +3,58 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from functools import partial
 from typing import Any
 
 import numpy as np
 
+from quchip.utils.values import DeferredValue
+from quchip.backend.containers import PreparedStationary
 from quchip.engine.input_output import (
     add_port_inputs,
-    dense_liouvillian,
     port_operators,
+    resolve_stationary_engine,
     same_frequency,
-    small_signal_response,
 )
+from quchip.engine.linear_response import try_build_linear_response_problem
+from quchip.engine.reference import carrier_transfer, cw_transfer, has_amplifier, noise_density
 from quchip.engine.ir import CanonicalOperator, EngineResult, SteadyStateProblem
 from quchip.engine.steady_state import solve_steadystate_problem
 from quchip.results.input_output import (
+    MeanFieldResponseResult,
     OutputCorrelationResult,
     OutputSpectrumResult,
     SParameterResult,
+    _LazyDiagnostics,
 )
-from quchip.sweep import Sweep, ZippedSweep, _iter_axis_points
-from quchip.utils.constants import TWO_PI, hbar
+from quchip.results.steady_state import SteadyStateResult
+from quchip.sweep import Sweep, ZippedSweep, _axis_metadata, _iter_axis_points
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar
+from quchip.utils.labeling import resolve_label
+
+_TONE_PREFIX = "__vna_tone_"
+
+
+@dataclass(frozen=True)
+class _OperatingPoint:
+    prepared: PreparedStationary
+    state: SteadyStateResult
+    tones: tuple[tuple[str, Any, Any], ...]
+
+    @property
+    def engine(self) -> EngineResult:
+        return self.prepared.engine_result
+
+    @property
+    def diagnostics(self) -> Mapping[str, Any]:
+        return _LazyDiagnostics({
+            "solver": "stationary_resolvent",
+            "residual": self.state.residual,
+            "trace_error": self.state.trace_error,
+            "positivity_error": DeferredValue(partial(getattr, self.state, "positivity_error")),
+            "condition_number": partial(getattr, self.state, "condition_number"),
+        })
 
 
 @dataclass(frozen=True)
@@ -34,39 +65,57 @@ class PortTone:
     freq: Any
     amplitude: Any
     _index: int
+    _owner: "VNA"
+
+    def vary(self, field: str, values: Any, *, name: str | None = None) -> Sweep:
+        """Create a sweep axis for this tone's ``freq`` or ``amplitude``."""
+        if field not in {"freq", "amplitude"}:
+            raise ValueError(f"A port tone can vary only 'freq' or 'amplitude', got {field!r}.")
+        return _ToneAxis(
+            values,
+            name=f"{_TONE_PREFIX}{self._index}_{field}",
+            owner=self._owner,
+            public_name=name or f"{self.port}.{field}",
+        )
+
+
+class _ToneAxis(Sweep):
+    """Sweep axis owned by one VNA tone; ``public_name`` labels the result axis."""
+
+    def __init__(self, values: Any, *, name: str, owner: "VNA", public_name: str) -> None:
+        super().__init__(values, name=name)
+        self.owner = owner
+        self.public_name = public_name
 
 
 class VNA:
-    """Sweep one input port and report complex output-field response."""
+    """Small-signal scattering between selected instrument ports of one chip.
 
-    def __init__(self, chip: Any, *, input: Any, outputs: list[Any] | tuple[Any, ...]) -> None:
+    ``VNA(chip)`` selects every exposed instrument port in the chip's ``PortNetwork``.
+    Pass exposed port objects or their labels as ``ports`` to select a subset;
+    a bare label string is rejected.
+    """
+
+    def __init__(self, chip: Any, *, ports: Sequence[Any] | None = None) -> None:
         self.chip = chip
-        self.input = chip.port(input)
-        self.outputs = tuple(chip.port(port) for port in outputs)
-        if not self.outputs:
-            raise ValueError("VNA requires at least one output port.")
-        labels = [port.label for port in self.outputs]
-        if len(set(labels)) != len(labels):
-            raise ValueError(f"VNA output ports must be unique, got {labels}.")
+        if ports is None:
+            if chip.port_network is None:
+                raise ValueError("VNA requires a chip with a PortNetwork.")
+            ports = chip.port_network.exposures
+        elif isinstance(ports, str) or not isinstance(ports, Sequence):
+            raise TypeError("VNA ports must be a sequence of exposures or labels.")
+        self.ports = tuple(_resolve_exposure(chip, plane) for plane in ports)
+        if not self.ports:
+            raise ValueError("VNA requires at least one port.")
+        if len(set(self.ports)) != len(self.ports):
+            raise ValueError(f"VNA ports must be unique, got {list(self.ports)}.")
         self._tones: list[PortTone] = []
-        self._variations: set[Sweep] = set()
 
     def pump(self, port: Any, *, freq: Any, amplitude: Any) -> PortTone:
         """Add a fixed background tone and return its variation handle."""
-        resolved = self.chip.port(port)
-        tone = PortTone(resolved.label, freq, amplitude, len(self._tones))
+        tone = PortTone(_resolve_exposure(self.chip, port), freq, amplitude, len(self._tones), self)
         self._tones.append(tone)
         return tone
-
-    def vary(self, tone: PortTone, parameter: str, values: Any) -> Sweep:
-        """Create a sweep axis for one fixed tone's frequency or amplitude."""
-        if tone._index >= len(self._tones) or self._tones[tone._index] is not tone:
-            raise ValueError("The tone does not belong to this VNA.")
-        if parameter not in {"freq", "amplitude"}:
-            raise ValueError("A port tone can vary only 'freq' or 'amplitude'.")
-        variation = Sweep(values, name=f"__vna_tone_{tone._index}_{parameter}")
-        self._variations.add(variation)
-        return variation
 
     @staticmethod
     def zip(*variations: Sweep) -> ZippedSweep:
@@ -77,130 +126,188 @@ class VNA:
         self,
         frequencies: Any,
         *variations: Sweep | ZippedSweep,
-        amplitude: Any | None = None,
         options: dict | None = None,
         progress: bool = False,
     ) -> SParameterResult:
-        """Compute differential or finite-amplitude scattering response."""
-        self._validate_variations(variations)
+        """Sweep the complete selected-port small-signal matrix around fixed pumps.
+
+        The result contains every ``S(output, input)`` between the selected ports.
+        Its ``matrix`` has shape ``(*sweep_axes, n_ports, n_ports)`` and is
+        indexed ``[..., output, input]``. Ordinary ``Sweep`` axes name paths in
+        ``chip.parameters`` and rebind the chip at each point; they may be mixed
+        with pump-tone axes. At each frequency, the passive-linear route
+        uses one multi-right-hand-side mode-space solve. The stationary route solves
+        one pumped operating point, then uses one shifted-Liouvillian factorization
+        for every input plane.
+        """
         freq_values, freq_is_axis = _axis_values(frequencies)
-        amplitude_values, amplitude_is_axis = _amplitude_values(amplitude)
+        self._validate_variations(variations, reserved=("frequency",) if freq_is_axis else ())
         variation_shape, variation_points = _iter_axis_points(variations)
         shape = variation_shape
-        if amplitude_is_axis:
-            shape += (len(amplitude_values),)
         if freq_is_axis:
             shape += (len(freq_values),)
 
-        points = [
-            (coord, params, amplitude_index, probe_amplitude, frequency_index, frequency)
-            for coord, params in variation_points
-            for amplitude_index, probe_amplitude in enumerate(amplitude_values)
-            for frequency_index, frequency in enumerate(freq_values)
-        ]
+        labels = self.ports
+        xp = self.chip.backend.array_module
+        axes = _public_axes(variations)
+        if freq_is_axis:
+            axes += (("frequency", freq_values),)
+
+        def result(diagnostics: Any, matrix: Any, conjugate: Any) -> SParameterResult:
+            block = (*shape, len(labels), len(labels))
+            return SParameterResult(
+                frequencies=freq_values if freq_is_axis else freq_values[0],
+                ports=labels,
+                axes=axes,
+                shape=shape,
+                diagnostics=tuple(diagnostics),
+                matrix=xp.reshape(matrix, block),
+                conjugate_matrix=xp.reshape(conjugate, block),
+            )
+
+        chip_points = [(self._tone_values(p), self._chip_at(p)) for _, p in variation_points]
+        if not self._tones and options is None:
+            linear = self._linear_sweep([chip for _, chip in chip_points], freq_values, labels)
+            if linear is not None:
+                matrix = xp.concatenate(linear[0])
+                return result(linear[1], matrix, xp.zeros_like(matrix))
+
+        points = [(tones, chip, frequency) for tones, chip in chip_points for frequency in freq_values]
         iterator: Any = points
         if progress:
             from tqdm import tqdm
 
             iterator = tqdm(points, desc="VNA")
 
-        responses: dict[str, list[Any]] = {port.label: [] for port in self.outputs}
-        steady_states: list[Any] = []
-        diagnostics: list[dict[str, Any]] = []
-        operating_cache: dict[tuple[tuple[int, ...], int], tuple[Any, Any, Any]] = {}
-        for coord, params, _amplitude_index, probe_amplitude, frequency_index, frequency in iterator:
-            cache_key = (coord, frequency_index)
-            if cache_key not in operating_cache:
-                tones = self._tone_values(params)
-                engine = self._resolved_engine(frequency, tones)
-                operating_engine = add_port_inputs(engine, self.chip.backend, tones)
-                operating = _solve_engine(self.chip, operating_engine, options)
-                resolved_operators = port_operators(operating_engine, self.chip.backend)
-                operating_cache[cache_key] = (operating_engine, operating, resolved_operators)
-            operating_engine, operating, resolved_operators = operating_cache[cache_key]
-
-            if amplitude is None:
-                values = small_signal_response(
-                    operating_engine,
-                    operating.state,
-                    self.chip.backend,
-                    resolved_operators,
-                    self.input.label,
-                    tuple(port.label for port in self.outputs),
-                )
-                state = operating
-            else:
-                driven_engine = add_port_inputs(
-                    operating_engine,
-                    self.chip.backend,
-                    ((self.input.label, frequency, probe_amplitude),),
-                )
-                driven = _solve_engine(self.chip, driven_engine, options)
-                values = _finite_response(
-                    operating.state,
-                    driven.state,
-                    self.chip.backend,
-                    resolved_operators,
-                    self.input.label,
-                    tuple(port.label for port in self.outputs),
-                    probe_amplitude,
-                )
-                state = driven
-
-            for label, value in values.items():
-                responses[label].append(value)
-            steady_states.append(state)
-            diagnostics.append(
-                {
-                    "residual": state.residual,
-                    "trace_error": state.trace_error,
-                    "positivity_error": state.positivity_error,
-                    "condition_number": state.condition_number,
-                }
+        blocks: list[tuple[Any, Any]] = []
+        diagnostics: list[Mapping[str, Any]] = []
+        for tones, chip, frequency in iterator:
+            operating = _operating_point(
+                chip, tones, frequency, labels, options
             )
+            blocks.append(_small_signal_matrix(operating, labels, frequency))
+            diagnostics.append(operating.diagnostics)
 
-        xp = self.chip.backend.array_module
-        response_arrays = {
-            (label, self.input.label): xp.reshape(xp.asarray(values), shape)
-            for label, values in responses.items()
-        }
-        axes = _public_axes(variations, self._tones)
-        if amplitude_is_axis:
-            axes += (("amplitude", amplitude_values),)
+        return result(diagnostics, *(xp.stack(part) for part in zip(*blocks, strict=True)))
+
+    def finite_power(
+        self,
+        frequencies: Any,
+        amplitudes: Any,
+        *variations: Sweep | ZippedSweep,
+        input: Any | None = None,
+        options: dict | None = None,
+        progress: bool = False,
+    ) -> MeanFieldResponseResult:
+        """Solve the stationary mean output fields for a finite coherent probe.
+
+        ``frequencies`` are in GHz. ``amplitudes`` are incident field amplitudes
+        ``beta`` in ``1/sqrt(ns)``; complex values encode phase. The probe enters
+        ``input`` beside any fixed pumps. When one plane is selected, ``input``
+        defaults to that plane; otherwise it is required. A fixed pump on the probe
+        input is rejected.
+
+        At each grid point, the method solves the stationary Liouvillian in the probe
+        frame. Chip and pump sweep axes precede ``"amplitude"`` and ``"frequency"``.
+        Every selected plane must resolve at the probe frequency. The returned
+        ``MeanFieldResponseResult`` reports ``<b_out>`` using the same reference-plane
+        and hidden-channel bookkeeping as ``sweep()``, and stores the incident
+        ``beta`` broadcast over the grid.
+
+        This method always uses the stationary Liouvillian route. It does not use the
+        passive-linear mode-space shortcut or follow sweep-rate hysteresis and
+        metastable branches.
+        """
+        if input is None:
+            if len(self.ports) != 1:
+                raise ValueError("finite_power() requires input= when more than one plane is selected.")
+            input_label = self.ports[0]
+        else:
+            input_label = _resolve_exposure(self.chip, input)
+            if input_label not in self.ports:
+                raise ValueError(f"finite_power() input {input_label!r} is not a selected port {list(self.ports)}.")
+        if any(tone.port == input_label for tone in self._tones):
+            raise ValueError(
+                f"Plane {input_label!r} already carries a fixed pump. The finite_power() probe must be "
+                "the only tone entering the selected input so that <b_out>/beta is unambiguous."
+            )
+        freq_values, freq_is_axis = _axis_values(frequencies)
+        amp_values, amp_is_axis = _axis_values(amplitudes)
+        reserved = (["amplitude"] if amp_is_axis else []) + (["frequency"] if freq_is_axis else [])
+        self._validate_variations(variations, reserved=reserved)
+        variation_shape, variation_points = _iter_axis_points(variations)
+        shape = variation_shape
+        axes = _public_axes(variations)
+        if amp_is_axis:
+            shape += (len(amp_values),)
+            axes += (("amplitude", amp_values),)
         if freq_is_axis:
+            shape += (len(freq_values),)
             axes += (("frequency", freq_values),)
-        photon_fluxes = (
-            None
-            if amplitude is None
-            else xp.abs(xp.asarray(amplitude_values if amplitude_is_axis else amplitude)) ** 2
-        )
-        return SParameterResult(
+        labels = self.ports
+        xp = self.chip.backend.array_module
+
+        points = [
+            (tones, chip, amplitude, frequency)
+            for tones, chip in ((self._tone_values(p), self._chip_at(p)) for _, p in variation_points)
+            for amplitude in amp_values
+            for frequency in freq_values
+        ]
+        iterator: Any = points
+        if progress:
+            from tqdm import tqdm
+
+            iterator = tqdm(points, desc="VNA power")
+
+        values: list[Any] = []
+        incident: list[Any] = []
+        diagnostics: list[Mapping[str, Any]] = []
+        for tones, chip, amplitude, frequency in iterator:
+            all_tones = tones + ((input_label, frequency, amplitude),)
+            operating = _operating_point(
+                chip, all_tones, frequency, (), options
+            )
+            values.append(
+                _plane_means(operating.engine, operating.state.state, chip.backend, labels, all_tones, frequency)
+            )
+            incident.append(xp.asarray(amplitude))
+            diagnostics.append(operating.diagnostics)
+        return MeanFieldResponseResult(
+            ports=labels,
+            input=input_label,
             frequencies=freq_values if freq_is_axis else freq_values[0],
-            input_port=self.input.label,
-            output_ports=tuple(port.label for port in self.outputs),
-            input_amplitudes=(amplitude_values if amplitude_is_axis else amplitude),
-            input_photon_fluxes=photon_fluxes,
-            input_powers=_input_powers(
-                photon_fluxes,
-                freq_values if freq_is_axis else freq_values[0],
-                amplitude_is_axis=amplitude_is_axis,
-                frequency_is_axis=freq_is_axis,
-                variation_rank=len(variation_shape),
-                result_shape=shape,
-                xp=xp,
-            ),
+            amplitudes=amp_values if amp_is_axis else amp_values[0],
             axes=axes,
             shape=shape,
-            steady_states=tuple(steady_states),
             diagnostics=tuple(diagnostics),
-            _response=response_arrays,
+            values=xp.reshape(xp.stack(values), (*shape, len(labels))),
+            incident=xp.reshape(xp.stack(incident), shape),
         )
 
-    def _validate_variations(self, variations: tuple[Sweep | ZippedSweep, ...]) -> None:
+    def _validate_variations(
+        self, variations: tuple[Sweep | ZippedSweep, ...], *, reserved: Sequence[str] = ()
+    ) -> None:
+        names = list(reserved)
+        chip_paths = set(self.chip.parameters)
         for variation in variations:
             members = variation.sweeps if isinstance(variation, ZippedSweep) else (variation,)
-            if any(member not in self._variations for member in members):
-                raise ValueError("VNA variations must be created by this VNA's vary() method.")
+            for member in members:
+                if isinstance(member, _ToneAxis):
+                    if member.owner is not self:
+                        raise ValueError(
+                            "VNA tone variations must come from tone.vary(...) on a tone created by this VNA."
+                        )
+                elif member.name not in chip_paths:
+                    raise KeyError(
+                        f"Unknown Chip parameter path {member.name!r} in VNA sweep. "
+                        f"Available paths: {sorted(chip_paths)}"
+                    )
+                if isinstance(variation, ZippedSweep):
+                    names.append(_public_name(member))
+        names.extend(name for name, _ in _public_axes(variations))
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"VNA axis names must be unique, got duplicates {duplicates}.")
 
     def output_spectrum(
         self,
@@ -215,37 +322,55 @@ class VNA:
         coherent carrier is reported separately because it is a delta peak,
         not a finite sampled spectral density.
         """
-        output_port = self.chip.port(output)
+        output_port = _resolve_exposure(self.chip, output)
         frequency_values, _ = _axis_values(frequencies)
-        engine, state, operators, incoming = self._stationary_output(options)
+        operating = self._stationary_output(output_port, options)
+        engine, state, tones = operating.engine, operating.state, operating.tones
+        operators = port_operators(engine, self.chip.backend)
+        incoming = _stationary_output_backgrounds(engine, tones, self.chip.backend)
         xp = self.chip.backend.array_module
         rho = xp.asarray(self.chip.backend.to_array(state.state), dtype=complex)
-        field = _output_field_matrix(
-            operators[output_port.label], incoming.get(output_port.label, 0.0), xp
+        channel = next(item for item in engine.slh.external_channels if item.key == output_port)
+        carrier = _output_carrier(engine, output_port, tones)
+        boundary_field = _output_field_matrix(
+            operators[output_port], incoming.get(output_port, 0.0), xp
         )
+        field = cw_transfer(channel.reference.outbound, carrier, xp) * boundary_field
         mean = xp.trace(field @ rho)
         identity = xp.eye(rho.shape[0], dtype=complex)
-        fluctuation = field - mean * identity
+        fluctuation = boundary_field - xp.trace(boundary_field @ rho) * identity
         intensity = xp.real(xp.trace(xp.conj(xp.swapaxes(field, -1, -2)) @ field @ rho))
         coherent_flux = xp.abs(mean) ** 2
-        source = (fluctuation @ rho).T.reshape(-1)
-        observable = xp.conj(xp.swapaxes(fluctuation, -1, -2))
-        liouvillian = dense_liouvillian(engine, self.chip.backend, operation="Output spectrum")
-        spectra = []
-        for frequency in frequency_values:
-            shifted = liouvillian + 1j * (2.0 * np.pi) * xp.asarray(frequency) * xp.eye(
-                liouvillian.shape[0], dtype=complex
-            )
-            propagated = -xp.linalg.pinv(shifted) @ source
-            matrix = propagated.reshape(rho.shape).T
-            spectra.append(2.0 * xp.real(xp.trace(observable @ matrix)))
+        source = _canonical_matrix(
+            -(fluctuation @ rho),
+            operators[output_port],
+            tag=f"spectrum-source:{output_port}",
+        )
+        observable = _canonical_matrix(
+            xp.conj(xp.swapaxes(fluctuation, -1, -2)),
+            operators[output_port],
+            tag=f"spectrum-observable:{output_port}",
+        )
+        response = self.chip.backend.stationary_resolvent(
+            engine,
+            ((output_port, source),),
+            ((output_port, observable),),
+            frequency_values,
+            prepared=operating.prepared,
+        )[(output_port, output_port)]
+        sideband = carrier + xp.asarray(frequency_values)
+        offset_gain = xp.abs(carrier_transfer(channel.reference.outbound, sideband, xp)) ** 2
+        added_noise = noise_density(channel.reference.outbound, sideband, xp)
+        signal = 2.0 * xp.real(response) * offset_gain
         return OutputSpectrumResult(
-            port=output_port.label,
+            port=output_port,
             frequencies=frequency_values,
-            fluctuation_spectrum=xp.asarray(spectra),
-            output_photon_flux=intensity,
-            coherent_flux=coherent_flux,
-            incoherent_flux=intensity - coherent_flux,
+            total_fluctuation_spectrum=xp.asarray(signal + added_noise),
+            signal_fluctuation_spectrum=xp.asarray(signal),
+            added_noise_spectrum=added_noise,
+            signal_photon_flux=intensity,
+            signal_coherent_flux=coherent_flux,
+            signal_incoherent_flux=intensity - coherent_flux,
             steady_state=state,
         )
 
@@ -280,21 +405,31 @@ class VNA:
         order: int,
         options: dict | None,
     ) -> OutputCorrelationResult:
-        output_port = self.chip.port(output)
-        input_port = output_port if input is None else self.chip.port(input)
+        output_port = _resolve_exposure(self.chip, output)
+        input_port = output_port if input is None else _resolve_exposure(self.chip, input)
         delay_values, _ = _axis_values(delays)
         if not contains_tracer(delay_values) and np.any(np.asarray(delay_values) < 0):
             raise ValueError("Stationary output correlations require non-negative delays.")
-        engine, state, operators, incoming = self._stationary_output(options)
+        operating = self._stationary_output(output_port, options)
+        engine, state, tones = operating.engine, operating.state, operating.tones
         backend = self.chip.backend
+        operators = port_operators(engine, backend)
+        incoming = _stationary_output_backgrounds(engine, tones, backend)
         xp = backend.array_module
         rho = xp.asarray(backend.to_array(state.state), dtype=complex)
-        output_field = _output_field_matrix(
-            operators[output_port.label], incoming.get(output_port.label, 0.0), xp
-        )
-        input_field = _output_field_matrix(
-            operators[input_port.label], incoming.get(input_port.label, 0.0), xp
-        )
+        runs = {item.key: item.reference.outbound for item in engine.slh.external_channels}
+        if has_amplifier(runs[output_port]) or has_amplifier(runs[input_port]):
+            raise NotImplementedError(
+                "Normalized g1 and g2 through an amplifier require a detection bandwidth for its "
+                "broadband added noise. Request the correlation at a plane before the amplifier."
+            )
+
+        def plane_field(key: str) -> Any:
+            factor = cw_transfer(runs[key], _output_carrier(engine, key, tones), xp)
+            return factor * _output_field_matrix(operators[key], incoming.get(key, 0.0), xp)
+
+        output_field = plane_field(output_port)
+        input_field = plane_field(input_port)
         output_field_dag = xp.conj(xp.swapaxes(output_field, -1, -2))
         input_field_dag = xp.conj(xp.swapaxes(input_field, -1, -2))
         output_number = output_field_dag @ output_field
@@ -311,26 +446,33 @@ class VNA:
         ):
             raise ValueError("Normalized output correlations require nonzero output intensity.")
 
-        initial = input_field @ rho if order == 1 else input_field @ rho @ input_field_dag
-        observable = output_field_dag if order == 1 else output_number
-        liouvillian = dense_liouvillian(engine, backend, operation=f"g{order}")
-        initial_vector = initial.T.reshape(-1)
-        unnormalized = []
-        for delay in delay_values:
-            evolved = _matrix_exponential(liouvillian * xp.asarray(delay), xp) @ initial_vector
-            evolved_state = evolved.reshape(rho.shape).T
-            unnormalized.append(xp.trace(observable @ evolved_state))
-        raw = xp.asarray(unnormalized)
+        initial = _canonical_matrix(
+            input_field @ rho if order == 1 else input_field @ rho @ input_field_dag,
+            operators[input_port],
+            tag=f"g{order}-initial:{input_port}",
+        )
+        observable = _canonical_matrix(
+            output_field_dag if order == 1 else output_number,
+            operators[output_port],
+            tag=f"g{order}-observable:{output_port}",
+        )
+        raw = backend.stationary_propagate(
+            engine,
+            initial,
+            ((output_port, observable),),
+            delay_values,
+            prepared=operating.prepared,
+        )[output_port]
         denominator = (
             xp.sqrt(input_intensity * output_intensity)
             if order == 1
             else input_intensity * output_intensity
         )
-        same_port = input_port.label == output_port.label
+        same_port = input_port == output_port
         return OutputCorrelationResult(
             order=order,
-            input_port=input_port.label,
-            output_port=output_port.label,
+            input_port=input_port,
+            output_port=output_port,
             delays=delay_values,
             values=raw / denominator,
             unnormalized=raw,
@@ -350,93 +492,70 @@ class VNA:
 
     def _stationary_output(
         self,
+        output_label: str,
         options: dict | None,
-    ) -> tuple[EngineResult, Any, dict[str, CanonicalOperator], dict[str, Any]]:
+    ) -> _OperatingPoint:
+        """Solve stationary output statistics in the applicable reference frames.
+
+        Pump tones define the stationary frames when present; otherwise the requested
+        output plane's own reference frequency does.
+        """
         tones = self._tone_values({})
-        incoming: dict[str, Any] = {}
-        for port_label, _frequency, amplitude in tones:
-            incoming[port_label] = incoming.get(port_label, 0.0) + amplitude
-        target = self.input.resolve_targets(self.chip)[0]
-        reference_frequency = getattr(self.chip[target], "freq")
-        for port_label, frequency, _ in tones:
-            if port_label == self.input.label:
-                reference_frequency = frequency
-                break
-        engine = self._resolved_engine(reference_frequency, tones)
+        frames = tuple((label, frequency) for label, frequency, _ in tones) or (
+            (output_label, _exposure_reference_frequency(self.chip, output_label)),
+        )
+        engine = resolve_stationary_engine(self.chip, frames)
         driven_engine = add_port_inputs(engine, self.chip.backend, tones)
-        state = _solve_engine(self.chip, driven_engine, options)
-        return driven_engine, state, port_operators(driven_engine, self.chip.backend), incoming
+        return _solve_engine(self.chip, driven_engine, tones, options)
+
+
+    def _linear_sweep(
+        self, chips: list[Any], frequencies: Any, labels: tuple[str, ...]
+    ) -> tuple[list[Any], list[Mapping[str, Any]]] | None:
+        """Solve every chip point in mode space, or return ``None`` if any point is ineligible."""
+        matrices: list[Any] = []
+        diagnostics: list[Mapping[str, Any]] = []
+        for chip in chips:
+            problem = try_build_linear_response_problem(chip, frequencies, plane_labels=labels)
+            if problem is None:
+                return None
+            solved = chip.backend.linear_response(problem)
+            indices = list(problem.plane_indices)
+            transfer = (
+                problem.outbound_transfer[:, indices][:, :, None]
+                * problem.inbound_transfer[:, indices][:, None, :]
+            )
+            matrices.append(chip.backend.array_module.asarray(transfer * solved.responses))
+            diagnostics.extend(
+                _LazyDiagnostics({
+                    "solver": "linear_response",
+                    "mode_count": len(problem.mode_labels),
+                    "residual": solved.residuals[index],
+                    "condition_number": lambda index=index, condition=solved._condition_numbers: condition()[index],
+                })
+                for index in range(len(frequencies))
+            )
+        return matrices, diagnostics
+
+    def _chip_at(self, params: dict[str, Any]) -> Any:
+        """Return the chip after rebinding the ordinary sweep values in ``params``."""
+        bindings = {name: value for name, value in params.items() if name not in self._tone_keys()}
+        return self.chip.with_params(bindings) if bindings else self.chip
+
+    def _tone_keys(self) -> set[str]:
+        return {
+            f"{_TONE_PREFIX}{tone._index}_{field}"
+            for tone in self._tones
+            for field in ("freq", "amplitude")
+        }
 
     def _tone_values(self, params: dict[str, Any]) -> tuple[tuple[str, Any, Any], ...]:
         tones: list[tuple[str, Any, Any]] = []
         for tone in self._tones:
-            freq = params.get(f"__vna_tone_{tone._index}_freq", tone.freq)
-            amplitude = params.get(f"__vna_tone_{tone._index}_amplitude", tone.amplitude)
+            freq = params.get(f"{_TONE_PREFIX}{tone._index}_freq", tone.freq)
+            amplitude = params.get(f"{_TONE_PREFIX}{tone._index}_amplitude", tone.amplitude)
             tones.append((tone.port, freq, amplitude))
         return tuple(tones)
-
-    def _resolved_engine(self, probe_frequency: Any, tones: tuple[tuple[str, Any, Any], ...]) -> EngineResult:
-        device_frequencies: dict[str, Any] = {}
-        stationary_frequencies: list[Any] = []
-        for port_label, frequency, _ in (*tones, (self.input.label, probe_frequency, 0.0)):
-            stationary_frequencies.append(frequency)
-            port = self.chip.port(port_label)
-            for target in port.resolve_targets(self.chip):
-                if target in device_frequencies and not same_frequency(device_frequencies[target], frequency):
-                    raise ValueError(
-                        f"Ports address {target!r} with distinct stationary tones. "
-                        "Use QuantumSequence for time evolution; periodic/Floquet steady states are not supported."
-                    )
-                device_frequencies[target] = frequency
-        # Exchange terms are stationary only when both endpoints share a
-        # frame. Carry the frame of an addressed filter or resonator through
-        # its passive exchange network; diagonal couplings such as CrossKerr
-        # deliberately do not join the components, so pump and probe may keep
-        # independent carriers.
-        changed = True
-        while changed:
-            changed = False
-            for coupling in self.chip.couplings:
-                if not getattr(coupling, "folds_exchange", False):
-                    continue
-                left = coupling.device_a_label
-                right = coupling.device_b_label
-                left_frequency = device_frequencies.get(left)
-                right_frequency = device_frequencies.get(right)
-                if left_frequency is None and right_frequency is not None:
-                    device_frequencies[left] = right_frequency
-                    changed = True
-                elif right_frequency is None and left_frequency is not None:
-                    device_frequencies[right] = left_frequency
-                    changed = True
-                elif (
-                    left_frequency is not None
-                    and right_frequency is not None
-                    and not same_frequency(left_frequency, right_frequency)
-                ):
-                    raise ValueError(
-                        f"Exchange-coupled devices {left!r} and {right!r} are addressed by "
-                        "distinct stationary tones. Use QuantumSequence for time evolution; "
-                        "periodic/Floquet steady states are not supported."
-                    )
-        # A single carrier defines one global rotating frame. Applying it to
-        # every device keeps passive number-conserving paths stationary, such
-        # as feedline -> Purcell filter -> readout, without inventing a port on
-        # each unaddressed internal mode. Multiple carriers still use their
-        # explicitly addressed frames and are rejected below if any terms
-        # remain time dependent.
-        one_carrier = all(
-            same_frequency(stationary_frequencies[0], frequency)
-            for frequency in stationary_frequencies[1:]
-        )
-        frame = stationary_frequencies[0] if one_carrier else device_frequencies
-        engine = self.chip.resolve(frame=frame)
-        if engine.dynamic_terms:
-            raise ValueError(
-                "The selected tones leave dynamic Hamiltonian terms after frame and approximation resolution. "
-                "Use QuantumSequence for time evolution; periodic/Floquet steady states are not supported."
-            )
-        return engine
 
 
 def _axis_values(values: Any) -> tuple[Any, bool]:
@@ -448,44 +567,63 @@ def _axis_values(values: Any) -> tuple[Any, bool]:
     return array, True
 
 
-def _amplitude_values(amplitude: Any | None) -> tuple[Any, bool]:
-    if amplitude is None or np.ndim(amplitude) == 0:
-        return (amplitude,), False
-    array = amplitude if hasattr(amplitude, "shape") else np.asarray(amplitude)
-    if len(array) == 0:
-        raise ValueError("VNA amplitude sweep cannot be empty.")
-    return array, True
+def _resolve_exposure(chip: Any, value: Any) -> str:
+    """Resolve a plane object or label against the external SLH boundary."""
+    label = resolve_label(value)
+    network = chip.port_network
+    if network is None:
+        raise ValueError("VNA requires a chip with a PortNetwork.")
+    available = [exposure.label for exposure in network.exposures]
+    if label not in available:
+        raise ValueError(f"Unknown VNA exposure {label!r}. Available exposures: {available}.")
+    return label
 
 
-def _public_axis_name(name: str, tones: list[PortTone]) -> str:
-    prefix = "__vna_tone_"
-    if not name.startswith(prefix):
-        return name
-    body = name[len(prefix):]
-    index_text, parameter = body.split("_", 1)
-    return f"{tones[int(index_text)].port}.{parameter}"
+def _exposure_reference_frequency(chip: Any, label: str) -> Any:
+    """Return the exposure carrier in the chip's natural rotating frame."""
+    resolved = chip.resolve(frame="rotating")
+    for channel in resolved.slh.external_channels:
+        if channel.key == label:
+            frequency = channel.collapse.frame_frequency
+            return 0.0 if frequency is None else frequency
+    available = [channel.key for channel in resolved.slh.external_channels]
+    raise ValueError(f"Unknown VNA exposure {label!r}. Available exposures: {available}.")
 
 
-def _public_axes(
-    variations: tuple[Sweep | ZippedSweep, ...],
-    tones: list[PortTone] | None = None,
-) -> tuple[tuple[str, Any], ...]:
-    tone_list = tones or []
-    axes: list[tuple[str, Any]] = []
-    for variation in variations:
-        if isinstance(variation, ZippedSweep):
-            names = tuple(_public_axis_name(item.name, tone_list) for item in variation.sweeps)
-            values = tuple(
-                {names[j]: item.values[index] for j, item in enumerate(variation.sweeps)}
-                for index in range(variation.size)
-            )
-            axes.append(("/".join(names), values))
-        else:
-            axes.append((_public_axis_name(variation.name, tone_list), variation.values))
-    return tuple(axes)
+def _public_name(sweep: Sweep) -> str:
+    return sweep.public_name if isinstance(sweep, _ToneAxis) else sweep.name
 
 
-def _solve_engine(chip: Any, engine: EngineResult, options: dict | None) -> Any:
+def _public_axes(variations: tuple[Sweep | ZippedSweep, ...]) -> tuple[tuple[str, Any], ...]:
+    public = {
+        sweep.name: sweep.public_name
+        for axis in variations
+        for sweep in (axis.sweeps if isinstance(axis, ZippedSweep) else (axis,))
+        if isinstance(sweep, _ToneAxis)
+    }
+    return _axis_metadata(variations, rename=lambda name: public.get(name, name))
+
+
+def _operating_point(
+    chip: Any,
+    tones: tuple[tuple[str, Any, Any], ...],
+    frequency: Any,
+    labels: tuple[str, ...],
+    options: dict | None,
+) -> _OperatingPoint:
+    """Solve the pumped stationary state with every selected plane framed at ``frequency``."""
+    engine = resolve_stationary_engine(
+        chip,
+        tuple((label, tone_frequency) for label, tone_frequency, _ in tones)
+        + tuple((label, frequency) for label in labels),
+    )
+    operating_engine = add_port_inputs(engine, chip.backend, tones)
+    return _solve_engine(chip, operating_engine, tones, options)
+
+
+def _solve_engine(
+    chip: Any, engine: EngineResult, tones: tuple[tuple[str, Any, Any], ...], options: dict | None,
+) -> _OperatingPoint:
     problem = SteadyStateProblem(
         chip=chip,
         engine_result=engine,
@@ -494,67 +632,163 @@ def _solve_engine(chip: Any, engine: EngineResult, options: dict | None) -> Any:
         resolved_frame=engine.resolved_frame,
         options={} if options is None else options,
     )
-    return solve_steadystate_problem(problem)
+    prepared = problem.backend.prepare_stationary(engine)
+    return _OperatingPoint(prepared, solve_steadystate_problem(problem, prepared=prepared), tones)
 
 
-def _finite_response(
-    operating_state: Any,
-    driven_state: Any,
+def _stationary_output_backgrounds(
+    engine: EngineResult,
+    tones: tuple[tuple[str, Any, Any], ...],
     backend: Any,
-    port_operators: dict[str, CanonicalOperator],
-    input_label: str,
-    output_labels: tuple[str, ...],
-    amplitude: Any,
 ) -> dict[str, Any]:
+    """Return ``S beta`` at each Markov boundary for fixed reference-plane tones."""
     xp = backend.array_module
-    if not contains_tracer(amplitude) and np.ndim(amplitude) == 0 and complex(amplitude) == 0:
-        raise ValueError("Finite-amplitude VNA response requires a nonzero input amplitude.")
-    operating = xp.asarray(backend.to_array(operating_state), dtype=complex)
-    driven = xp.asarray(backend.to_array(driven_state), dtype=complex)
-    response: dict[str, Any] = {}
-    for label in output_labels:
-        operator = xp.asarray(port_operators[label].to_dense())
-        change = -xp.trace(operator @ (driven - operating))
-        if label == input_label:
-            change = change + xp.asarray(amplitude)
-        response[label] = change / xp.asarray(amplitude)
-    return response
+    external = engine.slh.external_channels
+    exposure_index = {channel.key: index for index, channel in enumerate(external)}
+    incident = [xp.asarray(0.0 + 0.0j) for _ in external]
+    for label, frequency, amplitude in tones:
+        index = exposure_index[label]
+        incident[index] = incident[index] + xp.asarray(amplitude) * cw_transfer(
+            external[index].reference.inbound, frequency, xp
+        )
+    return {
+        channel.key: sum(
+            (
+                xp.asarray(engine.slh.S[output_index, input_index]) * beta
+                for input_index, beta in enumerate(incident)
+            ),
+            start=xp.asarray(0.0 + 0.0j),
+        )
+        for output_index, channel in enumerate(external)
+    }
+
+
+def _small_signal_matrix(
+    operating: _OperatingPoint,
+    labels: tuple[str, ...],
+    frequency: Any,
+) -> tuple[Any, Any]:
+    """Return the selected-port ``S_ji(f)`` and phase-conjugating ``T_ji(f)`` matrices.
+
+    Rows are output ports and columns are input ports. Around a phase-sensitive
+    operating point the linear response is ``delta <b_out> = S delta beta + T
+    conj(delta beta)``; one shifted-Liouvillian factorization serves both source
+    sets for all input columns.
+    """
+    engine = operating.engine
+    backend = operating.prepared.backend
+    channels = port_operators(engine, backend)
+    xp = backend.array_module
+    rho = xp.asarray(backend.to_array(operating.state.state), dtype=complex)
+    external = engine.slh.external_channels
+    exposure_index = {channel.key: index for index, channel in enumerate(external)}
+    indices = [exposure_index[label] for label in labels]
+    template = channels[external[0].key]
+    operators = xp.stack(
+        [xp.asarray(channels[channel.key].to_dense(), dtype=complex) for channel in engine.slh.channels]
+    )
+    scattering = xp.asarray(engine.slh.S)
+    sources = []
+    for column, index in enumerate(indices):
+        input_operator = xp.tensordot(xp.conj(scattering[:, index]), operators, axes=1)
+        input_dag = xp.conj(xp.swapaxes(input_operator, -1, -2))
+        normal_source = _canonical_matrix(input_dag @ rho - rho @ input_dag, template, tag=f"normal-source:{column}")
+        conjugate_source = _canonical_matrix(
+            rho @ input_operator - input_operator @ rho, template, tag=f"conjugate-source:{column}"
+        )
+        sources.append((f"normal:{column}", normal_source))
+        sources.append((f"conjugate:{column}", conjugate_source))
+    response = backend.stationary_resolvent(
+        engine,
+        tuple(sources),
+        tuple((label, channels[label]) for label in labels),
+        (0.0,),
+        prepared=operating.prepared,
+    )
+    inbound = xp.stack([cw_transfer(external[i].reference.inbound, frequency, xp) for i in indices])
+    outbound = xp.stack([cw_transfer(external[i].reference.outbound, frequency, xp) for i in indices])
+
+    def gather(kind: str) -> Any:
+        columns = range(len(labels))
+        return xp.stack([xp.stack([response[(f"{kind}:{c}", out_label)][0] for c in columns]) for out_label in labels])
+
+    direct = xp.stack([xp.stack([scattering[o, i] for i in indices]) for o in indices])
+    gain = outbound[:, None]
+    return (
+        gain * inbound[None, :] * (direct + gather("normal")),
+        gain * xp.conj(inbound)[None, :] * gather("conjugate"),
+    )
+
+
+def _output_carrier(engine: EngineResult, key: str, tones: Any) -> Any:
+    """Return the carrier a plane's outbound run is evaluated at.
+
+    A coupling-free composed output inherits the unique tone that structurally
+    feeds it; without one, an outbound reference run has no defined carrier.
+    """
+    external = {item.key: index for index, item in enumerate(engine.slh.external_channels)}
+    row = external[key]
+    channel = engine.slh.external_channels[row]
+    if channel.collapse.frame_frequency is not None or not channel.reference.outbound:
+        return channel.carrier
+    feeding = [frequency for label, frequency, _ in tones if engine.slh.feeds(row, external[label])]
+    if not feeding or any(not same_frequency(feeding[0], other) for other in feeding[1:]):
+        raise ValueError(
+            f"Output plane {key!r} carries no coupling and is fed by {len(feeding)} tones; "
+            "its outbound reference sections need exactly one carrier."
+        )
+    return feeding[0]
+
+
+def _plane_means(
+    engine: EngineResult,
+    state: Any,
+    backend: Any,
+    labels: tuple[str, ...],
+    tones: tuple[tuple[str, Any, Any], ...],
+    frequency: Any,
+) -> Any:
+    """Return stationary output means at the selected ports.
+
+    For each plane, apply its outbound continuous-wave transfer to
+    ``sum_i S_ji beta_boundary,i + <L_j>`` at ``frequency``. Every selected
+    plane must resolve at that frequency.
+    """
+    xp = backend.array_module
+    rho = xp.asarray(backend.to_array(state), dtype=complex)
+    operators = port_operators(engine, backend)
+    backgrounds = _stationary_output_backgrounds(engine, tones, backend)
+    channels = {channel.key: channel for channel in engine.slh.external_channels}
+    means = []
+    for label in labels:
+        channel = channels[label]
+        carrier = _output_carrier(engine, label, tones)
+        if not same_frequency(carrier, frequency):
+            raise ValueError(
+                f"Plane {label!r} resolves at {carrier!r} GHz, not at the probe frequency "
+                f"{frequency!r} GHz. Narrow VNA(..., ports=...) to ports at the probe carrier."
+            )
+        boundary = backgrounds[label] + xp.trace(xp.asarray(operators[label].to_dense(), dtype=complex) @ rho)
+        means.append(cw_transfer(channel.reference.outbound, carrier, xp) * boundary)
+    return xp.stack(means)
 
 
 def _output_field_matrix(operator: CanonicalOperator, incoming: Any, xp: Any) -> Any:
     coupling = xp.asarray(operator.to_dense(), dtype=complex)
-    return xp.asarray(incoming) * xp.eye(coupling.shape[0], dtype=complex) - coupling
+    return xp.asarray(incoming) * xp.eye(coupling.shape[0], dtype=complex) + coupling
 
 
-def _input_powers(
-    photon_fluxes: Any | None,
-    frequencies: Any,
+def _canonical_matrix(
+    values: Any,
+    template: CanonicalOperator,
     *,
-    amplitude_is_axis: bool,
-    frequency_is_axis: bool,
-    variation_rank: int,
-    result_shape: tuple[int, ...],
-    xp: Any,
-) -> Any | None:
-    """Convert GHz and photons/ns to coherent input power in watts."""
-    if photon_fluxes is None:
-        return None
-    flux = xp.asarray(photon_fluxes)
-    frequency = xp.asarray(frequencies)
-    if amplitude_is_axis and frequency_is_axis:
-        flux = flux[..., None]
-    power = hbar * TWO_PI * 1e18 * flux * frequency
-    if not result_shape:
-        return power
-    power = xp.reshape(power, (1,) * variation_rank + tuple(power.shape))
-    return xp.broadcast_to(power, result_shape)
-
-
-def _matrix_exponential(matrix: Any, xp: Any) -> Any:
-    if xp.__name__.startswith("jax"):
-        import jax.scipy.linalg as jsp_linalg
-
-        return jsp_linalg.expm(matrix)
-    from scipy.linalg import expm
-
-    return expm(np.asarray(matrix, dtype=complex))
+    tag: str,
+) -> CanonicalOperator:
+    """Attach resolved subsystem metadata to a stationary query matrix."""
+    return CanonicalOperator.from_dense(
+        values,
+        dims=template.dims,
+        basis=template.basis,
+        subsystem_labels=template.subsystem_labels,
+        tag=tag,
+    )

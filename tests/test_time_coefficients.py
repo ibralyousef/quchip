@@ -7,8 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import quchip
-from quchip.declarative import (
+from quchip import (
     CosineCoefficient,
     Scalar,
     TimeDependentTerm,
@@ -49,12 +48,6 @@ def test_cosine_coefficient_is_jax_differentiable() -> None:
         return coefficient.value(jnp.asarray(0.5))
 
     np.testing.assert_allclose(jax.grad(sample)(0.2), np.sqrt(0.5), atol=1e-7)
-
-
-def test_time_dependent_types_are_public() -> None:
-    assert quchip.TimeCoefficient is TimeCoefficient
-    assert quchip.CosineCoefficient is CosineCoefficient
-    assert quchip.TimeDependentTerm is TimeDependentTerm
 
 
 def test_cosine_coefficient_round_trip() -> None:

@@ -1,10 +1,6 @@
-"""Array, basis-label, and reduction helpers shared across viz.
+"""Array conversion, basis labels, and subspace filtering for plots.
 
-These helpers are deliberately small and backend-agnostic: they defer the
-actual quantum-mechanical primitives (ket construction, ``dag``, ``ptrace``,
-``expect``) to the active :class:`~quchip.backend.protocol.Backend` and only
-assemble Python-level glue (represented-basis label strings, index
-bookkeeping, computational-subspace filtering).
+Quantum operations delegate to the active backend.
 """
 
 from __future__ import annotations
@@ -159,8 +155,6 @@ def _reduce_result(
     if trace_out is None:
         populations = result.populations
     else:
-        if result.states is None:
-            raise RuntimeError("No states stored — pass options={'store_states': True} to the solver.")
         reduced_states = [_ptrace_to_keep(result, state, keep_indices) for state in result.states]
         populations = _populations_from_states(result, reduced_states, reduced_dims)
 
@@ -192,9 +186,6 @@ def _reduce_state(
     trace_out: str | BaseDevice | list[str | BaseDevice] | None,
 ) -> tuple[Any, list[int], list[tuple[str, bool]]]:
     """Partial-trace a single stored state at *index* to the kept subsystems."""
-    if result.states is None:
-        raise RuntimeError("No states stored — pass options={'store_states': True} to the solver.")
-
     keep_indices = _keep_indices_after_trace(result, trace_out)
     device_info = _device_info_for_indices(result, keep_indices)
     state = result.states[index]

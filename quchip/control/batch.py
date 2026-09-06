@@ -1,14 +1,7 @@
-"""Batch / sweep-axis machinery for :class:`~quchip.control.sequence.QuantumSequence`.
+"""Sweep axes and entry handles for scheduled sequences.
 
-Batch axes and per-entry handles expand a scheduled sequence into
-per-point overrides consumed by :class:`~quchip.engine.ir.SolveBatch`.
-
-:class:`QuantumSequence` (in ``sequence.py``) is the scheduler; it delegates
-its ``vary`` / ``zip`` / ``build_batch`` surface here. The split keeps the
-scheduler focused on timing semantics and the sweep bookkeeping isolated.
-
-All sweep axes stay JAX-traceable: pulse parameters, delays, and envelope
-fields flow into ``SolveProblem`` without Python-side concretization.
+Axes expand into per-point overrides for :class:`~quchip.engine.ir.SolveBatch`.
+Numerical pulse, delay, and envelope values remain JAX-traceable.
 """
 
 from __future__ import annotations
@@ -17,7 +10,7 @@ from dataclasses import dataclass
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
+from quchip.utils.batching import expand_axis_groups
 
 if TYPE_CHECKING:
     from quchip.control.sequence import QuantumSequence
@@ -33,21 +26,24 @@ class BatchAxis:
     """
 
     owner: "QuantumSequence"
-    target_kind: str  # "entry" | "sequence"
+    target_kind: str  # "entry" | "sequence" | "parameter"
     field: str
     values: Any
     name: str
     entry_index: int | None = None
     entry_field: str | None = None
-    #: The scheduled entry object this axis references (``None`` for
-    #: sequence-level axes). ``build_batch`` validates it against the
-    #: sequence by identity, so an axis silently pointing at the wrong
-    #: entry after the sequence was modified is impossible.
+    #: Scheduled entry, checked by identity when building the batch.
+    #: ``None`` for sequence-level axes.
     entry: Any = None
 
     @property
     def size(self) -> int:
         return len(self.values)
+
+    @property
+    def override_key(self) -> tuple[int | None, str]:
+        """Identify the bound value independently of the display name."""
+        return self.entry_index, self.entry_field or self.field
 
 
 @dataclass(frozen=True)
@@ -71,11 +67,9 @@ def _axis_metadata(axis: BatchAxis | ZippedBatchAxis) -> tuple[str, Any]:
 
 
 class _BaseEntryHandle:
-    """Reference to one scheduled entry, used to build batch sweeps.
+    """A scheduled entry's index and identity, used to build batch sweeps.
 
-    Holds both the entry's index and the entry object itself; every use
-    re-validates the two against the sequence by identity, so a handle can
-    never silently act on the wrong entry after the sequence changes.
+    Rejects use after the sequence changes which entry occupies that index.
     """
 
     def __init__(self, sequence: "QuantumSequence", entry_index: int) -> None:
@@ -112,8 +106,8 @@ class _BaseEntryHandle:
 class PulseHandle(_BaseEntryHandle):
     """Reference to one scheduled pulse entry.
 
-    Sweepable fields: ``freq``, ``phase``, ``start_time``, and any public
-    envelope attribute (e.g. ``amplitude``, ``duration``, ``sigmas``).
+    Sweepable fields: ``freq``, ``phase``, ``start_time``, and declared
+    envelope parameters (e.g. ``amplitude``, ``duration``, ``sigmas``).
     """
 
     _reserved_fields = ("freq", "phase", "start_time")
@@ -126,10 +120,9 @@ class PulseHandle(_BaseEntryHandle):
             raise TypeError("PulseHandle does not point to a pulse entry")
         if field in self._reserved_fields:
             return field
-        if field.startswith("_") or not hasattr(entry.envelope, field):
-            sweepable = list(self._reserved_fields) + [
-                name for name in vars(entry.envelope) if not name.startswith("_")
-            ]
+        parameters = entry.envelope.parameter_values()
+        if field not in parameters:
+            sweepable = list(self._reserved_fields) + list(parameters)
             raise ValueError(f"Pulse field '{field}' is not sweepable. Available pulse fields: {sweepable}")
         return field
 
@@ -152,9 +145,6 @@ def _expand_axis_overrides(
     ``overrides`` maps ``(entry_index, field) -> value`` for entry-level axes
     and ``(None, field) -> value`` for sequence-level axes.
     """
-    if not axes:
-        return (), [((), {})]
-
     axis_slices: list[list[dict[tuple[int | None, str], Any]]] = []
     for axis in axes:
         if isinstance(axis, ZippedBatchAxis):
@@ -162,23 +152,15 @@ def _expand_axis_overrides(
             for i in range(axis.size):
                 point: dict[tuple[int | None, str], Any] = {}
                 for subaxis in axis.axes:
-                    field = subaxis.entry_field or subaxis.field
-                    point[(subaxis.entry_index, field)] = subaxis.values[i]
+                    point[subaxis.override_key] = subaxis.values[i]
                 slice_.append(point)
             axis_slices.append(slice_)
         else:
             axis_slices.append(
                 [
-                    {(axis.entry_index, axis.entry_field or axis.field): axis.values[i]}
+                    {axis.override_key: axis.values[i]}
                     for i in range(axis.size)
                 ]
             )
 
-    shape = tuple(len(s) for s in axis_slices)
-    expanded: list[tuple[tuple[int, ...], dict[tuple[int | None, str], Any]]] = []
-    for coord in np.ndindex(*shape):
-        merged: dict[tuple[int | None, str], Any] = {}
-        for dim_idx, point_idx in enumerate(coord):
-            merged.update(axis_slices[dim_idx][point_idx])
-        expanded.append((coord, merged))
-    return shape, expanded
+    return expand_axis_groups(axis_slices)

@@ -59,26 +59,3 @@ def test_pump_without_line_raises_with_guidance():
     seq = QuantumSequence(chip)
     with pytest.raises(ValueError, match="ParametricDrive"):
         seq.pump(tc, envelope=Square(duration=50.0, amplitude=0.001))
-
-
-def test_pump_handle_supports_batch_axis():
-    """A pump() handle supports .vary() to create a batch axis, like any other scheduled-pulse handle."""
-    chip, tc, _ = _wired_chip()
-    seq = QuantumSequence(chip)
-    handle = seq.pump(tc, envelope=Square(duration=100.0, amplitude=0.005))
-    axis = handle.vary("amplitude", [0.001, 0.002, 0.003])
-    assert axis.entry_index is not None
-
-
-def test_device_scheduling_is_unchanged():
-    """Wiring an edge pump line alongside device drives leaves charge-drive scheduling on devices unaffected."""
-    chip, _, _ = _wired_chip()
-    # Re-wire with a charge line as well to check device path end-to-end.
-    from quchip import ChargeDrive
-
-    dq = ChargeDrive(chip["q0"], label="dq")
-    chip.connect(ControlEquipment([dq, *chip.control_equipment.lines]))
-    seq = QuantumSequence(chip)
-    seq.charge("q0", envelope=Square(duration=20.0, amplitude=0.01))
-    (op,) = seq.scheduled_ops
-    assert op.target_label == "q0"

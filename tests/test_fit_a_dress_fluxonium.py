@@ -47,11 +47,16 @@ def test_fit_a_dress_recovers_fluxonium_dressed_freq() -> None:
     # 6 free bare parameters (E_C, E_J, E_L, phi_ext, res.freq, coupling.g) against 3 target
     # residuals: underdetermined by count, and intentionally so — the point of this test is that
     # fit_a_dress moves *some* combination of the 4 fluxonium bare parameters to hit the target
-    # without the caller having to pick which one via fit_parameters.
+    # with the caller explicitly permitting all four to vary.
     with pytest.warns(UserWarning, match="underdetermined by count"):
         result = fit_a_dress(
             chip,
-            observable_targets={flux: {"freq": target_freq}, res: {"freq": 7.0}},
+            constraints={
+                flux: {"freq": target_freq, "anharmonicity": float(chip.dressed_anharmonicity(flux))},
+                res: {"freq": 7.0},
+                chip.couplings[0]: {"cross_kerr": None},
+            },
+            vary={flux: tuple(flux.tunable_params()), res: ("freq",), chip.couplings[0]: ("g",)},
             max_hilbert_dim=10_000,
         )
 
@@ -68,9 +73,7 @@ def test_fit_a_dress_recovers_fluxonium_dressed_freq() -> None:
         f"{flux.label}.E_L",
         f"{flux.label}.phi_ext",
     )
-    moved = any(
-        abs(result.final_params[k] - result.initial_params[k]) > 1e-6 for k in bare_keys
-    )
+    moved = any(abs(result.final_params[k] - result.initial_params[k]) > 1e-6 for k in bare_keys)
     assert moved, "optimizer never moved any fluxonium bare parameter"
 
 
@@ -93,7 +96,12 @@ def test_fit_a_dress_works_for_duffing_and_fluxonium_with_same_call() -> None:
     with pytest.warns(UserWarning, match="underdetermined by count"):
         result = fit_a_dress(
             chip,
-            observable_targets={duff: {"freq": duff_seed}, flux: {"freq": flux_seed}},
+            constraints={
+                duff: {"freq": duff_seed, "anharmonicity": float(chip.dressed_anharmonicity(duff))},
+                flux: {"freq": flux_seed, "anharmonicity": float(chip.dressed_anharmonicity(flux))},
+                chip.couplings[0]: {"cross_kerr": None},
+            },
+            vary={duff: ("freq", "anharmonicity"), flux: tuple(flux.tunable_params()), chip.couplings[0]: ("g",)},
             max_hilbert_dim=10_000,
         )
 

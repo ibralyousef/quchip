@@ -20,21 +20,21 @@ and :class:`ExactReduction`, are selected once by name and then operate on the
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any, ClassVar
 
 import jax.numpy as jnp
+from jax.scipy.linalg import expm
 import numpy as np
 
 from quchip.chip.sw import (
-    _exact_eigensystem,
     bare_index,
-    basis_row,
-    exact_reduction,
-    exact_transform_collapse,
+    exact_mode_subspace,
+    exact_pair_parameters,
     extract_pair_parameters,
     h_effective_second_order,
     pathway_attribution,
-    transform_collapse,
+    sylvester_generator,
 )
 
 
@@ -44,21 +44,16 @@ class DeviceReductionContext:
 
     Computed once by the device path of
     :func:`~quchip.chip.transformations.dispatch.eliminate` and handed to the
-    chosen :class:`ReductionMethod`. Every field is shared by both shipped
-    routes: the reduction differs only in how it *reads* this context, not in
-    what the context contains.
+    chosen :class:`ReductionMethod`. The perturbative generator is computed
+    only when a method requests it; exact reduction does not need it.
 
     Attributes
     ----------
-    chip
-        The source chip being reduced (never mutated).
-    mode
-        The device being eliminated.
     mode_label
         Its label.
     survivor_labels
         The touching survivors in bare-label order — the same ordering the
-        pair extraction and the fold loop key on, so every ``("J", a, b)``
+        retained Hamiltonian and pair diagnostics use, so every ``("J", a, b)``
         lookup agrees regardless of coupling-scan order.
     labels
         Device labels in the bare product-basis order.
@@ -72,24 +67,38 @@ class DeviceReductionContext:
         Boolean mask selecting the kept (P) block of the product basis.
     """
 
-    chip: Any
-    mode: Any
     mode_label: str
     survivor_labels: list[str]
     labels: list[str]
     dims: tuple[int, ...]
     h: Any
-    s: Any
     p_mask: Any
+
+    @cached_property
+    def s(self) -> Any:
+        """Return the SW generator once per reduction when requested."""
+        return sylvester_generator(self.h, self.p_mask)[0]
+
+    @cached_property
+    def sw_embedding(self) -> Any:
+        return expm(-self.s)[:, np.flatnonzero(self.p_mask)]
+
+    @cached_property
+    def sw_hamiltonian(self) -> Any:
+        return h_effective_second_order(self.h, self.s, self.p_mask)
+
+    @cached_property
+    def exact(self) -> Any:
+        return exact_mode_subspace(self.h, self.labels, self.dims, self.mode_label, self.survivor_labels)
 
 
 class ReductionMethod:
-    """One route from a bare chip to its reduced effective parameters.
+    """Compute a retained Hamiltonian, embedding and reduction diagnostics.
 
     A concrete strategy declares its :attr:`name` (the ``method`` string
-    :func:`eliminate` dispatches on) and implements the five hooks below. Each
+    :func:`eliminate` dispatches on) and implements the hooks below. Each
     receives the :class:`DeviceReductionContext` the caller assembled. Each
-    hook returns the shape required by the shared fold loop.
+    hook uses the context's fixed product energy coordinates.
 
     Every hook body runs on ``jax.grad``/``jit`` paths and must stay traceable:
     no ``float()``/``int()``/``bool()`` or Python branching on a traced value.
@@ -97,27 +106,28 @@ class ReductionMethod:
 
     name: ClassVar[str]
 
+    def retained_hamiltonian(self, ctx: DeviceReductionContext) -> Any:
+        """Return the complete Hamiltonian on the retained product coordinates."""
+        raise NotImplementedError
+
+    def embedding(self, ctx: DeviceReductionContext) -> Any:
+        """Map retained energy coordinates into the captured full energy basis."""
+        raise NotImplementedError
+
     def pair_parameters(self, ctx: DeviceReductionContext) -> dict:
         """Reduced per-survivor and per-pair parameters.
 
         Returns a mapping matching :func:`~quchip.chip.sw.extract_pair_parameters`
-        /:func:`~quchip.chip.sw.exact_reduction`: ``{survivor: {"freq_after":
+        /:func:`~quchip.chip.sw.exact_pair_parameters`: ``{survivor: {"freq_after":
         ...}}`` for each survivor, plus a ``("J", a, b)`` entry per survivor
         pair (and, for a route that resolves it, a ``("zz", a, b)`` entry).
         """
         raise NotImplementedError
 
-    def survivor_amplitudes(self, ctx: DeviceReductionContext) -> dict[str, Any]:
-        """Survivor-lowering amplitude of the mode's transformed unit jump operator.
-
-        One entry per ``ctx.survivor_labels``: the amplitude with which the
-        eliminated mode's own (unit, dimensionless) lowering operator, carried
-        into the reduced frame with the route's rotation, drives that survivor.
-        The caller folds each amplitude into a Purcell rate with
-        :func:`~quchip.chip.sw.purcell_rate_from`. Only called when the mode
-        dissipates.
-        """
-        raise NotImplementedError
+    def transform_operator(self, ctx: DeviceReductionContext, operator: Any) -> Any:
+        """Carry a full operator into the kept mode-ground manifold."""
+        embedding = self.embedding(ctx)
+        return embedding.conj().T @ jnp.asarray(operator) @ embedding
 
     def residual_zz(self, ctx: DeviceReductionContext, pair_params: dict, a: str, b: str) -> Any | None:
         """Residual ZZ between survivor pair ``(a, b)``, or ``None`` if the route cannot resolve it."""
@@ -144,21 +154,16 @@ class SchriefferWolffMethod(ReductionMethod):
 
     name: ClassVar[str] = "sw"
 
+    def retained_hamiltonian(self, ctx: DeviceReductionContext) -> Any:
+        return ctx.sw_hamiltonian
+
+    def embedding(self, ctx: DeviceReductionContext) -> Any:
+        return ctx.sw_embedding
+
     def pair_parameters(self, ctx: DeviceReductionContext) -> dict:
-        h_eff = h_effective_second_order(ctx.h, ctx.s, ctx.p_mask)
+        h_eff = self.retained_hamiltonian(ctx)
         p_index = np.flatnonzero(ctx.p_mask)
         return extract_pair_parameters(h_eff, p_index, ctx.labels, ctx.dims, ctx.mode_label)
-
-    def survivor_amplitudes(self, ctx: DeviceReductionContext) -> dict[str, Any]:
-        mode_index = ctx.labels.index(ctx.mode_label)
-        c_full = jnp.asarray(
-            ctx.chip.backend.to_array(ctx.chip.backend.embed(ctx.mode.lowering_operator(), mode_index, ctx.dims)),
-            dtype=complex,
-        )
-        c_eff = transform_collapse(c_full, ctx.s, ctx.p_mask)
-        p_index = np.flatnonzero(ctx.p_mask)
-        ground_row = basis_row(p_index, ctx.labels, ctx.dims)
-        return {surv: c_eff[ground_row, basis_row(p_index, ctx.labels, ctx.dims, surv)] for surv in ctx.survivor_labels}
 
     def residual_zz(self, ctx: DeviceReductionContext, pair_params: dict, a: str, b: str) -> Any | None:
         return None
@@ -179,25 +184,19 @@ class ExactReduction(ReductionMethod):
     engine-consumed static model as the SW route: exact kept-block energies
     (what residual ZZ needs) at the cost of a full diagonalization. It has no
     perturbative generator, so no pathway attribution is available
-    (:func:`~quchip.chip.sw.exact_reduction`).
+    (:func:`~quchip.chip.sw.exact_pair_parameters`).
     """
 
     name: ClassVar[str] = "exact"
 
-    def pair_parameters(self, ctx: DeviceReductionContext) -> dict:
-        return exact_reduction(ctx.chip, ctx.mode_label, ctx.survivor_labels)
+    def retained_hamiltonian(self, ctx: DeviceReductionContext) -> Any:
+        return ctx.exact.hamiltonian
 
-    def survivor_amplitudes(self, ctx: DeviceReductionContext) -> dict[str, Any]:
-        mode_index = ctx.labels.index(ctx.mode_label)
-        c_full = jnp.asarray(
-            ctx.chip.backend.to_array(ctx.chip.backend.embed(ctx.mode.lowering_operator(), mode_index, ctx.dims)),
-            dtype=complex,
-        )
-        _, evecs, labeling = _exact_eigensystem(ctx.h, ctx.dims)
-        kept = [int(labeling.indices[bare_index(ctx.labels, ctx.dims)])]
-        kept += [int(labeling.indices[bare_index(ctx.labels, ctx.dims, surv)]) for surv in ctx.survivor_labels]
-        c_eff = exact_transform_collapse(c_full, evecs, jnp.array(kept))
-        return {surv: c_eff[0, i + 1] for i, surv in enumerate(ctx.survivor_labels)}
+    def embedding(self, ctx: DeviceReductionContext) -> Any:
+        return ctx.exact.embedding
+
+    def pair_parameters(self, ctx: DeviceReductionContext) -> dict:
+        return exact_pair_parameters(ctx.exact, ctx.labels, ctx.dims, ctx.mode_label, ctx.survivor_labels)
 
     def residual_zz(self, ctx: DeviceReductionContext, pair_params: dict, a: str, b: str) -> Any | None:
         return jnp.real(pair_params[("zz", a, b)])

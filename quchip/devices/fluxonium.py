@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from math import pi
+from operator import index
 from typing import Any, ClassVar, Literal
 
 from quchip.declarative.expr import PhysicsExpr
@@ -63,7 +64,7 @@ class Fluxonium(DeviceModel):
         collapse_rate_threshold: float = 1e-8,
         **noise: Any,
     ) -> None:
-        if num_basis < 3:
+        if index(num_basis) < 3:
             raise ValueError(f"num_basis must be >= 3, got {num_basis}")
         if phi_max <= 0:
             raise ValueError(f"phi_max must be positive, got {phi_max}")
@@ -156,7 +157,7 @@ class Fluxonium(DeviceModel):
         if name == "coupling_channel" and value not in (None, "charge", "flux"):
             raise ValueError("coupling_channel must be 'charge', 'flux', or None.")
         if name == "num_basis":
-            if value < 3:
+            if index(value) < 3:
                 raise ValueError(f"num_basis must be >= 3, got {value}")
             if self.projection_levels is not None and self.projection_levels > value:
                 raise ValueError(

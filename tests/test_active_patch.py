@@ -7,7 +7,9 @@ from quchip.approximations import RWA
 import numpy as np
 import pytest
 
-from quchip import Bath, Capacitive, ChargeDrive, Chip, CrossKerr, DuffingTransmon, Gaussian, QuantumSequence
+from quchip import (
+    Bath, Capacitive, ChargeDrive, Chip, CrossKerr, DuffingTransmon, Gaussian, QuantumSequence, PortNetwork,
+)
 from quchip.chip.transformations import ActivePatchResult
 from quchip.chip.transformations.active_patch import active_labels, coupling_adjacency, graph_distances
 
@@ -65,12 +67,14 @@ def test_active_patch_eliminates_spectators_leaf_first():
 
 
 def test_active_patch_trivial_when_everything_active():
-    """When every device is schedule-active, active_patch returns the source chip and sequence unchanged."""
+    """An all-active patch has an independently editable model and schedule."""
     chip, seq = _driven_pair_chain()
     patch = seq.active_patch(hops=3)
     assert patch.eliminated_labels == ()
-    assert patch.chip is chip
-    assert patch.sequence is seq
+    patch.chip["q0"].freq = 6.1
+    assert chip["q0"].freq == 5.0
+    patch.sequence.delay("q0", duration=1.0)
+    assert patch.sequence.total_duration == seq.total_duration + 1.0
 
 
 def test_active_patch_strips_unused_spectator_lines():
@@ -134,16 +138,14 @@ def test_active_patch_folds_through_fold_created_edges():
 
 def test_active_patch_stops_gracefully_on_an_unsupported_device_elimination():
     """active_patch downgrades a declined device elimination to a note and keeps that spectator on the patch chip."""
-    # eliminate() declines (NotImplementedError) when a spectator's Purcell
-    # decay would fold onto a survivor that carries thermal_population —
-    # eliminate_device.py has no collapse-channel API to represent the
-    # resulting rate without inventing thermal absorption that was never
-    # physically present (see eliminate_device.py's T1/thermal_population
-    # guard). active_patch must downgrade that to a "stopped eliminating"
-    # note rather than raising.
+    # Joint elimination of a nonlinear accessible boundary is unsupported.
+    # Keep that spectator and report why the reduction stopped.
     q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0", thermal_population=0.02)
     spec = DuffingTransmon(freq=5.4, anharmonicity=-0.25, levels=3, label="spec", T1=20_000.0)
-    chip = Chip([q0, spec], couplings=[Capacitive(q0, spec, g=0.004, label="c0s")], frame="rotating")
+    network = PortNetwork()
+    network.port("probe", target=spec, rate=.01)
+    chip = Chip([q0, spec], couplings=[Capacitive(q0, spec, g=0.004, label="c0s")],
+                frame="rotating", port_network=network)
     drive = ChargeDrive(target=q0, label="d0")
     chip.wire(drive)
     seq = QuantumSequence(chip)
@@ -209,17 +211,14 @@ def test_active_patch_warns_on_poor_sw_validity():
     with pytest.warns(UserWarning, match="Schrieffer-Wolff validity"):
         patch = seq.active_patch(hops=0)
     assert patch.eliminated_labels == ("spec",)
-    assert patch.validity["spec"]["c01"]["is_valid"] is False
+    assert not patch.validity["spec"]["c01"]["is_valid"]
 
 
-def test_active_patch_raises_when_bath_explicitly_targets_a_spectator():
-    """A bath that explicitly targets a spectator is a real conflict; active_patch propagates eliminate()'s error."""
-    # Eliminating that spectator would dangle the bath's target and raise
-    # KeyError at solve time instead; active_patch's graceful-stop catch
-    # must not convert this into a soft "stopped eliminating" note.
+def test_active_patch_retains_a_bath_targeting_a_spectator():
     chip, qs, drives = _chain()
     chip.add_bath(Bath("thermal", targets=[qs[3]], temperature=20.0))
     seq = QuantumSequence(chip)
     seq.schedule(drives[0], envelope=Gaussian(duration=20.0, sigmas=3, amplitude=0.02), freq=chip.freq(qs[0]))
-    with pytest.raises(ValueError, match="explicitly targets it"):
-        seq.active_patch(hops=1)
+    patch = seq.active_patch(hops=1)
+    assert qs[3].label in patch.eliminated_labels
+    assert patch.chip.baths[0].resolve_targets(patch.chip) == [d.label for d in patch.chip.devices]

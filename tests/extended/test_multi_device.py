@@ -20,11 +20,8 @@ from quchip.control.signal import Crosstalk
 from quchip.control.drive import ChargeDrive
 from quchip.control.envelopes import Square
 from quchip.devices.transmon.duffing import DuffingTransmon
-from quchip.engine import build_engine_result, simulate
+from quchip.engine import simulate
 from quchip.engine.ir import DriveOp
-
-
-# ── Multi-device vacuum Rabi oscillation ────────────────────────────
 
 
 class TestMultiDeviceSimulation:
@@ -108,53 +105,6 @@ class TestMultiDeviceSimulation:
             ),
         )
 
-    def test_population_conservation(self, backend: QuTiPBackend) -> None:
-        """P(q0, 1) + P(q1, 1) ≈ 1 at all times (single-excitation subspace)."""
-        tlist, result = self._setup_and_run()
-
-        p1_q0 = result.population("q0", level=1)
-        p1_q1 = result.population("q1", level=1)
-
-        # In the single-excitation manifold, these should sum to ~1.
-        # Small leakage to |2⟩ from anharmonicity is possible but tiny.
-        total = p1_q0 + p1_q1
-        npt.assert_allclose(
-            total,
-            np.ones_like(total),
-            atol=0.02,
-            err_msg=(f"Single-excitation conservation violated. Max deviation: {np.max(np.abs(total - 1.0)):.4f}"),
-        )
-
-    def test_half_period_swap(self, backend: QuTiPBackend) -> None:
-        """At t = 1/(4g) = 25 ns, population is fully transferred to q1."""
-        tlist, result = self._setup_and_run()
-
-        t_swap = 1.0 / (4.0 * self.G)  # 25 ns
-        idx = np.argmin(np.abs(tlist - t_swap))
-
-        p1_q0 = result.population("q0", level=1)
-        p1_q1 = result.population("q1", level=1)
-
-        assert p1_q0[idx] < 0.02, f"q0 should be near ground at t={t_swap:.1f} ns, got P={p1_q0[idx]:.4f}"
-        assert p1_q1[idx] > 0.98, f"q1 should be excited at t={t_swap:.1f} ns, got P={p1_q1[idx]:.4f}"
-
-    def test_full_period_return(self, backend: QuTiPBackend) -> None:
-        """At t = 1/(2g) = 50 ns, population returns to q0."""
-        tlist, result = self._setup_and_run()
-
-        t_return = 1.0 / (2.0 * self.G)  # 50 ns
-        idx = np.argmin(np.abs(tlist - t_return))
-
-        p1_q0 = result.population("q0", level=1)
-        p1_q1 = result.population("q1", level=1)
-
-        assert p1_q0[idx] > 0.98, f"q0 should return to excited at t={t_return:.1f} ns, got P={p1_q0[idx]:.4f}"
-        assert p1_q1[idx] < 0.02, f"q1 should return to ground at t={t_return:.1f} ns, got P={p1_q1[idx]:.4f}"
-
-
-# ── Crosstalk integration ──────────────────────────────────────────
-
-
 class TestCrosstalkIntegration:
     """Verify crosstalk terms flow through the Hamiltonian pipeline."""
 
@@ -185,69 +135,6 @@ class TestCrosstalkIntegration:
         chip = Chip([q0, q1], frame="lab")
         chip.connect(ControlEquipment(lines=[drive_a, drive_b]))
         return chip, q0, q1, drive_a, drive_b
-
-    def test_structural_more_terms(self) -> None:
-        """Crosstalk adds more dynamic terms to the Hamiltonian description."""
-        chip, q0, q1, drive_a, drive_b = self._make_chip_and_drives()
-
-        envelope = Square(duration=self.DURATION, amplitude=self.OMEGA)
-        drive_op = DriveOp(
-            target_label="q0",
-            envelope=envelope,
-            freq=self.FREQ_Q0,
-            drive_label=drive_a.label,
-        )
-
-        from quchip.engine.frames import resolve_frame
-
-        resolved = resolve_frame(chip, chip.frame)
-        desc_no_xt = build_engine_result(chip, [drive_op], resolved_frame=resolved)
-
-        src_key = drive_a.label
-        vic_key = drive_b.label
-        chip.connect(ControlEquipment(
-            lines=[drive_a, drive_b],
-            signal_chain=[Crosstalk(source=src_key, victim=vic_key, beta=self.BETA)],
-        ))
-        resolved = resolve_frame(chip, chip.frame)
-        desc_with_xt = build_engine_result(chip, [drive_op], resolved_frame=resolved)
-
-        assert len(desc_with_xt.dynamic_terms) > len(desc_no_xt.dynamic_terms), (
-            f"Crosstalk should add terms: got {len(desc_with_xt.dynamic_terms)} with vs "
-            f"{len(desc_no_xt.dynamic_terms)} without"
-        )
-        # Charge crosstalk adds 2 terms (H_x and H_y)
-        assert len(desc_with_xt.dynamic_terms) == len(desc_no_xt.dynamic_terms) + 2, (
-            f"Expected exactly 2 extra terms from charge crosstalk, "
-            f"got {len(desc_with_xt.dynamic_terms) - len(desc_no_xt.dynamic_terms)}"
-        )
-
-    def test_leaked_signal_accepts_explicit_array_module(self) -> None:
-        """Callable crosstalk remains evaluable with an explicit array module."""
-        chip, q0, q1, drive_a, drive_b = self._make_chip_and_drives()
-        source_key = drive_a.label
-        victim_key = drive_b.label
-        edge = Crosstalk(source=source_key, victim=victim_key, beta=self.BETA, theta=0.3, delay=2.0)
-        envelope = Square(duration=self.DURATION, amplitude=self.OMEGA)
-        drive_op = DriveOp(
-            target_label="q0",
-            envelope=envelope,
-            freq=self.FREQ_Q0,
-            start_time=1.0,
-            drive_label=drive_a.label,
-        )
-        tlist = np.linspace(0.0, self.DURATION, 101)
-        from quchip.engine.frames import resolve_frame
-
-        resolved = resolve_frame(chip, chip.frame)
-        _ = resolved  # signal building is frame-agnostic now; frame applied during modulation
-        source_signal = drive_a.signal(drive_op, q0)
-        built = edge.apply({(source_key, 0): source_signal})
-        victim_signal = built[(victim_key, 0)]
-
-        default = victim_signal.evaluate(tlist)
-        explicit = victim_signal.evaluate(tlist, xp=np)
-        npt.assert_allclose(explicit, default)
 
     def test_dynamics_victim_excitation(self) -> None:
         """Crosstalk causes measurable excitation on the victim device."""

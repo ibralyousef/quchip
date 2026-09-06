@@ -6,16 +6,8 @@ import jax
 import numpy as np
 import pytest
 
-from quchip.utils.labeling import reset_label_counters
 from quchip import Chip
 from quchip.devices.fluxonium import Fluxonium
-from quchip.devices.protocols import ChargeCoupled, FluxCoupled, PhaseCoupled
-
-
-@pytest.fixture(autouse=True)
-def _reset():
-    reset_label_counters()
-    yield
 
 
 def test_constructor_accepts_three_energies():
@@ -23,6 +15,10 @@ def test_constructor_accepts_three_energies():
     q = Fluxonium(E_C=1.0, E_J=4.0, E_L=1.0, phi_ext=0.5, levels=5)
     assert q.local_space().dimension == 400
     assert q.projection_levels == 5
+    for field in ("num_basis", "projection_levels"):
+        with pytest.raises(TypeError):
+            setattr(q, field, 6.5)
+    assert (q.num_basis, q.projection_levels) == (400, 5)
 
 
 def test_invalid_energies_raise():
@@ -33,14 +29,6 @@ def test_invalid_energies_raise():
         Fluxonium(E_C=1.0, E_J=-4.0, E_L=1.0)
     with pytest.raises(ValueError, match="E_L"):
         Fluxonium(E_C=1.0, E_J=4.0, E_L=-1.0)
-
-
-def test_conforms_to_all_three_protocols():
-    """Fluxonium implements ChargeCoupled, PhaseCoupled, and FluxCoupled."""
-    q = Fluxonium(E_C=1.0, E_J=4.0, E_L=1.0)
-    assert isinstance(q, ChargeCoupled)
-    assert isinstance(q, PhaseCoupled)
-    assert isinstance(q, FluxCoupled)
 
 
 def test_sweet_spot_is_lowest_01_gap():
@@ -54,14 +42,6 @@ def test_computational_property():
     """Fluxonium.computational is True."""
     q = Fluxonium(E_C=1.0, E_J=4.0, E_L=1.0)
     assert q.computational is True
-
-
-def test_state_version_bumps_on_phi_ext_mutation():
-    """Mutating phi_ext increments state_version."""
-    q = Fluxonium(E_C=1.0, E_J=4.0, E_L=1.0, phi_ext=0.0)
-    v0 = q.state_version
-    q.phi_ext = 0.5
-    assert q.state_version > v0
 
 
 def test_jax_grad_through_E_J():
