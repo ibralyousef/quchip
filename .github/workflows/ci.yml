@@ -45,5 +45,5 @@ jobs:
             pyproject.toml
             ci-constraints-*.txt
       - run: uv venv --python ${{ matrix.python }}
-      - run: uv pip install -e '.[test]' -c ci-constraints-${{ matrix.python }}.txt
+      - run: uv pip install -e '.[test,dynamiqs]' -c ci-constraints-${{ matrix.python }}.txt
       - run: uv run --no-sync pytest -m "core or physics_sentinel"

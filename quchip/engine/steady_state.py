@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from quchip.backend.containers import PreparedStationary
 from quchip.engine.ir import SteadyStateProblem
 from quchip.engine.observables import decompose_eops
 from quchip.results.steady_state import (
@@ -70,10 +71,14 @@ def steadystate(
     return solve_steadystate_problem(problem)
 
 
-def solve_steadystate_problem(problem: SteadyStateProblem) -> SteadyStateResult:
+def solve_steadystate_problem(
+    problem: SteadyStateProblem, *, prepared: PreparedStationary | None = None,
+) -> SteadyStateResult:
     """Solve an already assembled stationary problem and enforce uniqueness."""
-    backend = problem.chip.backend
-    backend_result = backend.steadystate(problem)
+    backend = problem.backend
+    backend_result = (
+        backend.steadystate(problem) if prepared is None else backend.steadystate(problem, prepared=prepared)
+    )
     nullity = maybe_concrete_scalar(backend_result.nullity)
     if nullity is not None and int(nullity) != 1:
         raise ValueError(

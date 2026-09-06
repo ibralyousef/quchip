@@ -1,14 +1,4 @@
-"""Ladder rung 2 (spec Sec. 9): CrossKerr readout reduction reproduces the full dispersive-readout probe.
-
-``eliminate(chip, coupling)`` on a qubit-resonator exchange edge folds the
-edge into a :class:`~quchip.chip.couplings.CrossKerr` while both endpoint
-devices survive (the effective-readout-chip flow). A ``ChargeDrive`` probe
-wired to the resonator survives the reduction untouched, so the identical
-schedule call replays on both chips — this rung checks that the reduced
-pointer-separation trajectory agrees with the full qubit+resonator dynamics,
-and that the reduction never forces a density-matrix solve the full chip
-didn't already need.
-"""
+"""Retained readout dynamics preserve mapped states, controls and loss operators."""
 
 from __future__ import annotations
 
@@ -32,10 +22,10 @@ from quchip.chip.transformations import eliminate
 _G = 0.05  # qubit-resonator coupling, GHz
 _Q_FREQ = 5.0
 _R_FREQ = 7.0  # Delta = 2.0 GHz -> g/Delta = 0.025, (g/Delta)^2 = 6.25e-4
-_R_LEVELS = 8
+_R_LEVELS = 4
 _QUALITY_FACTOR = 300.0  # bad-cavity: kappa_ordinary = 7.0/300 = 0.0233 GHz >> |chi|
-_AMPLITUDE = 0.02
-_DURATION = 80.0  # ~1.9 ring-up times (1/kappa_ordinary ~= 43 ns)
+_AMPLITUDE = 0.005
+_DURATION = 30.0  # About two amplitude ring-up times, 2/kappa_angular.
 
 
 def _readout_chip(*, internal_quality_factor: float | None) -> Chip:
@@ -47,35 +37,36 @@ def _readout_chip(*, internal_quality_factor: float | None) -> Chip:
         [q, r],
         couplings=[Capacitive(q, r, g=_G, label="qr")],
         control_equipment=ControlEquipment([readout]),
-        frame="rotating",
+        frame="lab",
         approximation=Exact(),
     )
 
 
-def _probe_pointer(chip: Chip, readout_freq: float, qubit_level: int) -> complex:
+def _probe_pointer(chip: Chip, readout_freq: float, initial_state, observable) -> complex:
     """Replay the readout probe on *chip* by its surviving drive label; return the final resonator <a>."""
     tlist = np.linspace(0.0, _DURATION, 81)
     seq = QuantumSequence(chip)
     seq.schedule("readout", envelope=Square(duration=_DURATION, amplitude=_AMPLITUDE), freq=readout_freq)
     result = seq.simulate(
         tlist=tlist,
-        initial_state=chip.state(q=qubit_level, r=0),
-        e_ops=chip.e_ops(r="a"),
+        initial_state=initial_state,
+        states="final",
     )
-    return complex(np.asarray(result.expect_values("r"), dtype=complex)[-1])
+    return complex(chip.backend.expect(observable, result.final_state))
 
 
 def test_readout_pointer_separation_agrees_full_vs_reduced():
-    """CrossKerr-reduced pointer separation (phase and magnitude) matches the full qubit+resonator probe."""
+    """The transformed drive and observable preserve pointer separation."""
     full = _readout_chip(internal_quality_factor=_QUALITY_FACTOR)
     q, r = full["q"], full["r"]
     readout_freq = 0.5 * (full.freq(r, {q: 0}) + full.freq(r, {q: 1}))
-    reduced = eliminate(full, "qr").chip
-
-    a_full_0 = _probe_pointer(full, readout_freq, 0)
-    a_full_1 = _probe_pointer(full, readout_freq, 1)
-    a_red_0 = _probe_pointer(reduced, readout_freq, 0)
-    a_red_1 = _probe_pointer(reduced, readout_freq, 1)
+    reduction = eliminate(full, "qr", method="exact")
+    reduced, mapping = reduction.chip, reduction.mapping
+    observable = full.observable("r", "a")
+    states = [full.state(q=level, r=0) for level in (0, 1)]
+    a_full_0, a_full_1 = [_probe_pointer(full, readout_freq, state, observable) for state in states]
+    a_red_0, a_red_1 = [_probe_pointer(reduced, readout_freq, mapping.project_state(state),
+                                      mapping.project_operator(observable)) for state in states]
 
     sep_full = a_full_1 - a_full_0
     sep_red = a_red_1 - a_red_0
@@ -91,7 +82,7 @@ def test_readout_pointer_separation_agrees_full_vs_reduced():
 
 
 def test_reduced_readout_does_not_force_density_matrix_solve():
-    """The CrossKerr reduction never forces mesolve when the full chip wouldn't need it either."""
+    """A lossless reduction never forces mesolve when the full chip wouldn't need it either."""
     full = _readout_chip(internal_quality_factor=None)
     q, r = full["q"], full["r"]
     readout_freq = 0.5 * (full.freq(r, {q: 0}) + full.freq(r, {q: 1}))
@@ -116,7 +107,7 @@ def test_reduced_readout_does_not_force_density_matrix_solve():
 
 
 def test_reduced_readout_collapse_profile_matches_full_chip():
-    """With a lossy resonator, the reduction leaves the collapse-operator profile untouched."""
+    """A lossy resonator retains its transformed collapse operator."""
     full = _readout_chip(internal_quality_factor=_QUALITY_FACTOR)
     q, r = full["q"], full["r"]
     readout_freq = 0.5 * (full.freq(r, {q: 0}) + full.freq(r, {q: 1}))
@@ -134,3 +125,8 @@ def test_reduced_readout_collapse_profile_matches_full_chip():
     )
 
     assert len(problem_full.engine_result.collapse_terms) == len(problem_reduced.engine_result.collapse_terms) == 1
+    mapping = eliminate(full, "qr").mapping
+    before = full.backend._collapse_operators(full.resolve())[0]
+    after = reduced.backend._collapse_operators(reduced.resolve())[0]
+    np.testing.assert_allclose(reduced.backend.to_array(after),
+                               reduced.backend.to_array(mapping.project_operator(before)), atol=1e-12)

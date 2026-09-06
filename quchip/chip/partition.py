@@ -212,6 +212,7 @@ def _build_component_chip(
     """Assemble one component's solve-ready sub-chip: its devices, internal couplings, baths, frame, equipment."""
     from quchip.chip.chip import Chip as _Chip
     from quchip.control.equipment import ControlEquipment
+    from quchip.utils.values import copy_value
 
     member_set = set(group)
     devices = [clone[label] for label in group]
@@ -219,10 +220,6 @@ def _build_component_chip(
         c for c in clone.couplings
         if c.device_a_label in member_set and c.device_b_label in member_set
     ]
-    # `clone.frame` is typed `FrameSpec` (Literal | ScalarLike | dict[str | BaseDevice, ...]);
-    # the filtered comprehension below is a plain dict[str, ...], which dict's key-type
-    # invariance won't accept back into that union member — `Any` sidesteps the mismatch
-    # without misrepresenting the runtime value (still a dict, or the scalar/literal passthrough).
     frame: Any = (
         {k: v for k, v in clone.frame.items() if k in member_set}
         if isinstance(clone.frame, dict) else clone.frame
@@ -231,11 +228,13 @@ def _build_component_chip(
         devices=devices,
         couplings=couplings or None,
         label=f"{chip.label}[{index}]" if chip.label else None,
-        frame=frame,
+        frame=copy_value(frame),
         approximation=clone.approximation,
+        basis=clone.basis,
         backend=clone._backend,
         baths=_component_baths(clone, member_set) or None,
         port_network=network,
+        effective_terms=[terms for terms in clone.effective_terms if set(terms.labels) <= member_set],
     )
     equipment = clone.control_equipment
     if equipment is not None and lines:
@@ -245,6 +244,9 @@ def _build_component_chip(
             if all(lbl in line_labels for lbl in _transform_drive_labels(t))
         ]
         sub.connect(ControlEquipment(lines=lines, signal_chain=chain).copy(sub.device_map, sub.coupling_map))
+    from quchip.chip.states import copy_state_configuration
+
+    copy_state_configuration(chip, sub)
     return sub
 
 
@@ -253,14 +255,15 @@ def partition_chip(
     *,
     resolved: Any | None = None,
     extra_supports: tuple[tuple[str, ...], ...] = (),
+    clone_trivial: bool = True,
 ) -> PartitionResult:
     """Split a chip into independent sub-chips along its independence graph.
 
     Exact: the joint solve of the original chip factorizes as the tensor
-    product of the component solves. With one component, the original chip
-    is returned uncloned inside a trivial result.
+    product of the component solves. Public results contain independent
+    models even with one component. Internal dispatch can reuse a trivial
+    component when it will immediately return to the joint solve.
     """
-    from quchip.chip.transformations.plumbing import detach_intermediate_clone
 
     labels = [d.label for d in chip.devices]
     chip_order = tuple(labels)
@@ -271,14 +274,14 @@ def partition_chip(
     groups = connected_components(labels, edges)
     if len(groups) == 1:
         return PartitionResult(
-            components=(PartitionComponent(labels=chip_order, chip=chip),),
+            components=(PartitionComponent(labels=chip_order, chip=chip.clone() if clone_trivial else chip),),
             chip_order=chip_order,
         )
     try:
         networks = _split_network(chip, groups)
     except ValueError as error:
         return PartitionResult(
-            components=(PartitionComponent(labels=chip_order, chip=chip),),
+            components=(PartitionComponent(labels=chip_order, chip=chip.clone() if clone_trivial else chip),),
             chip_order=chip_order,
             notes=(f"Kept a joint solve because {error}.",),
         )
@@ -297,7 +300,6 @@ def partition_chip(
         for i, group in enumerate(groups)
     )
 
-    detach_intermediate_clone(list(clone.devices), clone)
     return PartitionResult(components=components, chip_order=chip_order, notes=tuple(notes))
 
 

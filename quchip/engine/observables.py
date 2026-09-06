@@ -172,7 +172,7 @@ def decompose_eops(
                     label=device_label,
                     dims=dims,
                     semantic_to_solver=semantic_to_solver_transform(dev, basis),
-                ):
+                ) or [(0, backend.embed(op, dev_idx, dims))]:
                     flat_ops.append(embedded)
                     meta.append(
                         BandMeta(
@@ -210,14 +210,14 @@ def decompose_eops(
                 dim=dim_a,
                 label=label_a,
                 semantic_to_solver=semantic_to_solver_transform(dev_a, basis_a),
-            ):
+            ) or [(0, op_a)]:
                 for w_b, band_b in local_mode_bands(
                     backend,
                     op_b,
                     dim=dim_b,
                     label=label_b,
                     semantic_to_solver=semantic_to_solver_transform(dev_b, basis_b),
-                ):
+                ) or [(0, op_b)]:
                     product = backend.tensor(band_a, band_b)
                     embedded = backend.embed_two_body(product, idx_a, idx_b, dims)
                     flat_ops.append(embedded)
@@ -388,7 +388,6 @@ def recombine_expect(
 def build_observable_traces(
     solver_result: SolverResult,
     tlist: np.ndarray,
-    chip: Chip,
     *,
     dict_meta: list[BandMeta | OutputMeta],
     resolved_frame: ResolvedFrame,
@@ -405,7 +404,6 @@ def build_observable_traces(
     e_ops keys. Each value is an :class:`ObservableTrace` (or a list
     when the user supplied multiple operators for the same key).
     """
-    del chip  # reconstruction uses resolved solve metadata
     raw_expect = solver_result.expect
     if isinstance(raw_expect, dict):
         flat_expect: Sequence[Any] = list(raw_expect.values())

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from quchip.utils.values import DeferredValue
 from quchip.backend import Backend, SteadyStateSolverResult
 from quchip.devices.base import BaseDevice
 from quchip.results._batch import BatchResult
@@ -18,18 +19,48 @@ class SteadyStateResult:
 
     state: Any
     residual: Any
-    trace: Any
-    trace_error: Any
-    hermiticity_error: Any
-    minimum_eigenvalue: Any
-    positivity_error: Any
     nullity: Any
-    condition_number: Any
+    _condition_number: DeferredValue | None = field(repr=False, compare=False)
     dims: tuple[int, ...]
     device_info: tuple[tuple[str, bool], ...]
     stats: Mapping[str, Any]
     _backend: Backend = field(repr=False, compare=False)
     _expectations: Mapping[Any, Any] = field(repr=False, compare=False)
+
+    @property
+    def condition_number(self) -> Any:
+        """Condition number of the trace-constrained generator, computed on request."""
+        return None if self._condition_number is None else self._condition_number()
+
+    @property
+    def trace(self) -> Any:
+        """Trace of the captured stationary density matrix."""
+        return self._backend.array_module.trace(self._backend.to_array(self.state))
+
+    @property
+    def trace_error(self) -> Any:
+        """Absolute deviation from unit trace."""
+        return self._backend.array_module.abs(self.trace - 1.0)
+
+    @property
+    def hermiticity_error(self) -> Any:
+        """Frobenius norm of rho minus its adjoint, computed on request."""
+        xp = self._backend.array_module
+        state = self._backend.to_array(self.state)
+        return xp.linalg.norm(state - xp.conj(xp.swapaxes(state, -1, -2)))
+
+    @property
+    def minimum_eigenvalue(self) -> Any:
+        """Smallest eigenvalue of the Hermitian part, computed on request."""
+        xp = self._backend.array_module
+        state = self._backend.to_array(self.state)
+        hermitian = 0.5 * (state + xp.conj(xp.swapaxes(state, -1, -2)))
+        return xp.min(xp.linalg.eigvalsh(hermitian))
+
+    @property
+    def positivity_error(self) -> Any:
+        """Magnitude of a negative minimum eigenvalue, or zero."""
+        return self._backend.array_module.maximum(0.0, -self.minimum_eigenvalue)
 
     @property
     def is_unique(self) -> Any:
@@ -69,14 +100,6 @@ def build_steady_state_result(
 ) -> SteadyStateResult:
     """Wrap one backend stationary solve without concretizing native arrays."""
     xp = backend.array_module
-    state_array = xp.asarray(backend.to_array(solver_result.state), dtype=complex)
-    adjoint = xp.conj(xp.swapaxes(state_array, -1, -2))
-    hermitian_part = 0.5 * (state_array + adjoint)
-    trace = xp.trace(state_array)
-    trace_error = xp.abs(trace - 1.0)
-    hermiticity_error = xp.linalg.norm(state_array - adjoint)
-    minimum_eigenvalue = xp.min(xp.linalg.eigvalsh(hermitian_part))
-    positivity_error = xp.maximum(0.0, -minimum_eigenvalue)
 
     expectations: dict[Any, Any] = {}
     if problem.e_ops_meta is not None:
@@ -98,15 +121,10 @@ def build_steady_state_result(
     return SteadyStateResult(
         state=solver_result.state,
         residual=solver_result.residual,
-        trace=trace,
-        trace_error=trace_error,
-        hermiticity_error=hermiticity_error,
-        minimum_eigenvalue=minimum_eigenvalue,
-        positivity_error=positivity_error,
         nullity=solver_result.nullity,
-        condition_number=solver_result.condition_number,
+        _condition_number=solver_result._condition_number,
         dims=tuple(problem.engine_result.dims),
-        device_info=tuple((device.label, device.computational) for device in problem.chip.devices),
+        device_info=problem.device_info,
         stats=MappingProxyType(dict(solver_result.stats)),
         _backend=backend,
         _expectations=MappingProxyType(expectations),

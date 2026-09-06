@@ -5,12 +5,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from quchip.engine import HamiltonianProgram, ResolvedSLH, SLHChannel
 from quchip.engine.ir import (
     CanonicalOperator,
     CollapseTerm,
-    HamiltonianProgram,
-    ResolvedSLH,
-    SLHChannel,
 )
 
 
@@ -135,36 +133,18 @@ def test_channel_coupling_applies_rate_and_phase_without_densifying() -> None:
     np.testing.assert_allclose(coupling.to_dense(), 0.5j * lowering.to_dense())
 
 
-def test_resolved_slh_rejects_scattering_shape_mismatch() -> None:
-    """Scattering has one scalar input and output axis per resolved channel."""
+@pytest.mark.parametrize(
+    "scattering,message",
+    [(np.eye(2), "one row and column per channel"), (np.array([[0.5]]), "unitary")],
+)
+def test_resolved_slh_rejects_invalid_scattering(scattering, message):
+    """Scattering has one row per channel and conserves modeled flux."""
     channel = SLHChannel(
-        key="hidden.q.relaxation",
-        accessibility="hidden",
+        key="hidden.q.relaxation", accessibility="hidden",
         collapse=_collapse("q", "relaxation", frame_frequency=None),
     )
-
-    with pytest.raises(ValueError, match="one row and column per channel"):
-        ResolvedSLH(
-            scattering=np.eye(2),
-            hamiltonian=HamiltonianProgram(),
-            channels=(channel,),
-        )
-
-
-def test_resolved_slh_rejects_nonunitary_concrete_scattering() -> None:
-    """Concrete scalar scattering must preserve all modeled channel flux."""
-    channel = SLHChannel(
-        key="hidden.q.relaxation",
-        accessibility="hidden",
-        collapse=_collapse("q", "relaxation", frame_frequency=None),
-    )
-
-    with pytest.raises(ValueError, match="unitary"):
-        ResolvedSLH(
-            scattering=np.array([[0.5]], dtype=complex),
-            hamiltonian=HamiltonianProgram(),
-            channels=(channel,),
-        )
+    with pytest.raises(ValueError, match=message):
+        ResolvedSLH(scattering=scattering, hamiltonian=HamiltonianProgram(), channels=(channel,))
 
 
 def test_resolved_slh_rejects_duplicate_channel_keys() -> None:
@@ -205,35 +185,6 @@ def test_resolved_slh_rejects_hidden_channel_before_exposed_channel() -> None:
         )
 
 
-def test_engine_exports_resolved_slh_contract() -> None:
-    """Advanced users can inspect the resolved SLH types from quchip.engine."""
-    from quchip.engine import HamiltonianProgram as ExportedHamiltonianProgram
-    from quchip.engine import ResolvedSLH as ExportedResolvedSLH
-    from quchip.engine import SLHChannel as ExportedSLHChannel
-
-    assert ExportedHamiltonianProgram is HamiltonianProgram
-    assert ExportedResolvedSLH is ResolvedSLH
-    assert ExportedSLHChannel is SLHChannel
-
-
-def test_chip_resolve_exposes_input_free_slh_core() -> None:
-    """Ordinary chip resolution exposes baths through the internal SLH view."""
-    from quchip import Chip, DuffingTransmon
-
-    qubit = DuffingTransmon(
-        freq=5.0,
-        anharmonicity=-0.2,
-        levels=3,
-        T1=100.0,
-        label="q",
-    )
-    result = Chip([qubit]).resolve()
-
-    assert isinstance(result.slh, ResolvedSLH)
-    assert result.slh.external_channels == ()
-    assert len(result.slh.hidden_channels) == 1
-
-
 def test_hidden_relaxation_backend_operator_matches_declared_t1() -> None:
     """SLH packaging leaves backend Lindblad lowering and rate unchanged."""
     from quchip import Chip, DuffingTransmon
@@ -249,6 +200,8 @@ def test_hidden_relaxation_backend_operator_matches_declared_t1() -> None:
     chip = Chip([qubit], backend="qutip")
     result = chip.resolve()
 
+    assert result.slh.external_channels == ()
+    assert len(result.slh.hidden_channels) == 1
     backend_operator = chip.backend._collapse_operators(result)[0].full()
     lowering = np.diag(np.sqrt(np.arange(1, qubit.levels)), k=1).astype(complex)
     np.testing.assert_allclose(backend_operator, np.sqrt(1.0 / lifetime) * lowering)

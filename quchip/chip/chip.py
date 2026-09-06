@@ -14,6 +14,7 @@ single loss function can span any of them.
 from __future__ import annotations
 
 from collections import Counter
+from math import prod
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Mapping, Sequence, overload
 
@@ -24,6 +25,7 @@ from quchip.backend.protocol import Backend, Operator, State
 from quchip.approximations import Approximation, RWA, require_approximation
 from quchip.chip.analysis import ChipAnalysis, DressedResult, KerrMatrix
 from quchip.chip.baths import Bath
+from quchip.chip.effective import EffectiveTerms
 from quchip.chip.port_network import PortNetwork
 from quchip.chip.ports import Port
 from quchip.chip.coupling_base import BaseCoupling
@@ -32,8 +34,7 @@ from quchip.control.drive import BaseDrive, CouplingDrive
 from quchip.control.equipment import ControlEquipment
 from quchip.control.signal import Crosstalk, SignalTransform
 from quchip.declarative.expr import PhysicsExpr
-from quchip.declarative.parameters import validate_sign
-from quchip.devices.base import BaseDevice, _validate_noise_params
+from quchip.devices.base import BaseDevice
 from quchip.engine.frames import FramePlan
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar
 from quchip.utils.labeling import LabelKeyedDict, resolve_label
@@ -192,6 +193,10 @@ class Chip:
     port_network : PortNetwork, optional
         Complete accessible field boundary. Attach at most one network.
 
+    effective_terms : sequence[EffectiveTerms]
+        Captured contributions produced by a reduction. Their retained operator
+        bands are preserved while the engine applies the selected frame.
+
     Examples
     --------
     >>> from quchip import DuffingTransmon, Resonator, Capacitive, Chip
@@ -213,6 +218,7 @@ class Chip:
         backend: str | Backend | None = None,
         baths: list[Bath] | None = None,
         port_network: PortNetwork | None = None,
+        effective_terms: Sequence[EffectiveTerms] = (),
     ) -> None:
         duplicates = [lbl for lbl, count in Counter(d.label for d in devices).items() if count > 1]
         if duplicates:
@@ -222,6 +228,19 @@ class Chip:
         self._devices = tuple(devices)
         self._device_map: dict[str, BaseDevice] = {d.label: d for d in devices}
         self._label_to_index: dict[str, int] = {d.label: i for i, d in enumerate(devices)}
+        self._effective_terms = tuple(effective_terms)
+        for terms in self._effective_terms:
+            if not isinstance(terms, EffectiveTerms):
+                raise TypeError("effective_terms must contain EffectiveTerms values.")
+            terms.validate_for(self)
+        projected_labels: set[str] = set()
+        for terms in self._effective_terms:
+            if terms.projection is not None:
+                if projected_labels.intersection(terms.labels):
+                    raise ValueError("Retained operator projections cannot overlap; compose them first.")
+                projected_labels.update(terms.labels)
+        if len({terms.label for terms in self._effective_terms}) != len(self._effective_terms):
+            raise ValueError("Effective contribution labels must be unique.")
         self._couplings = tuple(couplings) if couplings else ()
         coupling_labels = [c.label for c in self._couplings]
         dup = [lbl for lbl, n in Counter(coupling_labels).items() if n > 1]
@@ -244,16 +263,9 @@ class Chip:
             raise TypeError(
                 f"Expected a PortNetwork, got {type(port_network).__name__}: {port_network!r}"
             )
-        network_ports = () if port_network is None else port_network.ports
-        port_duplicates = [lbl for lbl, n in Counter(port.label for port in network_ports).items() if n > 1]
-        if port_duplicates:
-            raise ValueError(f"Duplicate port labels: {port_duplicates}. Each port must have a unique label.")
-        for port in network_ports:
-            if not isinstance(port, Port):
-                raise TypeError(f"Expected a Port, got {type(port).__name__}: {port!r}")
-            port.resolve_targets(self)
+        if port_network is not None:
+            port_network.validate_for(self)
         self._port_network = port_network
-        self._ports = tuple(network_ports)
         if basis not in ("native", "eigen"):
             raise ValueError(f"basis must be 'native' or 'eigen', got {basis!r}")
         self._basis = basis
@@ -271,9 +283,6 @@ class Chip:
                 )
         self._control_equipment = control_equipment
         self._analysis = ChipAnalysis(self)
-
-        for device in self._devices:
-            device._attach_chip(self)
 
         for coupling in self._couplings:
             coupling._resolve_devices(self._device_map)
@@ -325,11 +334,14 @@ class Chip:
             Symbolic Hamiltonian on ``⨂_d H_d``. Call ``.matrix()`` for a
             dense numerical view using current bindings.
         """
+        from quchip.declarative.parameters import component_fingerprint
+
         backend = self.backend
         signature = (
             type(backend).__qualname__,
-            tuple((d.label, d.state_version) for d in self._devices),
-            tuple((c.label, c.state_version) for c in self._couplings),
+            tuple(component_fingerprint(d) for d in self._devices),
+            tuple(component_fingerprint(c) for c in self._couplings),
+            tuple(id(terms) for terms in self.effective_terms),
         )
         cache = self._unresolved_hamiltonian_cache
         if cache is not None and cache[0] == signature and not contains_tracer(cache[1]):
@@ -367,6 +379,8 @@ class Chip:
                 H = H + h_int.embed(labels, self.authored_dims)
 
         assert H is not None
+        for terms in self.effective_terms:
+            H = H + terms.expression().embed(labels, self.authored_dims)
         # Do not cache expressions whose values belong to a JAX trace.
         if not contains_tracer(H.numeric_values()):
             self._unresolved_hamiltonian_cache = (signature, H)
@@ -388,10 +402,19 @@ class Chip:
         snapshot only. ``approximation=None`` likewise uses the chip default.
         Neither override mutates chip intent.
         """
+        return self._resolve(frame=frame, approximation=approximation)
+
+    def _resolve(
+        self, *, frame: FrameSpec | None = None, approximation: Approximation | None = None,
+        _resolution: Any = None,
+    ) -> EngineResult:
+        """Resolve with optional preparation supplied by frame planning."""
         from quchip.engine.assembly import (
             _prepare_engine_assembly,
             build_engine_result,
         )
+
+        from quchip.declarative.parameters import component_fingerprint
 
         frame_spec = self.frame if frame is None else frame
         strategy = self.approximation if approximation is None else require_approximation(approximation)
@@ -403,7 +426,7 @@ class Chip:
                 strategy,
                 self.basis,
                 _frame_cache_value(frame_spec),
-                tuple((device.label, device.state_version) for device in self.devices),
+                tuple(component_fingerprint(device) for device in self.devices),
                 tuple(
                     (device.label, _concrete_cache_value(device._reference_freq_override))
                     for device in self.devices
@@ -412,7 +435,8 @@ class Chip:
                     (device.label, id(type(device).dissipation))
                     for device in self.devices
                 ),
-                tuple((coupling.label, coupling.state_version) for coupling in self.couplings),
+                tuple(component_fingerprint(coupling) for coupling in self.couplings),
+                tuple(terms.fingerprint() for terms in self.effective_terms),
                 tuple(
                     (
                         line.label,
@@ -457,7 +481,7 @@ class Chip:
         if signature is not None and cache is not None and cache[0] == signature:
             return cache[1]
 
-        local_resolution, resolved_frame = _prepare_engine_assembly(self, frame_spec, strategy)
+        local_resolution, resolved_frame = _prepare_engine_assembly(self, frame_spec, strategy, resolution=_resolution)
         result = build_engine_result(
             self,
             [],
@@ -619,6 +643,11 @@ class Chip:
                             bath,
                         )
                     )
+            for terms in self.effective_terms:
+                support = tuple(self._label_to_index[label] for label in terms.labels)
+                for channel in terms.channels:
+                    out.append((terms.expression(channel.operator), channel.rate, support,
+                                terms.label, channel.name, (), terms))
             for port in self.ports:
                 support = tuple(self._label_to_index[label] for label in port.resolve_targets(self))
                 for channel, parameter_paths in port._collapse_channels_with_paths(self):
@@ -633,11 +662,40 @@ class Chip:
                             port,
                         )
                     )
+        projections = [terms.projection for terms in self.effective_terms if terms.projection is not None]
+        if projections:
+            from quchip.declarative.expr import materialize_expr
+
+            projected = []
+            labels = tuple(device.label for device in self.devices)
+            for operator, rate, support, source, channel_name, paths, owner in out:
+                if not isinstance(owner, EffectiveTerms) and not (
+                    isinstance(owner, Bath) and owner._retained is not None
+                ):
+                    operator_labels = tuple(labels[index] for index in support) if support else labels
+                    for projection in projections:
+                        if set(operator_labels) <= set(projection.target_labels):
+                            local = backend.to_array(materialize_expr(operator, backend, local_bases=bases))
+                            owner_key = f"port:{owner.label}" if isinstance(owner, Port) else None
+                            operator = projection.apply(local, operator_labels, owner_key)
+                            support = tuple(self._label_to_index[label] for label in projection.target_labels)
+                            break
+                        if set(operator_labels) & set(projection.target_labels):
+                            raise NotImplementedError("A collapse operator spans a partial retained projection.")
+                projected.append((operator, rate, support, source, channel_name, paths, owner))
+            return projected
         return out
 
     # ------------------------------------------------------------------
     # Structural properties
     # ------------------------------------------------------------------
+
+    @property
+    def effective_terms(self) -> tuple[EffectiveTerms, ...]:
+        """Captured retained Hamiltonian and loss contributions."""
+        for terms in self._effective_terms:
+            terms.validate_for(self)
+        return self._effective_terms
 
     @property
     def device_map(self) -> dict[str, BaseDevice]:
@@ -726,7 +784,7 @@ class Chip:
     @property
     def total_dim(self) -> int:
         """Total Hilbert-space dimension (product of per-device :attr:`dims`)."""
-        return int(np.prod(self.dims, dtype=int))
+        return prod(self.dims)
 
     @property
     def baths(self) -> tuple[Bath, ...]:
@@ -736,7 +794,7 @@ class Chip:
     @property
     def ports(self) -> tuple[Port, ...]:
         """Accessible Markovian input-output channels, in declaration order."""
-        return self._ports
+        return () if self._port_network is None else self._port_network.ports
 
     @property
     def port_network(self) -> PortNetwork | None:
@@ -746,10 +804,10 @@ class Chip:
     def port(self, port: str | Port) -> Port:
         """Return one declared port by object or label."""
         label = resolve_label(port)
-        for candidate in self._ports:
+        for candidate in self.ports:
             if candidate.label == label:
                 return candidate
-        raise KeyError(f"No port labeled '{label}'. Available: {[candidate.label for candidate in self._ports]}")
+        raise KeyError(f"No port labeled '{label}'. Available: {[candidate.label for candidate in self.ports]}")
 
     def connect_network(self, network: PortNetwork) -> None:
         """Attach the chip's one complete accessible field boundary."""
@@ -761,14 +819,12 @@ class Chip:
             )
         network.validate_for(self)
         self._port_network = network
-        self._ports = network.ports
         self._resolved_result_cache = None
 
     def disconnect_network(self) -> PortNetwork | None:
         """Detach and return the accessible field boundary."""
         network = self._port_network
         self._port_network = None
-        self._ports = ()
         self._resolved_result_cache = None
         return network
 
@@ -801,6 +857,10 @@ class Chip:
         """
         if not isinstance(bath, Bath):
             raise TypeError(f"Expected a Bath, got {type(bath).__name__}: {bath!r}")
+        if bath._retained is not None:
+            size = int(np.prod(self.authored_dims))
+            if any(op.shape != (size, size) for _, *operators in bath._retained.values() for op in operators):
+                raise ValueError("Retained bath operators do not match this chip's authored dimensions.")
         unknown = [lbl for lbl in bath.resolve_targets(self) if lbl not in self._device_map]
         if unknown:
             raise ValueError(
@@ -879,27 +939,22 @@ class Chip:
                 )
             targets[label] = {name: given.get(name) for name in names}
 
-        for label, target in targets.items():
-            device = self._device_map[label]
-            _validate_noise_params(target.get("T1"), target.get("T2"), target.get("thermal_population"))
-            fields = getattr(type(device), "__quchip_param_fields__", {})
-            for name, value in target.items():
-                spec = fields.get(name)
-                if spec is not None:
-                    validate_sign(name, spec, value)
-
-        # Apply: ordinary tracked writes; only real changes touch a device,
-        # so an identical call is a true no-op (no state_version bumps).
         changes: list[str] = []
+        candidates = {}
         for label, target in targets.items():
             device = self._device_map[label]
-            for name in sorted(target, key=lambda n: n == "T2"):  # T2 last: its validator reads the final T1
+            updates = {}
+            for name, new in target.items():
                 old = getattr(device, name, None)
-                new = target[name]
                 if _same_concrete_value(old, new):
                     continue
-                setattr(device, name, new)
+                updates[name] = new
                 changes.append(f"{label}: {name} {old!r} → {new!r}")
+            if updates:
+                candidates[label] = device._parameter_candidate(updates)
+
+        for label, candidate in candidates.items():
+            self._device_map[label]._commit_parameter_candidate(candidate)
 
         old_ids = {id(bath) for bath in self._baths}
         new_ids = {id(bath) for bath in new_baths}
@@ -1308,7 +1363,7 @@ class Chip:
         for index, bath in enumerate(self._baths):
             for name, value in bath.parameter_values().items():
                 add(f"bath.{bath.label}.{name}", ("bath", index, name, value))
-        for index, port in enumerate(self._ports):
+        for index, port in enumerate(self.ports):
             for name, value in port.parameter_values().items():
                 add(f"port.{port.label}.{name}", ("port", index, name, value))
         if self._port_network is not None:
@@ -1361,7 +1416,7 @@ class Chip:
                 ),
                 "ports": tuple(
                     (port.label, tuple(port.resolve_targets(self)))
-                    for port in self._ports
+                    for port in self.ports
                 ),
                 "port_network": (
                     None
@@ -1380,6 +1435,8 @@ class Chip:
 
     def with_params(self, bindings: Mapping[str, Any]) -> "Chip":
         """Return an isolated structural copy with component-owned values rebound."""
+        from quchip.utils.values import copy_value
+
         targets = self._parameter_targets()
         unknown = set(bindings) - set(targets)
         if unknown:
@@ -1390,7 +1447,8 @@ class Chip:
 
         cloned = self.clone()
         device_bindings: dict[int, dict[str, Any]] = {}
-        for path, value in bindings.items():
+        changed_transforms: dict[int, SignalTransform] = {}
+        for path, value in copy_value(dict(bindings)).items():
             kind, index, name, _ = targets[path]
             if kind == "device":
                 device_bindings.setdefault(index, {})[name] = value
@@ -1402,16 +1460,19 @@ class Chip:
             elif kind == "control":
                 assert cloned._control_equipment is not None
                 transform = cloned._control_equipment._signal_chain[index]
-                cloned._control_equipment._signal_chain[index] = transform.with_parameter_value(name, value)
+                setattr(transform, name, value)
+                changed_transforms[index] = transform
             elif kind == "bath":
                 cloned._baths[index].set_parameter_value(name, value)
             elif kind == "network":
                 assert cloned._port_network is not None
                 cloned._port_network.set_parameter_value(name, value)
             else:
-                cloned._ports[index].set_parameter_value(name, value)
+                cloned.ports[index].set_parameter_value(name, value)
         for index, local_bindings in device_bindings.items():
             cloned._devices[index].set_parameter_values(local_bindings)
+        for transform in changed_transforms.values():
+            transform.validate()
         return cloned
 
     def partition(self) -> "PartitionResult":
@@ -1439,12 +1500,15 @@ class Chip:
         print("- device list:")
         for dev in self._devices:
             bare_freq = getattr(dev, "freq", None)
-            connected = sorted(d.label for d in getattr(dev, "_connected_drives", []))
+            connected = sorted(
+                line.label for line in self.control_equipment.lines
+                if not isinstance(line, CouplingDrive) and line.target_label == dev.label
+            ) if self.control_equipment is not None else []
             line_text = ", ".join(connected) if connected else "none"
             print(
                 f"  - {dev.label}: {type(dev).__name__} "
                 f"(freq={_format_float(bare_freq)} GHz, "
-                f"dressed={_format_float(dev.dressed_freq)} GHz, "
+                f"dressed={_format_float(self.freq(dev))} GHz, "
                 f"levels={dev.levels}, lines={line_text})"
             )
         print("- couplings:")
@@ -1844,7 +1908,10 @@ class Chip:
             truncation_threshold=truncation_threshold,
         )
 
-    def solve_many(self, batch_or_problems: Any, *, progress: bool = True) -> "SimulationBatchResult":
+    def solve_many(
+        self, batch_or_problems: Any, *, progress: bool = True,
+        check_truncation: bool = True, truncation_threshold: float = 1e-3,
+    ) -> "SimulationBatchResult":
         """Solve a :class:`SolveBatch` or list of problems.
 
         Chip-level validation only enforces what needs ``self`` (every input
@@ -1863,7 +1930,8 @@ class Chip:
             for i, problem in enumerate(batch_or_problems):
                 self._check_problem(problem, index=i)
 
-        return solve_many(batch_or_problems, progress=progress)
+        return solve_many(batch_or_problems, progress=progress,
+                          check_truncation=check_truncation, truncation_threshold=truncation_threshold)
 
     def steadystate(
         self,

@@ -25,7 +25,8 @@ def _readout_chip(*, phase_shift: float | None = None) -> tuple[Chip, float]:
         [Capacitive(qubit, resonator, g=0.04, label="qr")],
         port_network=network,
     )
-    return chip, 0.03 * (0.04 / (5.0 - 6.0)) ** 2
+    # The retained jump uses exp(-S), whose one-excitation transfer is sin(g/Delta).
+    return chip, 0.03 * np.sin(0.04 / (5.0 - 6.0)) ** 2
 
 
 def test_eliminate_retargets_port_without_double_counting_purcell() -> None:
@@ -64,20 +65,20 @@ def test_exact_elimination_also_retains_the_network_boundary() -> None:
 
     hamiltonian = np.asarray(chip.unresolved_hamiltonian().matrix(), dtype=complex)
     _, eigenvectors = np.linalg.eigh(hamiltonian)
-    ground_index = int(np.argmax(np.abs(eigenvectors[0, :]) ** 2))
-    qubit_index = int(np.argmax(np.abs(eigenvectors[3, :]) ** 2))
-    ground = eigenvectors[:, ground_index]
-    excited = eigenvectors[:, qubit_index]
-    ground *= np.conj(ground[0]) / np.abs(ground[0])
-    excited *= np.conj(excited[3]) / np.abs(excited[3])
+    kept = np.array([0, 3, 6])
+    selected = np.argmax(np.abs(eigenvectors[kept]) ** 2, axis=1)
+    overlap = eigenvectors[np.ix_(kept, selected)]
+    values, vectors = np.linalg.eigh(overlap @ overlap.conj().T)
+    inverse_sqrt = (vectors * values ** -.5) @ vectors.conj().T
+    embedding = eigenvectors[:, selected] @ (inverse_sqrt @ overlap).conj().T
     lowering = np.diag(np.sqrt(np.arange(1, 3)), 1)
     mode_lowering = np.kron(np.eye(3), lowering)
-    expected = np.sqrt(0.03) * np.exp(0.2j) * np.vdot(ground, mode_lowering @ excited)
+    expected = np.sqrt(0.03) * np.exp(0.2j) * embedding.conj().T @ mode_lowering @ embedding
 
     reduced = eliminate(chip, "r", method="exact").chip
 
     assert reduced.port_network is not None
-    actual = reduced.resolve().slh.external_channels[0].coupling.to_dense()[0, 1]
+    actual = reduced.resolve().slh.external_channels[0].coupling.to_dense()
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
 
 
@@ -102,7 +103,7 @@ def test_transformed_port_is_differentiable_in_coupling_strength() -> None:
 
     gradient = jax.grad(effective_rate)(jnp.asarray(0.04))
 
-    np.testing.assert_allclose(gradient, 2.0 * 0.03 * 0.04, rtol=1e-5)
+    np.testing.assert_allclose(gradient, 0.03 * np.sin(2.0 * 0.04), rtol=1e-5)
 
 
 def test_eliminate_rejects_port_connected_nonlinear_target() -> None:

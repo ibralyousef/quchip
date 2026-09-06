@@ -66,7 +66,11 @@ class TestAssignmentPolicies:
         indices, _, _ = assign_argmax(overlaps)
         assert indices.tolist() == [0, 1, 1, 3]
 
-        # The full-kernel path also surfaces duplicates via one-hot counts.
+        repeated = label_eigensystem(jnp.sqrt(overlaps), BareProductReference(dims=(2, 2)),
+                                      policy=assign_argmax)
+        assert repeated.duplicates.tolist() == [False, True, True, False]
+
+        # Identity overlaps give each row a unique dressed match.
         evecs = jnp.eye(4, dtype=jnp.float32)
         labeling = label_eigensystem(
             evecs, BareProductReference(dims=(2, 2)), policy=assign_argmax,
@@ -119,6 +123,37 @@ class TestAssignmentPolicies:
 
 
 class TestReferences:
+    def test_local_product_factors_match_explicit_complex_reference(self) -> None:
+        dims = (2, 3, 2)
+        def unitary(seed, dimension):
+            key = jax.random.PRNGKey(seed)
+            matrix = jax.random.normal(key, (dimension, dimension)) + 1j * jax.random.normal(
+                jax.random.fold_in(key, 1), (dimension, dimension))
+            return jnp.linalg.qr(matrix)[0]
+
+        first, last = unitary(0, 2), unitary(1, 2)
+        vectors = unitary(2, 12)[:, :7]
+        reference = BareProductReference(dims=dims, local_vectors=(first, None, last))
+        product = jnp.kron(jnp.kron(first, jnp.eye(3)), last)
+        expected = jnp.abs(product.conj().T @ vectors) ** 2
+        assert jnp.allclose(compute_overlaps(reference, vectors), expected, atol=1e-12)
+        assert reference.keys[7] == (1, 0, 1)
+
+    def test_local_product_reference_gradients_match_explicit_tensor_product(self) -> None:
+        def objective(angle, factored):
+            rotation = jnp.array([[jnp.cos(angle), -1j * jnp.sin(angle)],
+                                  [-1j * jnp.sin(angle), jnp.cos(angle)]])
+            vectors = jnp.eye(6, dtype=complex)
+            product = jnp.kron(rotation, jnp.eye(3))
+            reference = (BareProductReference((2, 3), local_vectors=(rotation, None)) if factored
+                         else EigenstateReference(product.T, keys=tuple(range(6))))
+            return jnp.sum(jnp.arange(36).reshape(6, 6) ** 2 * compute_overlaps(reference, vectors))
+
+        actual = jax.jit(jax.value_and_grad(lambda angle: objective(angle, True)))(0.3)
+        expected = jax.jit(jax.value_and_grad(lambda angle: objective(angle, False)))(0.3)
+        assert abs(expected[1]) > 1.0
+        assert jnp.allclose(jnp.asarray(actual), jnp.asarray(expected), atol=1e-10)
+
     def test_bare_product_overlaps_match_column_squared_amplitudes(self) -> None:
         """Bare-product reference overlaps equal the squared magnitudes of the eigenvector columns."""
         H = _two_qubit_H(jnp.float32(0.2))

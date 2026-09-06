@@ -38,7 +38,6 @@ import numpy as np
 
 from quchip.backend import EigensystemData, Operator, State, _backend_context
 from quchip.chip.dressing import (
-    EigenstateReference,
     Labeling,
     assign_rowwise_greedy,
     label_eigensystem,
@@ -233,7 +232,7 @@ def dress_engine_result(
     context = result._dressing_context
     backend = context.backend
     hamiltonian = result.hamiltonian().matrix(t=at_time, backend=backend)
-    if contains_tracer((hamiltonian, context.reference_vectors)):
+    if contains_tracer((hamiltonian, context.reference.local_vectors)):
         raise RuntimeError(_DRESS_TRACING_ERROR)
     native_hamiltonian = backend.from_array(
         hamiltonian,
@@ -242,13 +241,9 @@ def dress_engine_result(
     eigensystem = backend.eigensystem_data(native_hamiltonian)
     eigenvalues = eigensystem.eigenvalues
     eigenvector_matrix = eigensystem.eigenvector_matrix
-    reference = EigenstateReference(
-        vectors=context.reference_vectors,
-        keys=context.reference_keys,
-    )
     kernel_labeling = label_eigensystem(
         jnp.asarray(eigenvector_matrix),
-        reference,
+        context.reference,
         policy=assign_rowwise_greedy,
     )
     return _materialize_dressed_result(
@@ -318,6 +313,37 @@ jtu.register_pytree_node(
 )
 
 
+def kerr_entry(
+    index_a: int,
+    index_b: int,
+    *,
+    dims: tuple[int, ...],
+    eigenvalues: Any,
+    labeling: Labeling,
+) -> Any:
+    """Read one self- or cross-Kerr coefficient from a captured labeled spectrum."""
+    n_devices = len(dims)
+    if not 0 <= index_a < n_devices or not 0 <= index_b < n_devices:
+        raise IndexError(f"Kerr matrix indices must be in [0, {n_devices}), got {(index_a, index_b)}.")
+
+    def energy(*excitations: tuple[int, int]) -> Any:
+        label = [0] * n_devices
+        for index, level in excitations:
+            label[index] = level
+        row = np.ravel_multi_index(tuple(label), dims)
+        eigen_index = labeling.indices[row]
+        values = jnp.asarray(eigenvalues) if contains_tracer(eigen_index) else eigenvalues
+        return values[eigen_index]
+
+    e0 = energy()
+    if index_a == index_b:
+        if dims[index_a] < 3:
+            dtype = jnp.real(jnp.asarray(eigenvalues)).dtype
+            return jnp.asarray(jnp.nan, dtype=dtype)
+        return energy((index_a, 2)) - 2.0 * energy((index_a, 1)) + e0
+    return energy((index_a, 1), (index_b, 1)) - energy((index_a, 1)) - energy((index_b, 1)) + e0
+
+
 class ChipAnalysis:
     """Dressed-state analysis, caching, and dressed-basis helpers.
 
@@ -352,6 +378,7 @@ class ChipAnalysis:
         result is never cached anyway.
         """
         from quchip.chip.chip import _operator_cache_value
+        from quchip.declarative.parameters import component_fingerprint
 
         chip = self._chip
 
@@ -373,13 +400,13 @@ class ChipAnalysis:
         return (
             f"{type(chip.backend).__module__}.{type(chip.backend).__qualname__}",
             chip.basis,
-            tuple((device.label, device.state_version) for device in chip.devices),
+            tuple(component_fingerprint(device) for device in chip.devices),
             tuple(
                 (
                     f"{type(coupling).__module__}.{type(coupling).__qualname__}",
                     coupling.device_a_label,
                     coupling.device_b_label,
-                    coupling.state_version,
+                    component_fingerprint(coupling),
                 )
                 for coupling in chip.couplings
             ),
@@ -522,7 +549,6 @@ class ChipAnalysis:
         ):
             return self._array_cache
 
-        from quchip.engine.basis import semantic_to_solver_transform
         from quchip.engine.assembly import _analysis_matrix_ghz
 
         if engine_result is None:
@@ -543,21 +569,10 @@ class ChipAnalysis:
         evals_jax = jnp.asarray(eigenvalues)
         evecs_jax = jnp.asarray(eigenvector_matrix)
 
-        local_vectors: list[Any] = []
-        for device in chip.devices:
-            record = engine_result.bases[device.label]
-            transform = semantic_to_solver_transform(device, record)
-            if transform is None:
-                transform = jnp.eye(record.resolved_dim, dtype=jnp.complex128)
-            local_vectors.append(transform)
-        product_vectors = local_vectors[0]
-        for vectors in local_vectors[1:]:
-            product_vectors = jnp.kron(product_vectors, vectors)
-        reference = EigenstateReference(
-            vectors=product_vectors.T,
-            keys=tuple(itertools.product(*(range(dimension) for dimension in dims))),
-        )
-        labeling = label_eigensystem(evecs_jax, reference, policy=assign_rowwise_greedy)
+        context = engine_result._dressing_context
+        if context is None:
+            raise RuntimeError("Resolved analysis is missing its captured dressing reference.")
+        labeling = label_eigensystem(evecs_jax, context.reference, policy=assign_rowwise_greedy)
 
         # The 3rd slot carries the EigensystemData (lazy eigenstates) rather than
         # a materialized ket list — nothing on the hot path reads it. The cache
@@ -1077,43 +1092,13 @@ class ChipAnalysis:
         index_a, _ = self._chip._resolve_device_index(device_a)
         index_b, _ = self._chip._resolve_device_index(device_b)
         eigenvalues, _, _, kernel_labeling = self._compute_array_labeled()
-        return self._kerr_entry(
+        return kerr_entry(
             index_a,
             index_b,
+            dims=self._semantic_dims(),
             eigenvalues=eigenvalues,
             labeling=kernel_labeling,
         )
-
-    def _kerr_entry(
-        self,
-        index_a: int,
-        index_b: int,
-        *,
-        eigenvalues: Any,
-        labeling: Labeling,
-    ) -> Any:
-        """Evaluate one dressed Kerr coefficient from a labeled eigensystem."""
-        n_devices = len(self._chip.devices)
-        if not 0 <= index_a < n_devices or not 0 <= index_b < n_devices:
-            raise IndexError(f"Kerr matrix indices must be in [0, {n_devices}), got {(index_a, index_b)}.")
-
-        precomputed = (eigenvalues, labeling)
-        ground = (0,) * n_devices
-
-        def energy(*excitations: tuple[int, int]) -> Any:
-            label = list(ground)
-            for index, level in excitations:
-                label[index] = level
-            return self._eigenvalue_of_label(tuple(label), precomputed=precomputed)
-
-        e0 = energy()
-        if index_a == index_b:
-            if self._semantic_dims()[index_a] < 3:
-                dtype = jnp.real(jnp.asarray(eigenvalues)).dtype
-                return jnp.asarray(jnp.nan, dtype=dtype)
-            return energy((index_a, 2)) - 2.0 * energy((index_a, 1)) + e0
-
-        return energy((index_a, 1), (index_b, 1)) - energy((index_a, 1)) - energy((index_b, 1)) + e0
 
     def kerr_matrix(self) -> KerrMatrix:
         """Return the dressed self-Kerr and cross-Kerr matrix in GHz.
@@ -1131,9 +1116,10 @@ class ChipAnalysis:
         for row in range(n_devices):
             for column in range(row, n_devices):
                 entry = jnp.real(
-                    self._kerr_entry(
+                    kerr_entry(
                         row,
                         column,
+                        dims=self._semantic_dims(),
                         eigenvalues=eigenvalues,
                         labeling=labeling,
                     )
@@ -1198,9 +1184,10 @@ class ChipAnalysis:
         """Dressed anharmonicity (GHz): ``E_2 − 2·E_1 + E_0``, others grounded."""
         index, _ = self._chip._resolve_device_index(device)
         eigenvalues, _, _, kernel_labeling = self._compute_array_labeled()
-        return self._kerr_entry(
+        return kerr_entry(
             index,
             index,
+            dims=self._semantic_dims(),
             eigenvalues=eigenvalues,
             labeling=kernel_labeling,
         )

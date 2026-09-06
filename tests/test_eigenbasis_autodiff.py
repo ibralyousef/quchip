@@ -62,3 +62,42 @@ def test_eigenvector_tangent_is_orthogonal_to_the_eigenvector() -> None:
     (_, vectors), (_, dvectors) = jax.jvp(lambda m: _differentiable_eigenpairs(m, 3), (matrix,), (direction,))
     connection = jnp.diagonal(jnp.conj(vectors).T @ dvectors)
     np.testing.assert_allclose(np.asarray(connection), 0.0, atol=1e-10)
+
+
+@pytest.mark.parametrize("origin", [-1e8, 1e8])
+def test_eigenprojector_derivative_is_independent_of_energy_origin(origin: float) -> None:
+    """An identity energy shift cannot suppress a nondegenerate physical response."""
+    matrix = jnp.array([[0.0, 0.02], [0.02, 0.04]])
+    direction = jnp.array([[0.0, 1.0], [1.0, 0.0]])
+
+    def projector(m):
+        _, vectors = _differentiable_eigenpairs(m, 1)
+        return vectors @ vectors.conj().T
+
+    step = 1e-6
+    finite_difference = (projector(matrix + step * direction) - projector(matrix - step * direction)) / (2 * step)
+    shifted = matrix + origin * jnp.eye(2)
+    _, tangent = jax.jvp(projector, (shifted,), (direction,))
+    np.testing.assert_allclose(tangent, finite_difference, rtol=1e-6, atol=1e-6)
+
+
+def test_canonical_energy_vector_phase_and_derivative_agree():
+    """The largest authored component is positive and its local phase derivative is correct."""
+    from quchip.engine.basis import resolve_local_basis
+
+    def vectors(value):
+        matrix = jnp.array([[0.0, value - 0.2j], [value + 0.2j, 1.0]])
+        return resolve_local_basis(matrix).energy_vectors
+
+    value = 0.3
+    actual = vectors(value)
+    pivots = actual[jnp.argmax(jnp.abs(actual), axis=0), jnp.arange(2)]
+    np.testing.assert_allclose(pivots.imag, 0.0, atol=1e-12)
+    assert np.all(np.asarray(pivots.real) > 0)
+    step = 1e-5
+    finite_difference = (vectors(value + step) - vectors(value - step)) / (2 * step)
+    np.testing.assert_allclose(jax.jacfwd(vectors)(value), finite_difference, atol=1e-8)
+    def loss(x):
+        return jnp.real(vectors(x)[0, 1])
+    reference = (loss(value + step) - loss(value - step)) / (2 * step)
+    np.testing.assert_allclose(jax.jit(jax.grad(loss))(value), reference, atol=1e-8)

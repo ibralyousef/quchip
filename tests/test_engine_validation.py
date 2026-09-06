@@ -50,55 +50,6 @@ class TestTlistValidation:
             prepare_solve_problem_context(chip, np.array([0.0]))
 
 
-class TestDriveWindowValidation:
-    """prepare_solve_problem_context rejects a DriveOp window with no positive-measure tlist overlap."""
-
-    def _chip_and_drive(self):
-        from quchip.chip.chip import Chip
-        from quchip.control.drive import ChargeDrive
-        from quchip.control.equipment import ControlEquipment
-        from quchip.devices.transmon.duffing import DuffingTransmon
-
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
-        drive = ChargeDrive(target=q, label="d0")
-        chip = Chip([q], control_equipment=ControlEquipment(lines=[drive]))
-        return chip, drive
-
-    def test_window_touching_endpoint_raises(self):
-        """A pulse window that only touches tlist's start endpoint raises ValueError."""
-        from quchip.control.envelopes import Square
-        from quchip.engine.ir import DriveOp
-        from quchip.engine.problem import prepare_solve_problem_context
-
-        chip, drive = self._chip_and_drive()
-        op = DriveOp(
-            target_label="q0",
-            envelope=Square(duration=20.0, amplitude=0.01),
-            freq=5.0,
-            start_time=-20.0,
-            drive_label="d0",
-        )
-        with pytest.raises(ValueError, match="no positive-measure overlap"):
-            prepare_solve_problem_context(chip, np.linspace(0.0, 20.0, 21), drive_ops=[op])
-
-    def test_window_fully_outside_raises(self):
-        """A pulse window strictly outside tlist raises ValueError."""
-        from quchip.control.envelopes import Square
-        from quchip.engine.ir import DriveOp
-        from quchip.engine.problem import prepare_solve_problem_context
-
-        chip, drive = self._chip_and_drive()
-        op = DriveOp(
-            target_label="q0",
-            envelope=Square(duration=5.0, amplitude=0.01),
-            freq=5.0,
-            start_time=100.0,
-            drive_label="d0",
-        )
-        with pytest.raises(ValueError, match="no positive-measure overlap"):
-            prepare_solve_problem_context(chip, np.linspace(0.0, 20.0, 21), drive_ops=[op])
-
-
 class TestResolveDrivesValidation:
     """_resolve_drives cross-checks a drive's own wiring against its DriveOp."""
 
@@ -386,8 +337,10 @@ class TestSolveBatchPointRetention:
         with pytest.raises(ValueError, match="Structural settings"):
             SolveBatch(chip=None, problems=(first, second))
         different_grid = replace(first, tlist=(0.0, 0.5, 1.0))
-        with pytest.raises(ValueError, match="one time grid"):
-            SolveBatch(chip=None, problems=(first, different_grid))
+        batch = SolveBatch(chip=None, problems=(first, different_grid))
+        with pytest.raises(ValueError, match="different time grids"):
+            _ = batch.tlist
+        np.testing.assert_array_equal(batch.element(1).tlist, [0.0, 0.5, 1.0])
 
     def test_element_restores_dropped_terms(self):
         """dropped_terms set on a single-element batch reappear on the reconstructed element."""

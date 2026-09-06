@@ -20,6 +20,7 @@ from quchip.engine.reference import (
 )
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar, select_array_module
 from quchip.utils.labeling import auto_label, resolve_label
+from quchip.utils.values import copy_value
 
 if TYPE_CHECKING:
     from quchip.control.field import CoherentInput
@@ -61,6 +62,9 @@ class SLHComponent:
         default=(), repr=False, compare=False
     )
     _row_inputs: tuple[tuple[int, ...], ...] | None = field(default=None, repr=False, compare=False)
+    _kind: str = field(default="scattering", repr=False)
+    _parameters: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    _transfer: Callable[..., Any] | None = field(default=None, repr=False, compare=False)
 
     def side(self, name: str | int) -> "FieldSide":
         """Return the physical side whose input and output terminals share ``name``."""
@@ -287,6 +291,21 @@ class _AffineField:
     support: list[bool]
 
 
+@dataclass(frozen=True)
+class _CompiledChannel:
+    exposure: FieldExposure
+    coupling: Mapping[str, Any]
+    reference: ReferencePlane
+
+
+@dataclass(frozen=True)
+class _CompiledNetwork:
+    channels: tuple[_CompiledChannel, ...]
+    scattering: Any
+    generated_pairs: tuple[tuple[str, str, Any], ...]
+    support: np.ndarray
+
+
 class PortNetwork:
     """Ports and an instantaneous scalar-S field-routing graph with algebraic feedback."""
 
@@ -316,9 +335,6 @@ class PortNetwork:
             self._authored_scattering = scattering
         self._components: dict[str, SLHComponent] = {}
         self._ports: list[Port] = []
-        self._component_kinds: dict[str, str] = {}
-        self._component_parameters: dict[str, dict[str, Any]] = {}
-        self._component_transfers: dict[str, Callable[..., Any]] = {}
         self._connections: dict[TerminalKey, TerminalKey] = {}
         self._used_outputs: dict[TerminalKey, TerminalKey] = {}
         self._exposures: list[FieldExposure] = []
@@ -369,7 +385,7 @@ class PortNetwork:
     @property
     def S(self) -> Any:
         """Return the composed instantaneous scalar scattering matrix."""
-        return self._compile()[1]
+        return self._compile().scattering
 
     @property
     def parameters(self) -> Mapping[str, Any]:
@@ -378,9 +394,9 @@ class PortNetwork:
         if isinstance(self._authored_scattering, Mapping):
             for (output, input_), value in self._authored_scattering.items():
                 values[f"scattering.{resolve_label(output)}.{resolve_label(input_)}"] = value
-        for label, parameters in self._component_parameters.items():
-            for name, value in parameters.items():
-                values[f"component.{label}.{name}"] = value
+        for component in self.components:
+            for name, value in component._parameters.items():
+                values[f"component.{component.label}.{name}"] = value
         return MappingProxyType(values)
 
     def set_parameter_value(self, name: str, value: Any) -> None:
@@ -396,9 +412,9 @@ class PortNetwork:
                 self._authored_scattering[key] = value
                 return
         if len(parts) == 3 and parts[0] == "component":
-            parameters = self._component_parameters.get(parts[1])
-            if parameters is not None and parts[2] in parameters:
-                parameters[parts[2]] = value
+            component = self._components.get(parts[1])
+            if component is not None and parts[2] in component._parameters:
+                component._parameters[parts[2]] = value
                 return
         raise KeyError(name)
 
@@ -432,6 +448,12 @@ class PortNetwork:
         terminals: Sequence[str] | None = None,
     ) -> SLHComponent:
         """Add a zero-coupling scalar scattering component."""
+        return self._scattering_component(label, scattering=scattering, terminals=terminals, kind="scattering")
+
+    def _scattering_component(
+        self, label: str, *, scattering: Any, terminals: Sequence[str] | None,
+        kind: str, parameters: dict[str, Any] | None = None,
+    ) -> SLHComponent:
         shape = getattr(scattering, "shape", None)
         if shape is None:
             shape = np.shape(scattering)
@@ -450,28 +472,25 @@ class PortNetwork:
             scattering=scattering,
             _network_token=self._token,
             _local_ports=tuple(None for _ in names),
+            _kind=kind,
+            _parameters={} if parameters is None else parameters,
         )
-        component = self._add_component(component)
-        self._component_kinds[label] = "scattering"
-        return component
+        return self._add_component(component)
 
     def through(self, label: str) -> SLHComponent:
         """Add a one-channel identity through component."""
-        component = self.component(label, scattering=[[1.0]], terminals=("signal",))
-        self._component_kinds[label] = "through"
-        return component
+        return self._scattering_component(label, scattering=[[1.0]], terminals=("signal",), kind="through")
 
     def phase_shift(self, label: str, *, phase: Any) -> SLHComponent:
         """Add a one-channel phase shift."""
         xp = select_array_module(contains_tracer(phase))
-        component = self.component(
+        return self._scattering_component(
             label,
             scattering=xp.asarray([[xp.exp(1j * xp.asarray(phase))]]),
             terminals=("signal",),
+            kind="phase_shift",
+            parameters={"phase": phase},
         )
-        self._component_kinds[label] = "phase_shift"
-        self._component_parameters[label] = {"phase": phase}
-        return component
 
     def beam_splitter(self, label: str, *, eta: Any = 0.5) -> SLHComponent:
         """Add a directional two-input/two-output splitter.
@@ -482,10 +501,9 @@ class PortNetwork:
         ``input_terminal()``, ``output_terminal()``, or ``cascade()``.
         """
         matrix = self._transmission_matrix(eta)
-        component = self.component(label, scattering=matrix, terminals=("left", "right"))
-        self._component_kinds[label] = "beam_splitter"
-        self._component_parameters[label] = {"eta": eta}
-        return component
+        return self._scattering_component(
+            label, scattering=matrix, terminals=("left", "right"), kind="beam_splitter", parameters={"eta": eta}
+        )
 
     def hybrid90(self, label: str) -> SLHComponent:
         """Add a directional two-input/two-output ideal 90-degree hybrid.
@@ -494,13 +512,12 @@ class PortNetwork:
         component has no physical sides; use ``input_terminal()``,
         ``output_terminal()``, or ``cascade()``.
         """
-        component = self.component(
+        return self._scattering_component(
             label,
             scattering=np.asarray([[1.0, 1j], [1j, 1.0]], dtype=complex) / np.sqrt(2.0),
             terminals=("left", "right"),
+            kind="hybrid90",
         )
-        self._component_kinds[label] = "hybrid90"
-        return component
 
     def permutation(self, label: str, *, order: Sequence[int]) -> SLHComponent:
         """Add an output permutation; ``order[row]`` selects the input column."""
@@ -531,11 +548,10 @@ class PortNetwork:
                 (name, name, f"hidden.{label}.{name}") for name in ("vacuum_1", "vacuum_2")
             ),
             _row_inputs=((1, 3), (0, 2), (0, 2), (1, 3)),
+            _kind="attenuator",
+            _parameters={"eta": eta},
         )
-        component = self._add_component(component)
-        self._component_kinds[label] = "attenuator"
-        self._component_parameters[label] = {"eta": eta}
-        return component
+        return self._add_component(component)
 
     def delay(self, label: str, *, duration: Any) -> SLHComponent:
         """Add a two-sided reference section with duration ``duration`` ns.
@@ -568,9 +584,7 @@ class PortNetwork:
         serialized with :meth:`to_dict`; ``Chip.clone()`` and ``Chip.with_params()``
         preserve the callable.
         """
-        component = self._reference_component(label, kind="filter", parameters=dict(parameters))
-        self._component_transfers[label] = transfer
-        return component
+        return self._reference_component(label, kind="filter", parameters=dict(parameters), transfer=transfer)
 
     def amplifier(self, label: str, *, gain: Any, added_noise: Any) -> SLHComponent:
         """Add a phase-preserving amplifier reference section to an output line.
@@ -592,7 +606,9 @@ class PortNetwork:
             label, kind="amplifier", parameters={"gain": gain, "added_noise": added_noise}
         )
 
-    def _reference_component(self, label: str, *, kind: str, parameters: dict[str, Any]) -> SLHComponent:
+    def _reference_component(
+        self, label: str, *, kind: str, parameters: dict[str, Any], transfer: Callable[..., Any] | None = None,
+    ) -> SLHComponent:
         component = SLHComponent(
             label=label,
             input_names=("1", "2"),
@@ -601,11 +617,11 @@ class PortNetwork:
             _network_token=self._token,
             sides=("1", "2"),
             _local_ports=(None, None),
+            _kind=kind,
+            _parameters=parameters,
+            _transfer=transfer,
         )
-        component = self._add_component(component)
-        self._component_kinds[label] = kind
-        self._component_parameters[label] = parameters
-        return component
+        return self._add_component(component)
 
     def circulator(self, label: str, *, ports: int = 3) -> SLHComponent:
         """Add an ideal circulator routing side ``k`` to side ``k + 1``.
@@ -657,10 +673,9 @@ class PortNetwork:
             _local_ports=(None,) * size,
             _hidden_pairs=hidden_pairs,
             _row_inputs=tuple((source,) for source in sources),
+            _kind=kind,
         )
-        component = self._add_component(component)
-        self._component_kinds[label] = kind
-        return component
+        return self._add_component(component)
 
     def connect(self, output: FieldTerminal, input: FieldTerminal) -> None:
         """Connect one component output to one component input."""
@@ -752,21 +767,22 @@ class PortNetwork:
                     component.label,
                     component.input_names,
                     component.output_names,
+                    component._kind,
                     self._cache_value(component.scattering),
                     tuple(
                         (name, self._cache_value(value))
-                        for name, value in self._component_parameters.get(component.label, {}).items()
+                        for name, value in component._parameters.items()
                     ),
+                    id(component._transfer),
                 )
                 for component in self.components
             ),
             tuple(self._connections.items()),
             tuple((item.label, item._input_key, item._output_key) for item in self._exposures),
-            tuple((label, id(transfer)) for label, transfer in self._component_transfers.items()),
             self._cache_value(self._authored_scattering),
         )
 
-    def resolve(self, base: "ResolvedSLH") -> "ResolvedSLH":
+    def resolve(self, base: "ResolvedSLH", *, _compiled: _CompiledNetwork | None = None) -> "ResolvedSLH":
         """Compose this boundary onto port channels in an input-free SLH value."""
         from quchip.engine.ir import (
             CollapseTerm,
@@ -786,30 +802,15 @@ class PortNetwork:
                 f"network={expected}, assembled={list(port_channels)}."
             )
 
-        exposures, scattering, coupling_maps, generated_pairs, planes, support = self._compile()
+        compiled = self._compile() if _compiled is None else _compiled
         operators = {label: port_channels[label].coupling for label in expected}
-        frame_frequencies = [
-            self._common_frame_frequency(
-                mapping,
-                port_channels,
-                boundary=f"exposure {exposure.label!r}",
-            )
-            for exposure, mapping in zip(exposures, coupling_maps, strict=True)
-        ]
-        resolved_couplings = [
-            self._materialize_coupling(mapping, operators, key=exposure.label)
-            for exposure, mapping in zip(exposures, coupling_maps, strict=True)
-        ]
-
         channels: list[SLHChannel] = []
-        for exposure, mapping, coupling, frame_frequency, plane in zip(
-            exposures,
-            coupling_maps,
-            resolved_couplings,
-            frame_frequencies,
-            planes,
-            strict=True,
-        ):
+        for entry in compiled.channels:
+            exposure, mapping = entry.exposure, entry.coupling
+            frame_frequency = self._common_frame_frequency(
+                mapping, port_channels, boundary=f"exposure {exposure.label!r}"
+            )
+            coupling = self._materialize_coupling(mapping, operators, key=exposure.label)
             if (
                 exposure.label in port_channels
                 and set(mapping) == {exposure.label}
@@ -820,7 +821,7 @@ class PortNetwork:
                         port_channels[exposure.label],
                         key=exposure.label,
                         accessibility="hidden" if exposure._hidden else "exposed",
-                        reference=plane,
+                        reference=entry.reference,
                     )
                 )
                 continue
@@ -837,26 +838,26 @@ class PortNetwork:
                     accessibility="hidden" if exposure._hidden else "exposed",
                     collapse=template,
                     coupling_operator=coupling,
-                    reference=plane,
+                    reference=entry.reference,
                 )
             )
 
-        generated = self._materialize_generated_hamiltonian(generated_pairs, operators)
+        generated = self._materialize_generated_hamiltonian(compiled.generated_pairs, operators)
         static_terms = base.H.static_terms
         if generated is not None:
             static_terms = (*static_terms, StaticTerm(operator=generated, origin="network"))
 
         hidden = base.hidden_channels
         full_size = len(channels) + len(hidden)
-        xp = select_array_module(contains_tracer(scattering))
+        xp = select_array_module(contains_tracer(compiled.scattering))
         full_support = np.eye(full_size, dtype=bool)
-        full_support[: len(channels), : len(channels)] = support
+        full_support[: len(channels), : len(channels)] = compiled.support
         full_scattering = xp.eye(full_size, dtype=complex)
         if channels:
             if hasattr(full_scattering, "at"):
-                full_scattering = full_scattering.at[: len(channels), : len(channels)].set(scattering)
+                full_scattering = full_scattering.at[: len(channels), : len(channels)].set(compiled.scattering)
             else:
-                full_scattering[: len(channels), : len(channels)] = scattering
+                full_scattering[: len(channels), : len(channels)] = compiled.scattering
         return ResolvedSLH(
             scattering=full_scattering,
             hamiltonian=HamiltonianProgram(
@@ -869,9 +870,10 @@ class PortNetwork:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize a static network graph and its quantum ports."""
-        if self._component_transfers:
+        filters = [component.label for component in self.components if component._transfer is not None]
+        if filters:
             raise TypeError(
-                f"PortNetwork filter components {sorted(self._component_transfers)} use Python "
+                f"PortNetwork filter components {sorted(filters)} use Python "
                 "transfer callables and cannot be serialized by to_dict(). Chip.clone() and "
                 "Chip.with_params() preserve them."
             )
@@ -902,7 +904,7 @@ class PortNetwork:
         }
 
     def _serialize_component(self, component: SLHComponent) -> dict[str, Any]:
-        kind = self._component_kinds[component.label]
+        kind = component._kind
         if kind == "scattering":
             return {
                 "label": component.label,
@@ -918,7 +920,7 @@ class PortNetwork:
             parameters = {}
         parameters.update(
             (name, self._serialize_scalar(value))
-            for name, value in self._component_parameters.get(component.label, {}).items()
+            for name, value in component._parameters.items()
         )
         return {"label": component.label, "kind": kind, "parameters": parameters}
 
@@ -1077,9 +1079,6 @@ class PortNetwork:
             self._add_component(
                 template._clone_component(component, self._token, label=f"{prefix}/{component.label}")
             )
-        self._component_kinds.update({f"{prefix}/{k}": v for k, v in template._component_kinds.items()})
-        self._component_parameters.update({f"{prefix}/{k}": dict(v) for k, v in template._component_parameters.items()})
-        self._component_transfers.update({f"{prefix}/{k}": v for k, v in template._component_transfers.items()})
         for input_key, output_key in template._connections.items():
             new_input, new_output = rename(input_key), rename(output_key)
             self._connections[new_input] = new_output
@@ -1094,18 +1093,15 @@ class PortNetwork:
     def _clone_component(component: SLHComponent, token: object, *, label: str | None = None) -> SLHComponent:
         """Return a portless component copy bound to ``token``, optionally relabelled."""
         new_label = component.label if label is None else label
-        return SLHComponent(
+        return replace(
+            component,
             label=new_label,
-            input_names=component.input_names,
-            output_names=component.output_names,
-            scattering=PortNetwork._copy_value(component.scattering),
+            scattering=copy_value(component.scattering),
+            _parameters=copy_value(component._parameters),
             _network_token=token,
-            sides=component.sides,
-            _local_ports=component._local_ports,
             _hidden_pairs=tuple(
                 (first, second, f"hidden.{new_label}.{first}") for first, second, _ in component._hidden_pairs
             ),
-            _row_inputs=component._row_inputs,
         )
 
     def _copy_with_port_replacements(
@@ -1141,10 +1137,10 @@ class PortNetwork:
                         "planes of different field subgraphs."
                     )
                 if has_output:
-                    restricted[(output, input_)] = self._copy_value(value)
+                    restricted[(output, input_)] = copy_value(value)
             return restricted or None
         if len(kept) == len(planes):
-            return self._copy_value(authored)
+            return copy_value(authored)
         if not kept:
             return None
         raise ValueError("Matrix-form boundary scattering spans planes of different field subgraphs.")
@@ -1152,7 +1148,7 @@ class PortNetwork:
     def _copy_graph(self, replacements: Mapping[str, Port], keep: set[str] | None) -> "PortNetwork":
         """Copy the components in ``keep`` (all when ``None``) with their wiring and parameters."""
         kept = keep if keep is not None else {component.label for component in self.components}
-        scattering = self._copy_value(self._authored_scattering) if keep is None else self._restricted_boundary(kept)
+        scattering = copy_value(self._authored_scattering) if keep is None else self._restricted_boundary(kept)
         copied = PortNetwork(scattering=scattering, label=self.label)
         for component in self.components:
             if component.label not in kept:
@@ -1173,13 +1169,6 @@ class PortNetwork:
             for exposure in self._exposures
             if exposure._input_key[0] in kept
         ]
-        copied._component_kinds = {label: kind for label, kind in self._component_kinds.items() if label in kept}
-        copied._component_parameters = {
-            label: dict(parameters) for label, parameters in self._component_parameters.items() if label in kept
-        }
-        copied._component_transfers = {
-            label: transfer for label, transfer in self._component_transfers.items() if label in kept
-        }
         return copied
 
     def physics_notes(self) -> list[str]:
@@ -1191,7 +1180,9 @@ class PortNetwork:
             "enter S, L, or H and cannot sit inside feedback loops.",
         ]
 
-    def dynamical_supports(self, chip: Any) -> tuple[tuple[str, ...], ...]:
+    def dynamical_supports(
+        self, chip: Any, *, _compiled: _CompiledNetwork | None = None,
+    ) -> tuple[tuple[str, ...], ...]:
         """Return device groups coupled by cascade-generated Hamiltonian terms.
 
         Static scattering alone is excluded: a unitary mixer changes field
@@ -1204,37 +1195,41 @@ class PortNetwork:
             for port in self._ports
         }
         groups: list[tuple[str, ...]] = []
-        for downstream, upstream, _coefficient in self._active_generated_pairs():
+        compiled = self._compile() if _compiled is None else _compiled
+        for downstream, upstream, _coefficient in self._active_pairs(compiled.generated_pairs):
             touched = set(supports[downstream] + supports[upstream])
             members = tuple(device.label for device in chip.devices if device.label in touched)
             if len(members) > 1 and members not in groups:
                 groups.append(members)
         return tuple(groups)
 
-    def fed_ports(self, chip: Any, exposure: str) -> list[tuple[Any, Any]]:
+    def fed_ports(
+        self, chip: Any, exposure: str, *, _compiled: _CompiledNetwork | None = None,
+    ) -> list[tuple[Any, Any]]:
         """Return ``(port, coefficient)`` pairs reached from ``exposure``.
 
         Each coefficient combines the scattering entry from the exposure to a
         channel with that port's weight in the channel. A coherent input ``β``
         therefore reaches the port coupling as ``c = coefficient · β``.
         """
-        exposures, scattering, coupling_maps, _, _, support = self._compile()
-        labels = [item.label for item in exposures]
+        compiled = self._compile() if _compiled is None else _compiled
+        labels = [item.exposure.label for item in compiled.channels]
         if exposure not in labels:
             raise ValueError(f"Unknown resolved port {exposure!r}.")
         column = labels.index(exposure)
         fed: list[tuple[Any, Any]] = []
-        for row, mapping in enumerate(coupling_maps):
-            if not support[row, column]:
+        for row, channel in enumerate(compiled.channels):
+            if not compiled.support[row, column]:
                 continue
-            gain = scattering[row][column]
+            mapping = channel.coupling
+            gain = compiled.scattering[row][column]
             for source in self._active_mapping_sources(mapping):
                 fed.append((chip.port(source), gain * mapping[source]))
         return fed
 
     @staticmethod
     def _active_pairs(
-        pairs: list[tuple[str, str, Any]],
+        pairs: Sequence[tuple[str, str, Any]],
     ) -> tuple[tuple[str, str, Any], ...]:
         """Drop only generated Hamiltonian pairs known to have zero weight."""
         return tuple(
@@ -1245,7 +1240,7 @@ class PortNetwork:
 
     def _active_generated_pairs(self) -> tuple[tuple[str, str, Any], ...]:
         """Return quantum-port pairs that generate a series Hamiltonian."""
-        return self._active_pairs(self._compile()[3])
+        return self._active_pairs(self._compile().generated_pairs)
 
     @staticmethod
     def _serialize_matrix(value: Any) -> dict[str, Any] | None:
@@ -1322,9 +1317,9 @@ class PortNetwork:
             _network_token=self._token,
             sides=("field",),
             _local_ports=(port,),
+            _kind="port",
         )
         self._add_component(component)
-        self._component_kinds[port.label] = "port"
         port._bind_network(self, component)
         self._ports.append(port)
 
@@ -1376,16 +1371,18 @@ class PortNetwork:
         return tuple((*exposed, *hidden))
 
     def _is_reference(self, label: str) -> bool:
-        return self._component_kinds.get(label) in {"delay", "filter", "amplifier"}
+        return self._components[label]._kind in {"delay", "filter", "amplifier"}
 
     def _reference_element(self, label: str) -> ReferenceElement:
-        parameters = self._component_parameters[label]
-        kind = self._component_kinds[label]
+        component = self._components[label]
+        parameters = component._parameters
+        kind = component._kind
         if kind == "delay":
             return ReferenceDelay(label, parameters["duration"])
         if kind == "amplifier":
             return ReferenceAmplifier(label, parameters["gain"], parameters["added_noise"])
-        return ReferenceFilter(label, self._component_transfers[label], MappingProxyType(dict(parameters)))
+        assert component._transfer is not None
+        return ReferenceFilter(label, component._transfer, MappingProxyType(dict(parameters)))
 
     def _peel(self, exposure: FieldExposure) -> tuple[TerminalKey, TerminalKey, ReferencePlane]:
         """Peel adjacent reference runs from ``exposure`` to the Markov boundary.
@@ -1402,7 +1399,7 @@ class PortNetwork:
                 label, name = key
                 if any(element.label == label for element in run):
                     raise ValueError(f"Reference component {label!r} feeds back into itself.")
-                if self._component_kinds[label] == "amplifier":
+                if self._components[label]._kind == "amplifier":
                     if name != "2":
                         raise ValueError(
                             f"Amplifier {label!r} must lie on an output line with side 1 toward the "
@@ -1427,16 +1424,7 @@ class PortNetwork:
         plane = ReferencePlane(inbound=tuple(inbound), outbound=tuple(reversed(outbound)))
         return boundary_input, boundary_output, plane
 
-    def _compile(
-        self,
-    ) -> tuple[
-        tuple[FieldExposure, ...],
-        Any,
-        list[dict[str, Any]],
-        list[tuple[str, str, Any]],
-        list[ReferencePlane],
-        np.ndarray,
-    ]:
+    def _compile(self) -> _CompiledNetwork:
         exposures = self._effective_exposures()
         peeled = [self._peel(exposure) for exposure in exposures]
         planes = [plane for _, _, plane in peeled]
@@ -1552,7 +1540,15 @@ class PortNetwork:
             support_matrix = (mixes.astype(int) @ support_matrix.astype(int)) > 0
 
         self._validate_unitary(scattering)
-        return exposures, scattering, coupling_maps, generated_pairs, planes, support_matrix
+        return _CompiledNetwork(
+            channels=tuple(
+                _CompiledChannel(exposure, MappingProxyType(mapping), plane)
+                for exposure, mapping, plane in zip(exposures, coupling_maps, planes, strict=True)
+            ),
+            scattering=scattering,
+            generated_pairs=tuple(generated_pairs),
+            support=support_matrix,
+        )
 
     @staticmethod
     def _incoming(
@@ -1749,7 +1745,7 @@ class PortNetwork:
 
     @staticmethod
     def _materialize_coupling(
-        mapping: dict[str, Any],
+        mapping: Mapping[str, Any],
         operators: dict[str, Any],
         *,
         key: str,
@@ -1759,7 +1755,9 @@ class PortNetwork:
         if not operators:
             raise RuntimeError("A PortNetwork cannot resolve without quantum coupling ports.")
         first = next(iter(operators.values()))
-        prefer_jax = contains_tracer((mapping, tuple(operator.values for operator in operators.values())))
+        prefer_jax = contains_tracer((
+            tuple(mapping.values()), tuple(operator.values for operator in operators.values())
+        ))
         xp = select_array_module(prefer_jax)
         values = xp.zeros(first.shape, dtype=complex)
         for source, coefficient in mapping.items():
@@ -1774,7 +1772,7 @@ class PortNetwork:
 
     def _materialize_generated_hamiltonian(
         self,
-        pairs: list[tuple[str, str, Any]],
+        pairs: Sequence[tuple[str, str, Any]],
         operators: dict[str, Any],
     ) -> Any | None:
         from quchip.engine.ir import CanonicalOperator
@@ -1801,8 +1799,8 @@ class PortNetwork:
         )
 
     def _component_matrix(self, component: SLHComponent) -> Any:
-        kind = self._component_kinds.get(component.label)
-        parameters = self._component_parameters.get(component.label, {})
+        kind = component._kind
+        parameters = component._parameters
         if kind == "phase_shift":
             phase = parameters["phase"]
             xp = select_array_module(contains_tracer(phase))
@@ -1944,14 +1942,6 @@ class PortNetwork:
         except Exception:
             return repr(value)
         return (array.shape, array.dtype.str, array.tobytes())
-
-    @staticmethod
-    def _copy_value(value: Any) -> Any:
-        if isinstance(value, Mapping):
-            return dict(value)
-        if isinstance(value, np.ndarray):
-            return value.copy()
-        return value
 
     @staticmethod
     def _is_concrete_one(value: Any) -> bool:

@@ -13,7 +13,7 @@ def test_coherent_resonator_output_has_unit_g1_and_g2() -> None:
     port = Port(resonator, rate=0.04, label="p")
     vna = VNA(
         Chip([resonator], port_network=PortNetwork.from_ports([port])),
-        planes=[port],
+        ports=[port],
     )
     vna.pump(port, freq=6.0, amplitude=0.02)
     delays = np.array([0.0, 2.0, 7.0])
@@ -37,7 +37,7 @@ def test_cross_port_correlations_retain_both_field_labels() -> None:
             [resonator],
             port_network=PortNetwork.from_ports([input_port, output_port]),
         ),
-        planes=[input_port, output_port],
+        ports=[input_port, output_port],
     )
     vna.pump(input_port, freq=6.0, amplitude=0.02)
     delays = np.array([0.0, 2.0, 7.0])
@@ -56,7 +56,7 @@ def test_vacuum_output_has_zero_fluctuation_spectrum() -> None:
     port = Port(resonator, rate=0.04, label="p")
     vna = VNA(
         Chip([resonator], port_network=PortNetwork.from_ports([port])),
-        planes=[port],
+        ports=[port],
     )
     frequencies = np.array([-0.1, 0.0, 0.1])
 
@@ -79,7 +79,7 @@ def test_thermal_output_has_g2_zero_near_two() -> None:
     port = Port(resonator, rate=0.03, label="p")
     vna = VNA(
         Chip([resonator], port_network=PortNetwork.from_ports([port])),
-        planes=[port],
+        ports=[port],
     )
 
     result = vna.g2(port, [0.0])
@@ -106,7 +106,7 @@ def test_qutip_and_dynamiqs_stationary_output_analysis_agree() -> None:
                 port_network=PortNetwork.from_ports([port]),
                 backend=backend,
             ),
-            planes=[port],
+            ports=[port],
         )
         spectrum = vna.output_spectrum(port, frequencies=[-0.05, 0.0, 0.05])
         return spectrum.total_fluctuation_spectrum, vna.g1(port, [0.0, 2.0]).values, vna.g2(port, [0.0, 2.0]).values
@@ -124,7 +124,7 @@ def test_qutip_output_analysis_is_not_capped_by_engine_dense_dimension() -> None
     port = Port(resonator, rate=0.04, label="p")
     vna = VNA(
         Chip([resonator], port_network=PortNetwork.from_ports([port])),
-        planes=[port],
+        ports=[port],
     )
 
     result = vna.output_spectrum(port, frequencies=[0.0])

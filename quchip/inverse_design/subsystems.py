@@ -1,14 +1,8 @@
-"""Neighborhood extraction for large-chip observables.
+"""Explicit local approximation for fitted observables.
 
-When the full Hilbert space is too large to dress repeatedly inside a
-least-squares loop, ``fit_a_dress`` evaluates each target on the
-smallest sub-chip that still contains the relevant physics: the target
-device(s) plus every directly coupled neighbor (one-hop closure).
-
-The one-hop neighborhood captures first-order dispersive effects for the
-target but omits second-order contributions from non-neighbors.
-Use ``max_hilbert_dim`` in :func:`~quchip.inverse_design.fit.fit_a_dress`
-to control when the fit switches from ``"full"`` to ``"local"``.
+With ``evaluator="local"``, each target uses its device(s) and their directly
+coupled neighbors. More distant devices and their indirect effects are
+omitted. Hilbert-space limits do not select this approximation automatically.
 """
 
 from __future__ import annotations
@@ -19,31 +13,13 @@ from quchip.chip import Chip
 from quchip.utils.labeling import resolve_label
 
 
-def choose_evaluator(chip: Chip, max_hilbert_dim: int) -> str:
-    """Pick ``"full"`` or ``"local"`` based on total Hilbert-space size.
-
-    Returns ``"full"`` when the product of all device ``levels`` is at
-    most ``max_hilbert_dim``; otherwise ``"local"``.
-
-    Parameters
-    ----------
-    chip : Chip
-    max_hilbert_dim : int
-        Total-Hilbert-space-size threshold.
-
-    Returns
-    -------
-    str
-        ``"full"`` or ``"local"``.
-    """
-    return "full" if chip.total_dim <= max_hilbert_dim else "local"
-
-
 def build_local_subsystem(chip: Chip, labels: tuple[str, ...]) -> Chip:
     """Build a reduced ``Chip`` holding only the given device labels.
 
     Couplings are retained iff both endpoint labels are in ``labels``;
     basis, frame, RWA, and backend settings are inherited from the parent.
+    Keeping all devices clones the full model. Partial extraction of a
+    PortNetwork model is unsupported because the network can induce interactions.
 
     Parameters
     ----------
@@ -58,6 +34,20 @@ def build_local_subsystem(chip: Chip, labels: tuple[str, ...]) -> Chip:
         couplings.
     """
     keep = set(labels)
+    unknown = keep - chip.device_map.keys()
+    if unknown:
+        raise ValueError(f"Unknown local subsystem devices: {sorted(unknown)}")
+    if keep == chip.device_map.keys():
+        return chip.clone()
+    if chip.effective_terms:
+        raise NotImplementedError(
+            "Local fit extraction cannot discard retained effective terms; evaluate the full chip."
+        )
+    if chip.port_network is not None:
+        raise NotImplementedError(
+            "Local fit extraction of a partial PortNetwork model is not supported. "
+            "Evaluate the full chip to retain its network interactions."
+        )
     devices = [device.copy() for device in chip.devices if device.label in keep]
     device_map = {device.label: device for device in devices}
     couplings = [
@@ -65,14 +55,22 @@ def build_local_subsystem(chip: Chip, labels: tuple[str, ...]) -> Chip:
         for coupling in chip.couplings
         if coupling.device_a_label in keep and coupling.device_b_label in keep
     ]
-    return Chip(
+    frame: Any = (
+        {label: value for label, value in chip.frame.items() if label in keep}
+        if isinstance(chip.frame, dict) else chip.frame
+    )
+    local = Chip(
         devices=devices,
         couplings=couplings,
-        frame=chip.frame,
+        frame=frame,
         approximation=chip.approximation,
         basis=chip.basis,
         backend=chip.backend,
     )
+    from quchip.chip.states import copy_state_configuration
+
+    copy_state_configuration(chip, local)
+    return local
 
 
 def device_labels_for_local_eval(chip: Chip, label: Any) -> tuple[str, ...]:

@@ -39,6 +39,7 @@ from math import prod
 from typing import Any, cast
 
 import numpy as np
+import jax
 
 from quchip.engine.ir import CanonicalOperator
 from quchip.utils.jax_utils import (
@@ -181,6 +182,7 @@ def _build_weighted_bands(
     return bands
 
 
+@jax.ensure_compile_time_eval()
 def decompose_bands(
     op_matrix: Any,
     dim: int,
@@ -370,6 +372,7 @@ def _sandwich_canonical(canonical: CanonicalOperator, left: Any, right: Any) -> 
     )
 
 
+@jax.ensure_compile_time_eval()
 def decompose_canonical_bands(
     canonical: CanonicalOperator,
     dim: int,
@@ -469,6 +472,7 @@ def decompose_two_body_canonical_bands(
     )
 
 
+@jax.ensure_compile_time_eval()
 def _decompose_product_canonical_bands(
     canonical: CanonicalOperator,
     dims: list[int] | tuple[int, ...],

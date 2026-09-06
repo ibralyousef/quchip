@@ -12,7 +12,7 @@ from quchip import Chip, Gaussian, QuantumSequence
 from quchip.control.drive import ChargeDrive, FluxDrive, PhaseDrive
 from quchip.control.signal import AnalyticSignal
 from quchip.declarative import DeviceModel, LocalOps, Scalar, parameter
-from quchip.devices import ChargeCoupled, DuffingTransmon, FluxCoupled, PhaseCoupled
+from quchip.devices import ChargeCoupled, DuffingTransmon, FluxCoupled, PhaseCoupled, Resonator
 from quchip.engine.ir import Constant
 
 
@@ -44,9 +44,10 @@ class _FakePhysicalDevice:
         self._connected_drives.append(drive)
 
 
-def test_duffing_declares_fock_drive_capabilities():
+@pytest.mark.parametrize("device", [DuffingTransmon(5.0, -0.25), Resonator(7.0, levels=6)])
+def test_fock_drive_capabilities_match_physical_operators(device):
     """A Fock device owns the conventional operators its drives consume."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25)
+    q = device
     assert isinstance(q, quchip.FockDevice)
     assert isinstance(q, ChargeCoupled)
     assert isinstance(q, PhaseCoupled)

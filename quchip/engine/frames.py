@@ -1,49 +1,25 @@
-"""Resolve a :data:`FrameSpec` into a :class:`ResolvedFrame`.
+"""Resolve integration frames and observable-demodulation frequencies.
 
-This module is purely combinatorial: it decides which rotating frame to work
-in.
+Supported :data:`FrameSpec` values:
 
-Supported specs
----------------
-* ``"lab"`` — every reference frequency is zero; assembly emits the
-  bare chip Hamiltonian unchanged.
-* ``"rotating"`` — each device's reference is its
-  :attr:`~quchip.devices.base.BaseDevice.reference_freq` (the device's
-  readout/LO reference, defaulting to the dressed drive frequency
-  ``ω_d``), so assembly builds
+* ``"lab"``: zero integration frequencies.
+* ``"rotating"``: each device's ``reference_freq``, defaulting to its dressed
+  drive frequency. An off-transition reference leaves idle Ramsey detuning.
+* ``"auto"``: :func:`plan_frame` ranks constraints from retained coupling bands,
+  cascade couplings, and scheduled tones by integrated strength. Consistent
+  constraints set the frame; the rest remain time dependent and are recorded
+  as residuals. Unconstrained frequencies use device references in declaration
+  order.
+* A scalar: one common frequency for all devices.
+* A device-or-label mapping: per-device frequencies, with missing entries zero.
 
-  .. math::
-      H(t) \\;=\\; H_0 - \\sum_i \\omega_{\\text{ref},i} n_i
-                 + V_{\\text{drive}}(t) + V_{\\text{coupling}}(t),
+Assembly subtracts ``Σᵢ ω_frame,ᵢ nᵢ`` from the Hamiltonian and decides which
+coupling bands become static. Stored states stay in the integration frame.
+Transverse observables are demodulated by ``ω_ref - ω_frame`` into the readout
+reference frame; this phase vanishes when the two frames coincide.
 
-  the standard rotating-frame form used in cQED / driven multi-level
-  systems (e.g. Gambetta et al., *PRA* **74**, 042318 (2006);
-  Krantz et al., *Appl. Phys. Rev.* **6**, 021318 (2019)). Setting a
-  device's ``reference_freq`` off its transition surfaces a residual
-  detuning ``Δ = ω − ω_ref`` in ``H₀`` — idle Ramsey precession.
-* ``"auto"`` — :func:`plan_frame` chooses one frequency per device from
-  retained coupling bands, cascade-generated network couplings, and scheduled
-  tones. It keeps the consistent constraints with the largest integrated
-  strength, leaves the rest time dependent, and records their oscillation
-  frequencies as residuals. Unconstrained frequencies are pinned to device
-  references in declaration order.
-* Scalar — every device uses the same shared reference frequency.
-* ``dict[str | BaseDevice, scalar]`` — per-device references; missing
-  entries default to ``0.0``.
-
-The demodulation frequencies are ``ω_ref − ω_frame`` per device: observables
-are always reported co-rotating at ``reference_freq`` (the readout LO),
-independent of which frame the solver integrated in. In the default
-``"rotating"`` mode the integration frame *is* the reference frame, so the
-demodulation is a no-op and the raw stored states already sit in the readout
-frame (``result.states`` and ``result.expect`` agree). Transverse observables
-(``<a>``, ``<σ_x>``) thus come back as the non-oscillatory demodulated
-envelope; only an explicitly overridden non-reference integration frame
-leaves ``result.states`` in that other frame.
-
-Whether a coupling band folds into ``H₀`` is decided per band during
-assembly, from the concreteness of its frame carrier ``Δa·ω_a + Δb·ω_b`` — not
-here (see :func:`~quchip.engine.assembly._resolve_coupling_terms`).
+See Gambetta et al., *PRA* 74, 042318 (2006), and Krantz et al., *Appl. Phys.
+Rev.* 6, 021318 (2019), for rotating-frame descriptions of driven qubits.
 """
 
 from __future__ import annotations
@@ -303,6 +279,19 @@ def _compile_time(function: Any) -> Any:
     return wrapper
 
 
+def resolve_reference_frequencies(chip: Any, *, local_resolution: Any = None) -> dict[str, Any]:
+    """Resolve explicit overrides or dressed references in one chip context."""
+    dressed = (
+        chip.analysis._dressed_frequencies(chip.analysis.engine_result(_local_resolution=local_resolution))
+        if any(device.reference_freq is None for device in chip.devices)
+        else {}
+    )
+    return {
+        device.label: dressed[device.label] if device.reference_freq is None else device.reference_freq
+        for device in chip.devices
+    }
+
+
 @_compile_time
 def plan_frame(
     chip: "Chip",
@@ -356,11 +345,11 @@ def plan_frame(
     FrameConflict
         In strict mode, when a tone cannot be made static.
     """
-    from quchip.engine.assembly import _resolve_local_system, coupling_band_records
+    from quchip.engine.assembly import _resolve_system, coupling_band_records
 
-    resolution = local_resolution if local_resolution is not None else _resolve_local_system(chip, chip.backend)
+    resolution = local_resolution if local_resolution is not None else _resolve_system(chip, chip.backend)
     references = (
-        {device.label: device.reference_freq for device in chip.devices}
+        resolve_reference_frequencies(chip, local_resolution=resolution)
         if reference_frequencies is None
         else dict(reference_frequencies)
     )
@@ -371,11 +360,11 @@ def plan_frame(
     hard: list[_Row] = []
     soft: list[_Row] = []
     network = chip.port_network
-    for group in () if network is None else network.dynamical_supports(chip):
+    for group in () if network is None else network.dynamical_supports(chip, _compiled=resolution.network):
         for first, second in zip(group, group[1:], strict=False):
             hard.append(_Row({first: Fraction(1), second: Fraction(-1)}, zero, None, "cascade", group, -1, False))
     for record in coupling_band_records(chip, resolution, chip.backend):
-        if not approximation.keeps_operator_band(record.charges) or not any(record.charges):
+        if (not record.retained and not approximation.keeps_operator_band(record.charges)) or not any(record.charges):
             continue
         coefficients = _normalized(zip(record.devices, record.charges, strict=True))
         weight = None if record.amplitude is None or duration is None else record.amplitude**2 * duration
@@ -565,10 +554,10 @@ def frame_tones(
 
     span = _window(operations, solve_window)
     tones: list[FrameTone] = []
-    for delivered in _build_delivered_signals(chip, list(operations)):
+    for delivered in _build_delivered_signals(chip, list(operations)).values():
         drive, target = delivered.drive, delivered.target
         bands = drive_bands(chip, drive, target, resolution.bases, resolution.dims, chip.backend, approximation)
-        records = [record for record, _, _ in bands]
+        records = [record for record, _, _, _ in bands]
         source = f"{drive.label} → {target.label}" + (" (crosstalk)" if delivered.origin == "crosstalk" else "")
         tones += _signal_tones(delivered.signal.program, records, span, source)
     for operation in operations:
@@ -616,7 +605,10 @@ def _fed_port_records(chip: "Chip", exposure: str, resolution: Any) -> list[Any]
     from quchip.engine.assembly import port_band_records
 
     network = chip.port_network
-    fed = [(chip.port(exposure), 1.0)] if network is None else network.fed_ports(chip, exposure)
+    fed = (
+        [(chip.port(exposure), 1.0)] if network is None
+        else network.fed_ports(chip, exposure, _compiled=resolution.network)
+    )
     records: list[Any] = []
     for port, coefficient in fed:
         gain = None if contains_tracer(coefficient) else float(np.abs(np.asarray(coefficient)))
@@ -722,9 +714,9 @@ def planning_resolution(chip: "Chip") -> Any:
     Bases from constant device matrices stay concrete inside ``jit``. Bases
     that depend on traced inputs remain traced.
     """
-    from quchip.engine.assembly import _resolve_local_system
+    from quchip.engine.assembly import _resolve_system
 
-    return _resolve_local_system(chip, chip.backend)
+    return _resolve_system(chip, chip.backend)
 
 
 def resolve_for_operations(
@@ -742,10 +734,14 @@ def resolve_for_operations(
     the bounds are ``(0, last pulse end)``.
     """
     strategy = chip.approximation if approximation is None else require_approximation(approximation)
+    frame_spec = chip.frame if frame is None else frame
+    if not (isinstance(frame_spec, str) and frame_spec == "auto"):
+        return chip.resolve(frame=frame_spec, approximation=strategy)
+    resolution = planning_resolution(chip)
     spec = plan_for_operations(
-        chip, chip.frame if frame is None else frame, operations, approximation=strategy, solve_window=solve_window
+        chip, frame_spec, operations, approximation=strategy, solve_window=solve_window, _resolution=resolution,
     )
-    return chip.resolve(frame=spec, approximation=strategy)
+    return chip._resolve(frame=spec, approximation=strategy, _resolution=resolution)
 
 
 def plan_for_operations(
@@ -755,6 +751,7 @@ def plan_for_operations(
     *,
     approximation: Any,
     solve_window: Any = None,
+    _resolution: Any = None,
 ) -> Any:
     """Build an operation-aware :class:`FramePlan` for ``"auto"``.
 
@@ -764,7 +761,7 @@ def plan_for_operations(
     """
     if not (isinstance(frame_spec, str) and frame_spec == "auto"):
         return frame_spec
-    resolution = planning_resolution(chip)
+    resolution = planning_resolution(chip) if _resolution is None else _resolution
     span = _window(operations, solve_window)
     tones = frame_tones(chip, operations, approximation=approximation, resolution=resolution, solve_window=span)
     duration = None if span is None else span[1] - span[0]
@@ -794,17 +791,13 @@ def resolve_frame(
     callers pass a :class:`FramePlan` that also contains their tone
     constraints.
 
-    Dressing happens lazily: reading a device's
-    :attr:`~quchip.devices.base.BaseDevice.reference_freq` diagonalizes
-    the chip only when its default (the dressed drive frequency) is
-    actually consulted. A chip whose devices all carry explicit
-    ``reference_freq`` overrides resolves any frame spec without ever
-    diagonalizing.
+    Missing references resolve from this chip's dressed transitions. Explicit
+    references bypass that calculation; reading a device setting does no work.
     """
     devices = chip.devices
     labels = [dev.label for dev in devices]
     references = (
-        {dev.label: dev.reference_freq for dev in devices}
+        resolve_reference_frequencies(chip, local_resolution=local_resolution)
         if reference_frequencies is None
         else {dev.label: reference_frequencies[dev.label] for dev in devices}
     )

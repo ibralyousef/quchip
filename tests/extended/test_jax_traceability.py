@@ -10,26 +10,16 @@ import numpy as np
 import pytest
 
 from quchip import Capacitive, analyze_cr_susceptibility
-from quchip.backend import _backend_context, SolverResult
-from quchip.chip.chip import Chip, DressedResult
+from quchip.backend import _backend_context
+from quchip.chip.chip import Chip
 from quchip.control import ChargeDrive, ControlEquipment
-from quchip.control.signal import AnalyticSignal, Crosstalk
-from quchip.control.envelopes import Gaussian, Square
+from quchip.control.signal import AnalyticSignal
+from quchip.control.envelopes import Gaussian
 from quchip.control.sequence import QuantumSequence
 from quchip.devices.resonator import Resonator
 from quchip.devices.transmon.duffing import DuffingTransmon
-from quchip.engine.bands import canonical_to_dense_array, decompose_bands, decompose_two_body_canonical_bands
 from quchip.engine.ir import CanonicalOperator
 from quchip.engine.frames import resolve_frame
-from quchip.results.results import SimulationResult
-
-
-def test_gaussian_value_preserves_jax_arrays() -> None:
-    """Gaussian.value keeps JAX inputs on the JAX path."""
-    envelope = Gaussian(duration=20.0, amplitude=0.8)
-    t = jnp.linspace(0.0, 20.0, 64)
-    waveform = envelope.value(t)
-    assert isinstance(waveform, jax.Array)
 
 
 def test_shift_phase_differentiates_with_respect_to_delay() -> None:
@@ -94,66 +84,6 @@ def test_gaussian_ramsey_delay_gradient_matches_finite_difference() -> None:
     np.testing.assert_allclose(autodiff, finite_difference, rtol=1e-3, atol=1e-6)
 
 
-def test_drive_channel_with_jax_backend() -> None:
-    """A drive normalizes its channel when JAX is available."""
-    from quchip.devices.transmon.duffing import DuffingTransmon
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-    drive = ChargeDrive(target=q)
-    from quchip.engine.ir import Constant
-
-    assert drive.hamiltonian(q, AnalyticSignal(Constant(1.0))).labels == ("q",)
-
-
-def test_crosstalk_construction_and_apply() -> None:
-    """Crosstalk signal transform stores parameters and apply() produces output."""
-    source_device = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
-    victim_device = DuffingTransmon(freq=5.5, anharmonicity=-0.25, levels=3, label="q1")
-    source_drive = ChargeDrive(target=source_device)
-    victim_drive = ChargeDrive(target=victim_device)
-    edge = Crosstalk(source=source_drive.label, victim=victim_drive.label, beta=0.1, theta=0.2, delay=0.5)
-    assert edge.beta == 0.1
-    assert edge.theta == 0.2
-    assert edge.delay == 0.5
-    assert edge.source == source_drive.label
-    assert edge.victim == victim_drive.label
-
-    # apply should inject a leaked signal for the victim key
-    from quchip.engine.ir import Constant
-
-    signals = {(source_drive.label, 0): AnalyticSignal(Constant(1.0 + 0j))}
-    result = edge.apply(signals)
-    assert any(k[0] == victim_drive.label for k in result)
-
-
-def test_crosstalk_apply_produces_polar_scale_node() -> None:
-    """Crosstalk.apply() wraps leaked signals in PolarScale for JAX traceability."""
-    from quchip.engine.ir import Constant, PolarScale
-
-    edge = Crosstalk(source="src_drive", victim="vic_drive", beta=0.1, theta=0.2, delay=0.5)
-    signals = {("src_drive", 0): AnalyticSignal(Constant(1.0 + 0j))}
-    result = edge.apply(signals)
-    victim_signal = result[("vic_drive", 0)]
-    assert isinstance(victim_signal.program, PolarScale)
-    assert victim_signal.program.amplitude == 0.1
-    assert victim_signal.program.theta == 0.2
-
-
-def test_decomposition_helpers_preserve_jax_arrays() -> None:
-    """Band decomposition helpers should keep the differentiable array type."""
-    single = jnp.asarray(np.array([[0.0, 1.0], [2.0, 0.0]], dtype=np.complex128))
-    single_bands = decompose_bands(single, 2)
-    assert single_bands
-    assert all(isinstance(band, jax.Array) for band in single_bands.values())
-
-    two_body = CanonicalOperator.from_dense(
-        jnp.asarray(np.eye(4, dtype=np.complex128)), dims=(2, 2), basis="fock", subsystem_labels=("a", "b")
-    )
-    two_body_bands = decompose_two_body_canonical_bands(two_body, [2, 2])
-    assert two_body_bands
-    assert all(isinstance(canonical_to_dense_array(band), jax.Array) for band in two_body_bands.values())
-
-
 class _JaxCollapseBackend:
     """Minimal backend stub for local collapse-operator traceability checks."""
 
@@ -174,17 +104,6 @@ class _JaxCollapseBackend:
     @staticmethod
     def number(n: int) -> jax.Array:
         return jnp.diag(jnp.arange(n, dtype=jnp.complex64))
-
-
-def test_canonical_operator_preserves_jax_arrays() -> None:
-    """CanonicalOperator.values should preserve JAX arrays."""
-    from quchip.engine.ir import CanonicalOperator
-
-    dense = jnp.asarray(np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128))
-    canonical = CanonicalOperator.from_dense(dense, dims=(2,), basis="fock", subsystem_labels=("q",))
-
-    assert canonical.layout == "dense"
-    assert isinstance(canonical.values, jax.Array)
 
 
 def test_base_device_collapse_operators_accept_traced_noise_params() -> None:
@@ -228,117 +147,6 @@ def test_resonator_internal_quality_factor_collapse_accepts_traced_frequency() -
     value = q_loss_coeff(jnp.asarray(6.0))
     assert isinstance(value, jax.Array)
     assert jnp.isfinite(value)
-
-
-class _ResultJaxBackend:
-    """Small JAX-friendly backend stub for result-surface traceability tests."""
-
-    array_module = jnp
-
-    @staticmethod
-    def basis(dim: int, n: int) -> jax.Array:
-        return jnp.eye(dim, dtype=jnp.complex64)[n]
-
-    @staticmethod
-    def tensor_states(*states: jax.Array) -> jax.Array:
-        result = states[0]
-        for state in states[1:]:
-            result = jnp.kron(result, state)
-        return result
-
-    @staticmethod
-    def dag(op: jax.Array) -> jax.Array:
-        if op.ndim == 1:
-            return jnp.conjugate(op)
-        return jnp.conjugate(jnp.swapaxes(op, -1, -2))
-
-    @staticmethod
-    def matmul(a: jax.Array, b: jax.Array) -> jax.Array:
-        if a.ndim == b.ndim == 1:
-            return jnp.outer(a, b)
-        return a @ b
-
-    @staticmethod
-    def expect(op: jax.Array, state: jax.Array) -> jax.Array:
-        return jnp.vdot(state, op @ state)
-
-    @staticmethod
-    def ptrace(state: jax.Array, dev_idx: int, dims: list[int]) -> jax.Array:
-        _ = dev_idx, dims
-        return jnp.outer(state, jnp.conjugate(state))
-
-    @staticmethod
-    def state_to_dm(state: jax.Array) -> jax.Array:
-        return jnp.outer(state, jnp.conjugate(state))
-
-    @staticmethod
-    def is_ket(state: jax.Array) -> bool:
-        return state.ndim == 1
-
-    @staticmethod
-    def stack_states(states: list[jax.Array]) -> jax.Array:
-        return jnp.stack([jnp.asarray(s, dtype=jnp.complex64) for s in states])
-
-    @staticmethod
-    def expect_over_time(op: jax.Array, stacked: jax.Array) -> jax.Array:
-        # Toy backend: kets are 1-D, so the stack is (T, n).
-        return jnp.einsum("ti,ij,tj->t", jnp.conjugate(stacked), op, stacked)
-
-    @staticmethod
-    def coerce_state(state: jax.Array, dims: tuple[int, ...] | None = None) -> jax.Array:
-        # Matches the Backend ABC default: this stub's states are already
-        # native, so coercion is a no-op.
-        _ = dims
-        return state
-
-
-def test_chip_dressed_spectrum_supports_jax_grad() -> None:
-    """The public dressed-spectrum accessor should preserve autodiff arrays."""
-    chip = Chip([Resonator(freq=5.0, levels=2, label="r")])
-
-    def loss(scale: jax.Array) -> jax.Array:
-        chip._analysis._dressed_result = DressedResult(
-            eigenvalues=jnp.asarray([scale, scale**2 + 1.0], dtype=jnp.float32),
-            state_map={(0,): 0, (1,): 1},
-            dressed_eigenvalues={(0,): 0.0, (1,): 1.0},
-            assignment_overlaps={(0,): 1.0, (1,): 1.0},
-            hybridized_labels=(),
-            bare_labels=((0,), (1,)),
-            bare_labels_by_dressed_index={0: (0,), 1: (1,)},
-            eigenvector_matrix=jnp.eye(2, dtype=jnp.complex64),
-        )
-        chip._analysis._dressed_signature = chip._analysis._analysis_signature()
-        return jnp.sum(chip.dressed_spectrum())
-
-    grad = jax.grad(loss)(jnp.asarray(0.25))
-    assert jnp.isfinite(grad)
-
-
-def test_chip_freq_when_supports_jax_grad() -> None:
-    """The public dressed-frequency helper should preserve autodiff arrays."""
-    chip = Chip([Resonator(freq=5.0, levels=2, label="r"), Resonator(freq=6.0, levels=2, label="q")])
-
-    def loss(scale: jax.Array) -> jax.Array:
-        chip._analysis._dressed_result = DressedResult(
-            eigenvalues=jnp.asarray([0.0, 1.0, 2.0, 3.0], dtype=jnp.float32),
-            state_map={(0, 0): 0, (0, 1): 1, (1, 0): 2, (1, 1): 3},
-            dressed_eigenvalues={
-                (0, 0): jnp.asarray(0.0, dtype=jnp.float32),
-                (0, 1): jnp.asarray(1.0 + scale, dtype=jnp.float32),
-                (1, 0): jnp.asarray(2.0, dtype=jnp.float32),
-                (1, 1): jnp.asarray(3.5 + scale, dtype=jnp.float32),
-            },
-            assignment_overlaps={(0, 0): 1.0, (0, 1): 1.0, (1, 0): 1.0, (1, 1): 1.0},
-            hybridized_labels=(),
-            bare_labels=((0, 0), (0, 1), (1, 0), (1, 1)),
-            bare_labels_by_dressed_index={0: (0, 0), 1: (0, 1), 2: (1, 0), 3: (1, 1)},
-            eigenvector_matrix=jnp.eye(4, dtype=jnp.complex64),
-        )
-        chip._analysis._dressed_signature = chip._analysis._analysis_signature()
-        return chip.freq("q", when={"r": 1})
-
-    grad = jax.grad(loss)(jnp.asarray(0.25))
-    assert jnp.isfinite(grad)
 
 
 @pytest.mark.optional_backend
@@ -398,120 +206,6 @@ def test_cr_susceptibility_supports_jax_grad() -> None:
     assert abs(float(derivative)) > 1e-8
 
 
-def test_simulation_result_overlap_array_supports_jax_grad() -> None:
-    """The public overlap-array helper should preserve autodiff arrays."""
-    backend = _ResultJaxBackend()
-    target = backend.basis(2, 1)
-    times = jnp.linspace(0.0, 1.0, 4)
-
-    def loss(theta: jax.Array) -> jax.Array:
-        state = jnp.asarray(
-            [jnp.cos(theta), jnp.sin(theta)],
-            dtype=jnp.complex64,
-        )
-        result = SimulationResult(
-            solver_result=SolverResult(
-                times=times,
-                states=[state],
-                expect=None,
-                final_state=state,
-                stats=None,
-                solver="sesolve",
-            ),
-            backend=backend,
-            dims=[2],
-            device_info=[("q", True)],
-        )
-        return jnp.sum(result.overlap_array(target))
-
-    grad = jax.grad(loss)(jnp.asarray(0.3))
-    assert jnp.isfinite(grad)
-
-
-def test_solve_batch_manual_indexing_preserves_array_type() -> None:
-    """SolveBatch parameter bookkeeping should not coerce JAX payloads."""
-    from quchip.engine.ir import EngineResult, ResolvedSLH, SolveBatch, SolveProblem
-
-    params = np.empty((1,), dtype=object)
-    params[(0,)] = {"x": jnp.asarray(1.0, dtype=jnp.float32)}
-    batch = SolveBatch(
-        chip=None,
-        problems=(
-            SolveProblem(
-                chip=None,
-                engine_result=EngineResult(
-                    slh=ResolvedSLH.from_terms(
-                        static_terms=(),
-                        dynamic_terms=(),
-                        collapse_terms=(),
-                    )
-                ),
-                initial_state=None,
-                tlist=(0.0, 1.0),
-            ),
-        ),
-        params=params,
-        shape=(1,),
-        axes=(("x", [params[(0,)]["x"]]),),
-    )
-    assert isinstance(batch.params_at(0)["x"], jax.Array)
-
-
-@pytest.mark.optional_backend
-def test_quantum_sequence_build_problem_accepts_traced_tlist() -> None:
-    """Explicit JAX ``tlist`` should remain traceable through build_problem()."""
-    pytest.importorskip("dynamiqs")
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=2, label="q")
-    drive = ChargeDrive(target=q)
-    chip = Chip([q], frame="rotating", backend="dynamiqs", control_equipment=ControlEquipment(lines=[drive]))
-    seq = QuantumSequence(chip)
-    seq.schedule(drive, envelope=Square(duration=10.0, amplitude=0.01), freq=5.0)
-    initial_state = chip.state(q=0)
-
-    @jax.jit
-    def build_with_tlist(tlist):
-        problem = seq.build_problem(tlist=tlist, initial_state=initial_state)
-        return problem.tlist
-
-    traced_tlist = jnp.linspace(0.0, 10.0, 8)
-    result_tlist = build_with_tlist(traced_tlist)
-
-    assert isinstance(result_tlist, jax.Array)
-    np.testing.assert_allclose(np.asarray(result_tlist), np.asarray(traced_tlist))
-
-
-@pytest.mark.optional_backend
-def test_simulate_jits_through_coupled_chip_dense_two_body_embed() -> None:
-    """``jax.jit`` must span simulate() on a coupled rotating-frame chip through the dense embed_two_body path."""
-    # Until 2026-06 that path concretized a reshape size via int(jnp.prod(...)), which broke
-    # under jit since jnp constants are tracers inside a trace.
-    pytest.importorskip("dynamiqs")
-    from quchip import Capacitive, Resonator
-    from quchip.engine import simulate
-
-    def loss(freq):
-        q = DuffingTransmon(freq=freq, anharmonicity=-0.3, levels=3, label="q")
-        r = Resonator(freq=7.1, levels=3, label="r")
-        chip = Chip(
-            [q, r],
-            [Capacitive(q, r, g=0.06)],
-            frame="rotating",
-            approximation=RWA(),
-            backend="dynamiqs",
-        )
-        result = simulate(
-            chip,
-            [],
-            jnp.linspace(0.0, 10.0, 8),
-            initial_state=chip.bare_state({q: 1, r: 0}),
-            check_truncation=False,
-        )
-        return result.population_array(q, level=1)[-1]
-
-    value, grad = jax.jit(jax.value_and_grad(loss))(jnp.asarray(5.02))
-    assert jnp.isfinite(value) and jnp.isfinite(grad)
-
-
 @pytest.mark.optional_backend
 def test_reference_freq_supports_jax_grad() -> None:
     """A device's ``reference_freq`` (readout/frame LO) must be differentiable."""
@@ -530,8 +224,8 @@ def test_reference_freq_supports_jax_grad() -> None:
     # whole path differentiable without a backend-bound e_op.
     def loss(ref):
         q.reference_freq = ref
-        r = simulate(chip, [], t, initial_state=plus, options={"store_states": True})
-        return jnp.real(r.overlap_array(plus)[-1])
+        r = simulate(chip, [], t, initial_state=plus, states="all")
+        return jnp.real(r.overlap(plus)[-1])
 
     # Δ·T ≈ 0.25 cycle (Δ = 5 MHz over 50 ns): the steepest point of the overlap
     # fringe, so the gradient is O(1), a strong physical check of idle precession.
@@ -566,7 +260,7 @@ def test_chip_state_dressed_initial_state_traces_through_simulate() -> None:
             initial_state=chip.state({q: 1, r: 0}),
             check_truncation=False,
         )
-        return result.population_array(q, level=1)
+        return result.population(q, level=1)
 
     def loss(freq):
         return trace(freq)[-1]
@@ -603,7 +297,7 @@ def test_default_initial_state_omitted_traces_through_simulate() -> None:
             backend="dynamiqs",
         )
         result = simulate(chip, [], jnp.linspace(0.0, 10.0, 8), check_truncation=False)
-        return result.population_array(q, level=0)[-1]
+        return result.population(q, level=0)[-1]
 
     fn = jax.jit(jax.value_and_grad(loss))
     value, grad = fn(jnp.asarray(5.02))

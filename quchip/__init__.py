@@ -23,7 +23,7 @@ del _jax
 import os  # noqa: E402
 from importlib import import_module  # noqa: E402
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 from quchip.analysis import (  # noqa: E402
     CRHamiltonianResult,
@@ -41,6 +41,7 @@ from quchip.analysis import (  # noqa: E402
 )
 from quchip.approximations import Approximation, Exact, RWA  # noqa: E402
 from quchip.backend import get_default_backend, set_default_backend  # noqa: E402
+from quchip.chip.effective import EffectiveTerms
 from quchip.chip import (
     ActivePatchResult,
     Bath,
@@ -53,6 +54,7 @@ from quchip.chip import (
     CrossKerr,
     DressedResult,
     EliminationResult,
+    ReductionMap,
     KerrMatrix,
     TunableCapacitive,
     active_patch,
@@ -108,7 +110,7 @@ from quchip.devices.fock import FockDevice
 from quchip.devices.kerr_cavity import KerrCavity
 from quchip.devices.protocols import ChargeCoupled, FluxCoupled, PhaseCoupled
 from quchip.devices.resonator import Resonator
-from quchip.devices.spaces import ChargeSpace, CustomSpace, FockSpace, LocalSpace, PhaseGridSpace
+from quchip.devices.spaces import ChargeSpace, CustomSpace, FockSpace, LocalSpace, PhaseGridSpace, TruncationBoundary
 from quchip.devices.transmon.charge_basis import ChargeBasisTransmon
 from quchip.devices.transmon.duffing import DuffingTransmon
 from quchip.devices.transmon.flux_tunable import FluxTunableTransmon
@@ -163,6 +165,7 @@ __all__ = [
     "RWA",
     # Declarative extension API
     "CollapseChannel",
+    "EffectiveTerms",
     "CouplingModel",
     "CosineCoefficient",
     "DeviceModel",
@@ -192,6 +195,7 @@ __all__ = [
     "Fluxonium",
     "KerrCavity",
     "LocalSpace",
+    "TruncationBoundary",
     "Resonator",
     # Coupling Protocols
     "ChargeCoupled",
@@ -211,6 +215,7 @@ __all__ = [
     "PortNetwork",
     "ChipTransform",
     "EliminationResult",
+    "ReductionMap",
     "eliminate",
     "ActivePatchResult",
     "active_patch",

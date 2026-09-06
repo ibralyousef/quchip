@@ -10,7 +10,7 @@ import warnings
 import numpy as np
 import pytest
 
-from quchip import Chip, Port, PortNetwork, QuantumSequence, Resonator
+from quchip import Chip, PortNetwork, QuantumSequence, Resonator
 from quchip.chip.couplings import Capacitive
 
 
@@ -34,6 +34,48 @@ def test_network_owns_ports_and_unconnected_ports_are_identity_exposures() -> No
     np.testing.assert_allclose(resolved.S, np.eye(2))
     np.testing.assert_allclose(resolved.L[0].to_dense(), np.sqrt(0.01) * _lowering(3))
     np.testing.assert_allclose(resolved.L[1].to_dense(), np.sqrt(0.04) * _lowering(3))
+
+
+def test_attached_network_edits_update_future_calculations_and_parameter_paths() -> None:
+    """Network authoring stays live while earlier resolved channels stay captured."""
+    resonator = Resonator(freq=6.0, levels=3, label="r")
+    network = PortNetwork(label="feedline")
+    left = network.port("left", target=resonator, rate=0.01)
+    chip = Chip([resonator], port_network=network)
+    before = chip.resolve().slh
+    clone = chip.clone()
+
+    right = network.port("right", target=resonator, rate=0.04)
+
+    assert chip.ports == (left, right)
+    assert chip.port("right") is right
+    assert chip.parameters["port.right.rate"] == 0.04
+    assert chip.settings["ports"] == (("left", ("r",)), ("right", ("r",)))
+    after = chip.resolve().slh
+    assert [channel.key for channel in before.external_channels] == ["left"]
+    assert [channel.key for channel in after.external_channels] == ["left", "right"]
+    np.testing.assert_allclose(after.L[1].to_dense(), np.sqrt(0.04) * _lowering(3))
+    assert [port.label for port in clone.ports] == ["left"]
+
+    rebound = chip.with_params({"port.right.rate": 0.09})
+    assert rebound.port("right").rate == 0.09
+    assert right.rate == 0.04
+    assert Chip.from_dict(chip.to_dict()).parameters["port.right.rate"] == 0.04
+    assert chip.disconnect_network() is network
+    assert chip.ports == ()
+
+
+def test_new_network_port_targets_are_validated_on_the_next_calculation() -> None:
+    """An attached graph cannot hide a new port whose target is absent."""
+    resonator = Resonator(freq=6.0, levels=3, label="r")
+    network = PortNetwork()
+    network.port("left", target=resonator, rate=0.01)
+    chip = Chip([resonator], port_network=network)
+    chip.resolve()
+    network.port("bad", target="missing", rate=0.02)
+
+    with pytest.raises((ValueError, KeyError), match="missing"):
+        chip.resolve()
 
 
 def test_direct_scattering_mapping_uses_output_input_order() -> None:
@@ -186,24 +228,6 @@ def test_cascade_and_expose_accept_terminals_ports_and_components() -> None:
     np.testing.assert_allclose(resolved.L[1].to_dense(), -transmitted)
 
 
-def test_sequence_template_retains_composed_input_free_slh() -> None:
-    """Sequence assembly preserves the resolved input-free network model."""
-    first = Resonator(freq=5.0, levels=2, label="a")
-    second = Resonator(freq=6.0, levels=2, label="b")
-    network = PortNetwork(label="line")
-    a = network.port("a_port", target=first, rate=0.04)
-    b = network.port("b_port", target=second, rate=0.09)
-    network.cascade(a, b)
-    network.expose("feedline", input=a.input, output=b.output)
-    chip = Chip([first, second], port_network=network)
-
-    resolved = QuantumSequence(chip).resolve().slh
-
-    assert [channel.key for channel in resolved.external_channels] == ["feedline"]
-    np.testing.assert_allclose(resolved.S, [[1.0]])
-    np.testing.assert_allclose(resolved.L[0].to_dense(), chip.resolve().slh.L[0].to_dense())
-
-
 def test_delay_section_is_reference_plane_metadata_only() -> None:
     """A linked delay decorates both legs of the plane without entering instantaneous SLH."""
     resonator = Resonator(freq=6.0, levels=2, label="r")
@@ -313,27 +337,6 @@ def test_network_dilation_precedes_stable_identity_hidden_baths() -> None:
     assert resolved.channels[3].collapse.source == "r"
     np.testing.assert_allclose(resolved.S[3], [0.0, 0.0, 0.0, 1.0])
     np.testing.assert_allclose(resolved.S[:3, 3], 0.0)
-
-
-def test_from_ports_builds_an_explicit_identity_network() -> None:
-    """Existing port objects can seed the sole explicit network boundary."""
-    resonator = Resonator(freq=6.0, levels=2, label="r")
-    port = Port(resonator, rate=0.01, label="readout")
-
-    chip = Chip([resonator], port_network=PortNetwork.from_ports([port]))
-
-    assert chip.port_network is not None
-    assert chip.port_network.ports == (port,)
-    np.testing.assert_allclose(chip.resolve().slh.S, [[1.0]])
-
-
-def test_chip_has_one_network_construction_path() -> None:
-    """Ports enter a chip through its sole network-owned boundary."""
-    resonator = Resonator(freq=6.0, levels=2, label="r")
-    port = Port(resonator, rate=0.01, label="readout")
-
-    with pytest.raises(TypeError, match="ports"):
-        Chip([resonator], ports=[port])  # type: ignore[call-arg]
 
 
 def test_second_network_cannot_silently_replace_the_first() -> None:
@@ -833,6 +836,22 @@ def test_include_interfaces_and_rejections() -> None:
     with pytest.raises(ValueError, match="include itself"):
         template.include(template, prefix="again")
     assert template.to_dict() == before
+
+
+def test_copied_component_parameters_do_not_alias_authored_arrays() -> None:
+    """Graph copying owns numerical parameters while retaining callable identity."""
+    eta = np.asarray(0.64)
+    template = PortNetwork(label="template")
+    loss = template.attenuator("loss", eta=eta)
+    template.expose("chip", at=loss.side(1))
+    template.expose("room", at=loss.side(2))
+    copied = template.copy()
+    host = PortNetwork(label="host")
+    host.include(template, prefix="a")
+    eta[...] = 0.25
+    assert template.parameters["component.loss.eta"] == pytest.approx(0.25)
+    assert copied.parameters["component.loss.eta"] == pytest.approx(0.64)
+    assert host.parameters["component.a/loss.eta"] == pytest.approx(0.64)
 
 
 def test_include_keeps_filter_callables_by_reference() -> None:

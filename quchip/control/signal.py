@@ -26,6 +26,7 @@ Examples
 
 from __future__ import annotations
 
+import numpy as np
 import copy
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -47,6 +48,11 @@ from quchip.engine.ir import (
     evaluate_signal_program,
 )
 from quchip.utils.constants import TWO_PI
+from quchip.declarative.parameters import (
+    KeywordOnlyDeclarativeMeta, parameter, setting, parameter_fields, setting_fields,
+    resolve_declared_params, resolve_declared_settings, validate_sign, UNBOUND,
+)
+from quchip.utils.values import copy_value
 from quchip.utils.labeling import resolve_label
 from quchip.utils.registry import Registrable
 
@@ -151,30 +157,99 @@ class AnalyticSignal:
 SignalMap = dict[SignalKey, AnalyticSignal]
 
 
-class SignalTransform(Registrable, ABC, registry_root=True):
-    """Abstract base for signal-map transforms, auto-registered for serialization.
+def _encode_field(value: Any) -> Any:
+    if isinstance(value, complex):
+        return {"complex": [value.real, value.imag]}
+    if isinstance(value, dict):
+        return {"dict": [[_encode_field(key), _encode_field(item)] for key, item in value.items()]}
+    if isinstance(value, tuple):
+        return {"tuple": [_encode_field(item) for item in value]}
+    if isinstance(value, list):
+        return [_encode_field(item) for item in value]
+    if hasattr(value, "shape"):
+        return {"array": _encode_field(np.asarray(value).tolist())}
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    raise TypeError(f"Cannot serialize transform field of type {type(value).__name__}.")
 
-    The type registry, the ``{"type": ...}`` :meth:`to_dict` stamp, and the
-    ``from_dict`` dispatch are owned by the shared
-    :class:`~quchip.utils.registry.Registrable` mixin; the parameter-less
-    default reconstruction (``cls()``) covers transforms that carry no
-    persisted state, while payload-carrying transforms override
-    :meth:`to_dict` / :meth:`from_dict`.
+
+def _decode_field(value: Any) -> Any:
+    if isinstance(value, dict):
+        if set(value) == {"complex"}:
+            return complex(*value["complex"])
+        if set(value) == {"array"}:
+            return np.asarray(_decode_field(value["array"]))
+        if set(value) == {"dict"}:
+            return {_decode_field(key): _decode_field(item) for key, item in value["dict"]}
+        if set(value) == {"tuple"}:
+            return tuple(_decode_field(item) for item in value["tuple"])
+        raise ValueError("Invalid serialized transform field.")
+    return [_decode_field(item) for item in value] if isinstance(value, list) else value
+
+
+class SignalTransform(Registrable, ABC, registry_root=True, metaclass=KeywordOnlyDeclarativeMeta):
+    """A signal-map transform with shared parameter and setting declarations.
+
+    Implement ``apply`` and declare ``serializable=True`` on classes whose
+    fields can be saved. Import the extension before loading its instances.
     """
 
-    _parameter_names: tuple[str, ...] = ()
+    _serializable = False
+
+    def __init_subclass__(cls, *, serializable: bool = False, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        cls._serializable = serializable
+        if not serializable:
+            cls._registry.pop(cls._type_key(), None)
+
+    def __init__(self, **values: Any) -> None:
+        settings = resolve_declared_settings(type(self), values)
+        parameters = resolve_declared_params(type(self), values)
+        for name, value in {**settings, **parameters}.items():
+            if value is UNBOUND:
+                raise TypeError(f"Missing required transform field: {name}")
+            setattr(self, name, copy_value(value))
+        self.validate()
+
+    def validate(self) -> None:
+        """Validate relationships between declared fields after construction or rebinding."""
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        spec = parameter_fields(type(self)).get(name)
+        if spec is not None:
+            validate_sign(name, spec, value)
+        super().__setattr__(name, value)
 
     def parameter_values(self) -> dict[str, Any]:
-        """Return transform-owned bindable values declared by the subclass."""
-        return {name: getattr(self, name) for name in self._parameter_names}
+        """Return the transform's declared numerical values."""
+        return {name: getattr(self, name) for name in parameter_fields(type(self))}
+
+    def copy(self) -> "SignalTransform":
+        """Copy authored fields while preserving native differentiation leaves."""
+        copied = copy.copy(self)
+        copied.__dict__ = copy_value(vars(self))
+        return copied
 
     def with_parameter_value(self, name: str, value: Any) -> "SignalTransform":
-        """Return this transform with one declared numerical value replaced."""
-        if name not in self._parameter_names:
+        """Validate and rebind one numerical field on an independent transform."""
+        if name not in parameter_fields(type(self)):
             raise KeyError(name)
-        rebound = copy.copy(self)
-        object.__setattr__(rebound, name, value)
+        rebound = self.copy()
+        setattr(rebound, name, copy_value(value))
+        rebound.validate()
         return rebound
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize declared fields for a class that opted into persistence."""
+        if not self._serializable:
+            raise TypeError(f"{type(self).__name__} requires serializable=True to save its instances.")
+        fields: dict[str, Any] = {**parameter_fields(type(self)), **setting_fields(type(self))}
+        return {**super().to_dict(), **{name: _encode_field(getattr(self, name))
+                                       for name, spec in fields.items() if spec.serialize}}
+
+    @classmethod
+    def _from_dict_payload(cls, data: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+        return cls(**{key: _decode_field(value) for key, value in data.items() if key != "type"})
 
     @abstractmethod
     def apply(self, signals: SignalMap) -> SignalMap:
@@ -189,13 +264,11 @@ class SignalTransform(Registrable, ABC, registry_root=True):
         return None if line in self.referenced_lines() else self
 
 
-@dataclass(frozen=True)
-class Delay(SignalTransform):
+class Delay(SignalTransform, serializable=True):
     """Shift every signal on *line* in time by ``delta_t`` ns."""
 
-    line: str
-    delta_t: float
-    _parameter_names = ("delta_t",)
+    line: str = setting()
+    delta_t: float = parameter()
 
     def __init__(self, line: str | Any, delta_t: float) -> None:
         _reject_field_endpoint(line, transform="ControlEquipment.Delay")
@@ -213,25 +286,11 @@ class Delay(SignalTransform):
     def referenced_lines(self) -> tuple[str, ...]:
         return (self.line,)
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize into a JSON-safe dictionary."""
-        data = super().to_dict()
-        data["line"] = self.line
-        data["delta_t"] = float(self.delta_t)
-        return data
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Delay":
-        return cls(line=str(d["line"]), delta_t=float(d["delta_t"]))
-
-
-@dataclass(frozen=True)
-class Gain(SignalTransform):
+class Gain(SignalTransform, serializable=True):
     """Scale every signal on *line* by a complex *factor*."""
 
-    line: str
-    factor: complex
-    _parameter_names = ("factor",)
+    line: str = setting()
+    factor: complex = parameter()
 
     def __init__(self, line: str | Any, factor: complex) -> None:
         _reject_field_endpoint(line, transform="ControlEquipment.Gain")
@@ -249,24 +308,7 @@ class Gain(SignalTransform):
     def referenced_lines(self) -> tuple[str, ...]:
         return (self.line,)
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize into a JSON-safe dictionary."""
-        data = super().to_dict()
-        data["line"] = self.line
-        data["real"] = float(complex(self.factor).real)
-        data["imag"] = float(complex(self.factor).imag)
-        return data
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Gain":
-        return cls(
-            line=str(d["line"]),
-            factor=complex(float(d.get("real", 0.0)), float(d.get("imag", 0.0))),
-        )
-
-
-@dataclass(frozen=True)
-class Crosstalk(SignalTransform):
+class Crosstalk(SignalTransform, serializable=True):
     r"""Linear crosstalk from a source drive line onto a victim line.
 
     For each scheduled operation on the source line, adds
@@ -295,12 +337,11 @@ class Crosstalk(SignalTransform):
         Time shift of the leaked signal relative to the source, ns.
     """
 
-    source: str
-    victim: str
-    beta: float
-    theta: float = 0.0
-    delay: float = 0.0
-    _parameter_names = ("beta", "theta", "delay")
+    source: str = setting()
+    victim: str = setting()
+    beta: Any = parameter()
+    theta: Any = parameter(default=0.0)
+    delay: Any = parameter(default=0.0)
 
     def __init__(
         self,
@@ -332,23 +373,3 @@ class Crosstalk(SignalTransform):
 
     def referenced_lines(self) -> tuple[str, ...]:
         return (self.source, self.victim)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize into a JSON-safe dictionary."""
-        data = super().to_dict()
-        data["source"] = self.source
-        data["victim"] = self.victim
-        data["beta"] = float(self.beta)
-        data["theta"] = float(self.theta)
-        data["delay"] = float(self.delay)
-        return data
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Crosstalk":
-        return cls(
-            source=str(d["source"]),
-            victim=str(d["victim"]),
-            beta=float(d["beta"]),
-            theta=float(d.get("theta", 0.0)),
-            delay=float(d.get("delay", 0.0)),
-        )

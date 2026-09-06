@@ -47,6 +47,7 @@ from quchip.backend.containers import (
     EigensystemData,
     PreparedBatch,
     PreparedHamiltonian,
+    PreparedStationary,
     LinearResponseSolverResult,
     SolverResult,
     SteadyStateSolverResult,
@@ -368,7 +369,7 @@ class Backend(ABC):
     # ------------------------------------------------------------------
     #
     # A trajectory is ``T`` saved states. The user-facing extractors
-    # (``population_array``, ``populations``, ``overlap_array``,
+    # (``population``, ``populations``, ``overlap``,
     # ``amplitude_array``) need one scalar/vector per save point. Doing that
     # with a Python loop over ``T`` single-state ``expect``/``ptrace`` calls
     # makes per-point dispatch the dominant cost on long ``tlist``s and
@@ -707,7 +708,7 @@ class Backend(ABC):
         tlist_arr, c_ops, solver, opts, e_ops_arg = self._resolve_solve_config(
             problem, prepared
         )
-        psi0 = self.coerce_state(problem.initial_state, dims=problem.chip.dims)
+        psi0 = self.coerce_state(problem.initial_state, dims=problem.engine_result.dims)
 
         if solver == "sesolve":
             return self.sesolve(prepared.rhs, psi0, tlist_arr,
@@ -715,7 +716,21 @@ class Backend(ABC):
         return self.mesolve(prepared.rhs, psi0, tlist_arr,
                             c_ops=c_ops, e_ops=e_ops_arg, options=opts)
 
-    def steadystate(self, problem: Any) -> SteadyStateSolverResult:
+    def _stationary_liouvillian(self, engine_result: "EngineResult") -> Any:
+        """Lower a static engine description to the backend's native generator."""
+        raise NotImplementedError(f"{type(self).__name__} must implement stationary lowering")
+
+    def prepare_stationary(
+        self, engine_result: "EngineResult", *, prepared: PreparedStationary | None = None,
+    ) -> PreparedStationary:
+        """Prepare once, or reuse the same backend and captured operating point."""
+        if prepared is None:
+            return PreparedStationary(self, engine_result, self._stationary_liouvillian(engine_result))
+        if prepared.backend is not self or prepared.engine_result is not engine_result:
+            raise ValueError("Stationary preparation belongs to a different backend or operating point.")
+        return prepared
+
+    def steadystate(self, problem: Any, *, prepared: PreparedStationary | None = None) -> SteadyStateSolverResult:
         """Solve one static Lindblad problem in the backend's native representation."""
         raise NotImplementedError(f"{type(self).__name__} must implement steadystate()")
 
@@ -729,6 +744,8 @@ class Backend(ABC):
         sources: tuple[tuple[str, "CanonicalOperator"], ...],
         observables: tuple[tuple[str, "CanonicalOperator"], ...],
         frequencies: Any,
+        *,
+        prepared: PreparedStationary | None = None,
     ) -> dict[tuple[str, str], Any]:
         """Evaluate trace-zero stationary resolvents in native backend arrays.
 
@@ -746,6 +763,8 @@ class Backend(ABC):
         initial: "CanonicalOperator",
         observables: tuple[tuple[str, "CanonicalOperator"], ...],
         times: Any,
+        *,
+        prepared: PreparedStationary | None = None,
     ) -> dict[str, Any]:
         """Propagate an operator under a static Liouvillian and evaluate observables.
 
@@ -932,7 +951,12 @@ class Backend(ABC):
         solver_name: str,
     ) -> dict[str, Any]:
         """Merge options and apply one backend-owned automatic-method decision."""
-        resolved = self._merge_options(problem.options, metadata=metadata, tlist=tlist)
+        options = {
+            **problem.options,
+            "store_states": problem.states == "all",
+            "store_final_state": problem.states == "final",
+        }
+        resolved = self._merge_options(options, metadata=metadata, tlist=tlist)
         return self._resolve_automatic_solver_options(
             resolved,
             user_options=problem.options,

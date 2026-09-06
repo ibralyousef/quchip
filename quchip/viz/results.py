@@ -79,7 +79,7 @@ def plot_populations(
     trace_out : device, label, or list thereof, optional
         Subsystems to partial-trace over before computing populations.
         Accepts either device objects or their string labels (UX favourability).
-        Requires ``options={"store_states": True}`` on the solver call.
+        Requires ``states="all"`` on the solver call.
     computational : bool
         When ``True``, restricts computational subsystems to their
         ``{|0>, |1>}`` subspace.
@@ -105,7 +105,7 @@ def plot_populations(
     ------
     RuntimeError
         *trace_out* is given but no states were stored (pass
-        ``options={"store_states": True}`` to the solver).
+        ``states="all"`` to the solver).
     ValueError
         *trace_out* would remove every subsystem.
     """
@@ -173,7 +173,7 @@ def plot_state(
     ----------
     result : SimulationResult
         Output of :func:`quchip.engine.simulate`, with
-        ``options={"store_states": True}``.
+        ``states="all"``.
     index : int
         Stored-time index to plot. Supports Python-style negative
         indexing (``-1`` is the last stored time); must satisfy
@@ -209,7 +209,7 @@ def plot_state(
         *mode* is not ``"population"`` or ``"dm"``, or *trace_out*
         would remove every subsystem.
     RuntimeError
-        No states were stored (pass ``options={"store_states": True}``
+        No states were stored (pass ``states="all"``
         to the solver).
     """
     index = _normalize_time_index(result, index)
@@ -515,7 +515,7 @@ def plot_wigner(
     ----------
     result : SimulationResult
         Output of :func:`quchip.engine.simulate`, with
-        ``options={"store_states": True}``.
+        ``states="all"``.
     index : int
         Stored-time index to plot. Supports Python-style negative
         indexing (``-1``, the default, is the last stored time); must
@@ -549,7 +549,7 @@ def plot_wigner(
         message lists the retained device labels and a *trace_out*
         value that isolates a single one of them.
     RuntimeError
-        No states were stored (pass ``options={"store_states": True}``
+        No states were stored (pass ``states="all"``
         to the solver).
 
     References
@@ -646,12 +646,12 @@ def plot_sparameters(
         raise TypeError(f"plot_sparameters requires an SParameterResult; got {type(result).__name__}.")
     if kind not in {"db_phase", "magnitude", "iq"}:
         raise ValueError(f"Unknown plot kind {kind!r}; use 'db_phase', 'magnitude', or 'iq'.")
-    planes = result.planes
+    ports = result.ports
     if pairs is None:
         pairs = (
-            [(out, inp) for inp in planes for out in planes]
-            if len(planes) == 2
-            else [(out, planes[0]) for out in planes][:6]
+            [(out, inp) for inp in ports for out in ports]
+            if len(ports) == 2
+            else [(out, ports[0]) for out in ports][:6]
         )
     names = result.axis_names
     select = select or {}

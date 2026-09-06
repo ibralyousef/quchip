@@ -88,9 +88,9 @@ def test_grad_through_reduced_chip_pump_amplitude():
         result = seq.simulate(
             tlist=jnp.linspace(0.0, duration, 11),
             initial_state=init_state,
-            options={"store_states": True, "store_final_state": True},
+            states="all",
         )
-        return result.population_array(reduced["q1"], 1)[-1]
+        return result.population(reduced["q1"], 1)[-1]
 
     grad = jax.grad(loss)(amp0)
     eps = 1e-4

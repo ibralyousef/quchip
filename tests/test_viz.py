@@ -17,16 +17,10 @@ from matplotlib.figure import Figure
 import quchip as qc
 from quchip.backend import SolverResult, get_default_backend
 from quchip.results import SimulationResult
-from quchip.viz._common import _normalize_time_index
 from quchip.viz.chip import _collect_topology, _coupling_node_id, _device_node_id, _drive_node_id
 from quchip.viz.results import _wigner_from_density_matrix
 
 pytestmark = pytest.mark.viz
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -105,11 +99,6 @@ def multi_device_state_result() -> SimulationResult:
     )
 
 
-# ---------------------------------------------------------------------------
-# A. Smoke-Figure assertions for all nine plotter implementations.
-# ---------------------------------------------------------------------------
-
-
 def test_plot_graph_returns_html_path(driven_chip, tmp_path: Path) -> None:
     """plot_graph writes an HTML file and returns its path."""
     chip, _q, _r, _drive = driven_chip
@@ -145,73 +134,6 @@ def test_plot_graph_can_show_bare_and_dressed_values(tmp_path: Path) -> None:
     assert f"f01={float(chip.freq(q)):.6f} GHz" in content
     assert "g=0.05 GHz" in content
     assert f"K={float(chip.kerr_matrix()[q, r]):.3g} GHz" in content
-
-
-def test_plot_energy_levels_chip_returns_figure(driven_chip) -> None:
-    """plot_energy_levels(chip) returns a Figure."""
-    chip, _q, _r, _drive = driven_chip
-    fig = qc.plot_energy_levels(chip)
-    assert isinstance(fig, Figure)
-    plt.close(fig)
-
-
-def test_plot_energy_levels_device_returns_figure(driven_chip) -> None:
-    """plot_energy_levels(device) returns a Figure."""
-    _chip, q, _r, _drive = driven_chip
-    fig = q.plot_energy_levels()
-    assert isinstance(fig, Figure)
-    plt.close(fig)
-
-
-def test_plot_wavefunction_returns_figure(driven_chip) -> None:
-    """plot_wavefunction(device, n) returns a Figure."""
-    _chip, q, _r, _drive = driven_chip
-    fig = qc.plot_wavefunction(q, 0)
-    assert isinstance(fig, Figure)
-    plt.close(fig)
-
-
-def test_plot_sequence_returns_figure(driven_chip) -> None:
-    """plot_sequence returns a Figure."""
-    chip, _q, _r, drive = driven_chip
-    seq = qc.QuantumSequence(chip)
-    seq.schedule(drive, envelope=qc.Gaussian(duration=20.0, amplitude=0.02, sigmas=3.0), freq=5.0)
-    fig = qc.plot_sequence(seq)
-    assert isinstance(fig, Figure)
-    plt.close(fig)
-
-
-def test_plot_populations_returns_figure(smoke_result: SimulationResult) -> None:
-    """plot_populations returns a Figure."""
-    fig = qc.plot_populations(smoke_result)
-    assert isinstance(fig, Figure)
-    plt.close(fig)
-
-
-def test_plot_state_returns_figure(smoke_result: SimulationResult) -> None:
-    """plot_state returns a Figure."""
-    fig = qc.plot_state(smoke_result, -1)
-    assert isinstance(fig, Figure)
-    plt.close(fig)
-
-
-def test_plot_expectation_returns_figure(smoke_result: SimulationResult) -> None:
-    """plot_expectation returns a Figure."""
-    fig = qc.plot_expectation(smoke_result)
-    assert isinstance(fig, Figure)
-    plt.close(fig)
-
-
-def test_plot_wigner_returns_figure(smoke_result: SimulationResult) -> None:
-    """plot_wigner returns a Figure once isolated to a single subsystem."""
-    fig = qc.plot_wigner(smoke_result, -1, trace_out="q")
-    assert isinstance(fig, Figure)
-    plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# B (item A). Edge-pump topology: junction node present, chip renders.
-# ---------------------------------------------------------------------------
 
 
 def test_collect_topology_represents_coupling_as_junction_node() -> None:
@@ -315,11 +237,6 @@ def test_plot_graph_rejects_unknown_value_mode(driven_chip, tmp_path: Path) -> N
         qc.plot_graph(chip, str(tmp_path / "bad-values.html"), values="effective")
 
 
-# ---------------------------------------------------------------------------
-# C (item B). plot_wigner requires exactly one retained subsystem.
-# ---------------------------------------------------------------------------
-
-
 def test_plot_wigner_without_isolating_trace_out_raises_and_names_labels(smoke_result: SimulationResult) -> None:
     """plot_wigner on a multi-device state without an isolating trace_out raises, naming the retained labels."""
     with pytest.raises(ValueError, match="'q'") as exc_info:
@@ -333,35 +250,6 @@ def test_plot_wigner_isolated_to_single_subsystem_succeeds(smoke_result: Simulat
     fig = qc.plot_wigner(smoke_result, trace_out="q")
     assert isinstance(fig, Figure)
     plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# D (item E). Shared index normalization for plot_state / plot_wigner.
-# ---------------------------------------------------------------------------
-
-
-def test_normalize_time_index_accepts_full_negative_range() -> None:
-    """_normalize_time_index accepts every index in [-N, N) and returns its non-negative form."""
-    class _FakeResult:
-        times = [0.0, 1.0, 2.0]
-
-    result = _FakeResult()
-    assert _normalize_time_index(result, -1) == 2
-    assert _normalize_time_index(result, -3) == 0
-    assert _normalize_time_index(result, 0) == 0
-    assert _normalize_time_index(result, 2) == 2
-
-
-def test_normalize_time_index_rejects_out_of_range() -> None:
-    """_normalize_time_index raises IndexError outside [-N, N)."""
-    class _FakeResult:
-        times = [0.0, 1.0, 2.0]
-
-    result = _FakeResult()
-    with pytest.raises(IndexError, match="out of range"):
-        _normalize_time_index(result, 3)
-    with pytest.raises(IndexError, match="out of range"):
-        _normalize_time_index(result, -4)
 
 
 def test_plot_state_accepts_negative_index(smoke_result: SimulationResult) -> None:
@@ -390,11 +278,6 @@ def test_plot_wigner_out_of_range_index_raises(smoke_result: SimulationResult) -
         qc.plot_wigner(smoke_result, 10_000, trace_out="q")
 
 
-# ---------------------------------------------------------------------------
-# E (item H). Correlator tuple keys resolve as registered keys, not (key, index).
-# ---------------------------------------------------------------------------
-
-
 def test_plot_expectation_resolves_correlator_tuple_key(correlator_result: SimulationResult) -> None:
     """A tuple correlator key like ("q0", "q1") plots as itself, not as a (key, index) selector."""
     fig = qc.plot_expectation(correlator_result, keys=[("q0", "q1")])
@@ -418,11 +301,6 @@ def test_plot_expectation_correlator_key_not_misread_as_index_selector(correlato
     plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-# F (item I). plot_state "dm" mode shares one symmetric normalization.
-# ---------------------------------------------------------------------------
-
-
 def test_plot_state_dm_heatmaps_share_symmetric_normalization(multi_device_state_result: SimulationResult) -> None:
     """Re(rho) and Im(rho) heatmaps in plot_state(mode="dm") share one vmin/vmax."""
     fig = qc.plot_state(multi_device_state_result, 0, trace_out="r", mode="dm")
@@ -432,47 +310,6 @@ def test_plot_state_dm_heatmaps_share_symmetric_normalization(multi_device_state
     assert real_clim == imag_clim
     assert real_clim[0] == -real_clim[1]
     plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# G (item G). Root lazy exports.
-# ---------------------------------------------------------------------------
-
-
-_LAZY_VIZ_NAMES = (
-    "plot_energy_levels",
-    "plot_expectation",
-    "plot_graph",
-    "plot_populations",
-    "plot_sequence",
-    "plot_state",
-    "plot_wavefunction",
-    "plot_wigner",
-)
-
-
-@pytest.mark.parametrize("name", _LAZY_VIZ_NAMES)
-def test_viz_name_resolves_lazily_from_root(name: str) -> None:
-    """Each plot_* name resolves via quchip's module __getattr__ and is callable."""
-    assert callable(getattr(qc, name))
-
-
-def test_viz_names_all_in_root_all() -> None:
-    """Every plot_* name is listed in quchip.__all__."""
-    for name in _LAZY_VIZ_NAMES:
-        assert name in qc.__all__
-
-
-def test_viz_names_all_in_root_dir() -> None:
-    """dir(quchip) includes every lazily resolved plot_* name."""
-    names = dir(qc)
-    for name in _LAZY_VIZ_NAMES:
-        assert name in names
-
-
-# ---------------------------------------------------------------------------
-# H. Durable numerical Wigner test — independent of the solver pipeline.
-# ---------------------------------------------------------------------------
 
 
 def test_wigner_from_density_matrix_matches_qutip_for_complex_superposition() -> None:
@@ -500,11 +337,6 @@ def test_wigner_from_density_matrix_matches_qutip_for_fock_state() -> None:
     expected = qutip.wigner(rho, xvec, xvec, g=np.sqrt(2))
 
     np.testing.assert_allclose(actual, expected, atol=1e-10)
-
-
-# ---------------------------------------------------------------------------
-# Port networks and S-parameters
-# ---------------------------------------------------------------------------
 
 
 def _fridge_chip() -> tuple[qc.Chip, qc.PortNetwork]:

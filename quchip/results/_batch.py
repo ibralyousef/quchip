@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from operator import index
 from typing import Any, Generic, Self, TypeVar, cast, overload
 
 import numpy as np
 
 from quchip.backend import Backend
+from quchip.utils.values import copy_value
 
 ResultT = TypeVar("ResultT")
 
@@ -28,15 +30,11 @@ class BatchResult(Generic[ResultT]):
     ) -> None:
         object.__setattr__(self, "_results", tuple(results))
         if shape is None:
-            object.__setattr__(self, "_shape", (len(self._results),))
-            object.__setattr__(
-                self,
-                "_axes",
-                (("batch", tuple(range(len(self._results)))),) if axes is None else tuple(axes),
-            )
-        else:
-            object.__setattr__(self, "_shape", tuple(shape))
-            object.__setattr__(self, "_axes", () if axes is None else tuple(axes))
+            shape = (len(self._results),)
+            if axes is None:
+                axes = (("batch", tuple(range(len(self._results)))),)
+        object.__setattr__(self, "_shape", tuple(shape))
+        object.__setattr__(self, "_axes", copy_value(tuple(axes or ()), readonly=True))
         points = int(np.prod(self._shape, dtype=int))
         if points != len(self._results):
             raise ValueError(
@@ -61,15 +59,18 @@ class BatchResult(Generic[ResultT]):
 
     @property
     def axes(self) -> tuple[tuple[str, Any], ...]:
-        """Return named sweep-axis metadata."""
-        return self._axes
+        """Return an independent copy of the captured sweep-axis metadata."""
+        return copy_value(self._axes)
 
     @property
     def backend(self) -> Backend:
-        """Return the backend shared by every result."""
+        """Return a backend for the shared native array representation."""
         if not self._results:
             raise RuntimeError("Empty batch has no backend.")
-        return cast(Backend, getattr(self._results[0], "_backend"))
+        backend = cast(Backend, getattr(self._results[0], "_backend"))
+        if any(getattr(result, "_backend").array_module is not backend.array_module for result in self._results[1:]):
+            raise ValueError("Batch results use different native array backends; inspect individual results.")
+        return backend
 
     def __len__(self) -> int:
         return len(self._results)
@@ -99,7 +100,7 @@ class BatchResult(Generic[ResultT]):
             if not provided_names:
                 missing.append("/".join(member_names))
                 continue
-            provided_indices = {int(item[name]) for name in provided_names}
+            provided_indices = {index(item[name]) for name in provided_names}
             if len(provided_indices) != 1:
                 raise ValueError(f"Zipped axis {direct_name!r} constituent names must use the same index.")
             coord.append(provided_indices.pop())

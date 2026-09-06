@@ -88,52 +88,20 @@ class TestQuTiPStaticPropagatorSelection:
 
         assert options["method"] == "adams"
 
-    def test_explicit_diagonalization_discards_adaptive_tolerances(self) -> None:
-        """Explicit diagonal propagation should discard tolerances that its QuTiP integrator cannot consume."""
-        backend, problem = _static_problem(
-            "qutip",
-            options={"method": "diag", "atol": 1e-10, "rtol": 1e-8},
-        )
+    def test_explicit_diagonalization_rejects_adaptive_tolerances(self) -> None:
+        """Explicit diagonal propagation rejects numerical settings it cannot apply."""
+        backend, problem = _static_problem("qutip", options={"method": "diag", "atol": 1e-10})
+        with pytest.raises(ValueError, match="diag.*options"):
+            _resolved_options(backend, problem)
 
+    @pytest.mark.parametrize("controls", [{"atol": 1e-10, "rtol": 1e-8}, {"nsteps": 17}, {"max_step": 0.01}])
+    def test_explicit_controls_retain_adaptive_integration(self, controls: dict) -> None:
+        """User-supplied adaptive controls prevent an incompatible automatic method change."""
+        backend, problem = _static_problem("qutip", options=controls)
         options = _resolved_options(backend, problem)
-
-        assert options["method"] == "diag"
-        assert "atol" not in options
-        assert "rtol" not in options
-
-    def test_automatic_diagonalization_discards_adaptive_tolerances(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Automatic diagonal propagation should discard inapplicable tolerances and explain that choice."""
-        backend, problem = _static_problem(
-            "qutip",
-            options={"atol": 1e-10, "rtol": 1e-8},
-        )
-
-        with caplog.at_level("INFO", logger="quchip.backend.qutip"):
-            options = _resolved_options(backend, problem)
-
-        assert options["method"] == "diag"
-        assert "atol" not in options
-        assert "rtol" not in options
-        assert "discarded unsupported adaptive options: atol, rtol" in caplog.text
-
-    @pytest.mark.parametrize("step_option", [{"nsteps": 17}, {"max_step": 0.01}])
-    def test_automatic_diagonalization_discards_adaptive_step_control(
-        self,
-        step_option: dict,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Automatic diagonal propagation should discard step controls that have no diagonal equivalent."""
-        backend, problem = _static_problem("qutip", options=step_option)
-
-        with caplog.at_level("INFO", logger="quchip.backend.qutip"):
-            options = _resolved_options(backend, problem)
-
-        assert options["method"] == "diag"
-        assert not step_option.keys() & options.keys()
-        assert "discarded unsupported adaptive options" in caplog.text
+        assert options.get("method") != "diag"
+        for name, value in controls.items():
+            assert options[name] == value
 
     def test_driven_problem_retains_adaptive_integrator(self) -> None:
         """Any explicit Hamiltonian time dependence should keep QuTiP's adaptive integrator."""

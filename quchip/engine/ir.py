@@ -48,7 +48,9 @@ from quchip.utils.jax_utils import (
 from quchip.utils.constants import TWO_PI
 
 if TYPE_CHECKING:
+    from quchip.chip.dressing import BareProductReference
     from quchip.control.envelopes import Envelope
+    from quchip.control.signal import SignalKey
     from quchip.engine.frames import FramePlan
     from quchip.declarative.dynamics import TimeCoefficient
     from quchip.declarative.expr import PhysicsExpr
@@ -467,6 +469,10 @@ class ScalarModulation:
 
     signal: SignalProgram
 
+    def __post_init__(self) -> None:
+        # Reconstruct registered envelopes/coefficients as well as signal nodes.
+        object.__setattr__(self, "signal", jtu.tree_map(_capture_solve_input, self.signal))
+
 
 jtu.register_pytree_node(
     ScalarModulation,
@@ -499,6 +505,20 @@ def signal_children(node: Any) -> tuple:
     if isinstance(node, SignalNode):
         return node.signal_children()
     return ()
+
+
+def signal_window_bounds(signal: Any, shift: Any = 0.0) -> list[tuple[Any, Any]]:
+    """Return absolute window edges, retaining native values and batch axes.
+
+    Enclosing shifts move the clock of every descendant window. Collecting
+    structure requires no numerical decisions, so timing stays differentiable.
+    """
+    if isinstance(signal, Shift):
+        return signal_window_bounds(signal.child, shift + signal.delta_t)
+    bounds = [(signal.start + shift, signal.stop + shift)] if isinstance(signal, Window) else []
+    for child in signal_children(signal):
+        bounds.extend(signal_window_bounds(child, shift))
+    return bounds
 
 
 def evaluate_signal_program(signal: SignalProgram, t: Any, *, xp: Any | None = None) -> Any:
@@ -694,6 +714,8 @@ class CanonicalOperator:
                 f"subsystem_labels length {len(self.subsystem_labels)} does not match dims length {len(self.dims)}"
             )
         self._validate_payload()
+        for name in ("values", "indices", "indptr", "offsets"):
+            object.__setattr__(self, name, _capture_solve_input(getattr(self, name)))
 
     def _validate_payload(self) -> None:
         if self.layout == "dense":
@@ -1295,6 +1317,10 @@ class BoundCoherentInput:
     beta: SignalProgram
     reference_beta: SignalProgram
 
+    def __post_init__(self) -> None:
+        for name in ("beta", "reference_beta"):
+            object.__setattr__(self, name, jtu.tree_map(_capture_solve_input, getattr(self, name)))
+
 
 @dataclass(frozen=True)
 class _ResolvedDressingContext:
@@ -1303,13 +1329,12 @@ class _ResolvedDressingContext:
     This is deliberately private engine metadata: backends still consume the
     canonical operators in :class:`EngineResult`, while ``dress()`` uses the
     backend that created the snapshot to preserve native eigenstate objects.
-    The reference vectors are copied from assembly-time basis resolution, so
-    later mutation of the source chip cannot change the result.
+    Local reference factors come from captured basis resolution, so later
+    mutation of the source chip cannot change their meaning.
     """
 
     backend: Any = field(repr=False, compare=False)
-    reference_vectors: Any = field(repr=False, compare=False)
-    reference_keys: tuple[tuple[int, ...], ...]
+    reference: BareProductReference = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -1348,6 +1373,7 @@ class EngineResult:
     resolved_frame: Any = None
     approximation: Any = None
     dynamical_supports: tuple[tuple[str, ...], ...] = ()
+    dissipation: bool = True
     _dressing_context: _ResolvedDressingContext | None = field(
         default=None,
         repr=False,
@@ -1366,7 +1392,9 @@ class EngineResult:
 
     @property
     def collapse_terms(self) -> tuple[CollapseTerm, ...]:
-        """Return collapse records in complete SLH channel order."""
+        """Return active collapse records in SLH channel order."""
+        if not self.dissipation:
+            return ()
         return tuple(channel.collapse_term for channel in self.slh.channels)
 
     def dress(
@@ -1435,7 +1463,9 @@ class EngineResult:
             for operator in operators
         )
         basis_payloads = tuple(
-            (record.vectors, record.energies, record.energy_vectors)
+            (record.vectors, record.energies, record.energy_vectors,
+             record.authored_hamiltonian.numeric_values()
+             if hasattr(record.authored_hamiltonian, "numeric_values") else record.authored_hamiltonian)
             for record in self.bases.values()
         )
         authored_values = (
@@ -1469,7 +1499,9 @@ class EngineResult:
 
     @property
     def port_terms(self) -> tuple[CollapseTerm, ...]:
-        """Return collapse channels that cross an accessible port boundary."""
+        """Return active collapse channels that cross an accessible port boundary."""
+        if not self.dissipation:
+            return ()
         return tuple(channel.collapse_term for channel in self.slh.external_channels)
 
     def hamiltonian(self) -> PhysicsExpr:
@@ -1616,6 +1648,7 @@ class HamiltonianTemplate:
     drive_terms: tuple[Any, ...] = ()               # tuple[assembly.CompiledDriveTerm, ...]
     coherent_terms: tuple[Any, ...] = ()            # tuple[assembly.CompiledCoherentTerm, ...]
     reference_drive_ops: tuple[Any, ...] = ()       # tuple[DriveOp, ...]
+    delivered_keys: frozenset[SignalKey] = frozenset()
     dropped_terms: tuple[Any, ...] = ()             # tuple[DroppedTerm, ...]
     #: Single-tone weight-zero bands dropped structurally under RWA during engine assembly.
     #: time (:func:`~quchip.engine.assembly._compile_drive_terms`).
@@ -1699,6 +1732,9 @@ def _reject_backend_option(options: dict[str, Any], *, cls_name: str) -> dict[st
     return dict(options)
 
 
+StateStorage: TypeAlias = Literal["all", "final", "none"]
+
+
 @dataclass(frozen=True)
 class SolveProblem:
     """Immutable simulation request handed from the chip pipeline to a backend.
@@ -1706,7 +1742,7 @@ class SolveProblem:
     Bundles the :class:`EngineResult` (Hamiltonian and collapse terms), an
     ``initial_state``, solver time grid, decomposed
     ``e_ops`` + their :class:`BandMeta`, the :class:`ResolvedFrame`, and
-    solver options. ``chip`` owns backend selection, so ``options`` must
+    solver options. Backend selection is captured at construction, so ``options`` must
     not contain a ``"backend"`` key (enforced in ``__post_init__``).
     ``e_ops_meta`` is the metadata observable reconstruction uses to recombine flattened
     band expectations back into dict-keyed observables.
@@ -1721,6 +1757,15 @@ class SolveProblem:
     resolved_frame: Any = None
     solver: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
+    truncation: Any = field(default=None, repr=False, compare=False, kw_only=True)
+    states: StateStorage = field(default="all", kw_only=True)
+    backend: Any = field(default=None, repr=False, compare=False, kw_only=True)
+    device_info: tuple[tuple[str, bool], ...] = field(default=(), kw_only=True)
+
+    @property
+    def dissipation(self) -> bool:
+        """Whether this calculation includes the resolved dissipators."""
+        return self.engine_result.dissipation
 
     def solver_name(self, backend: Any) -> str:
         """Return the selected solver name.
@@ -1733,11 +1778,46 @@ class SolveProblem:
         if self.solver is not None:
             if self.solver == "sesolve" and not is_ket:
                 raise ValueError("sesolve evolves kets only; a density matrix needs mesolve.")
+            if self.solver == "sesolve" and self.engine_result.collapse_terms:
+                raise ValueError(
+                    "sesolve cannot include dissipation; use mesolve or explicitly build with dissipation=False."
+                )
             return self.solver
         return "sesolve" if is_ket and not self.engine_result.collapse_terms else "mesolve"
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "options", _reject_backend_option(self.options, cls_name="SolveProblem"))
+        if self.solver not in (None, "sesolve", "mesolve"):
+            raise ValueError(f"Unknown solver {self.solver!r}; choose 'sesolve' or 'mesolve'.")
+        if not isinstance(self.states, str) or self.states not in ("all", "final", "none"):
+            raise ValueError('states must be "all", "final", or "none".')
+        options = _reject_backend_option(self.options, cls_name="SolveProblem")
+        if "t0" in options:
+            raise ValueError("The initial-state time is tlist[0]; set tlist instead of option 't0'.")
+        if {"store_states", "store_final_state"} & options.keys():
+            raise ValueError('Use states="all"|"final"|"none" instead of storage flags in options.')
+        object.__setattr__(self, "options", _capture_solve_input(options))
+        object.__setattr__(self, "tlist", _capture_solve_input(self.tlist))
+        object.__setattr__(self, "e_ops", _capture_solve_input(self.e_ops))
+        if self.backend is None and self.chip is not None:
+            object.__setattr__(self, "backend", self.chip.backend)
+        if not self.device_info:
+            object.__setattr__(self, "device_info", tuple(
+                (device.label, device.computational) for device in getattr(self.chip, "devices", ())
+            ))
+        if self.truncation is None and self.chip is not None and isinstance(self.engine_result, EngineResult):
+            from quchip.engine.truncation import capture_truncation
+
+            object.__setattr__(self, "truncation", capture_truncation(self.chip, self.engine_result))
+        copy_state = getattr(self.initial_state, "copy", None)
+        if copy_state is not None:
+            object.__setattr__(self, "initial_state", copy_state())
+
+
+def _capture_solve_input(value: Any) -> Any:
+    """Copy mutable input containers and NumPy buffers, retaining native JAX values."""
+    from quchip.utils.values import copy_value
+
+    return copy_value(value, readonly=True)
 
 
 @dataclass(frozen=True)
@@ -1774,13 +1854,22 @@ class SteadyStateProblem:
     e_ops_meta: Any = None
     resolved_frame: Any = None
     options: dict[str, Any] = field(default_factory=dict)
+    backend: Any = field(default=None, repr=False, compare=False, kw_only=True)
+    device_info: tuple[tuple[str, bool], ...] = field(default=(), kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "options",
-            _reject_backend_option(self.options, cls_name="SteadyStateProblem"),
+            _capture_solve_input(_reject_backend_option(self.options, cls_name="SteadyStateProblem")),
         )
+        object.__setattr__(self, "e_ops", _capture_solve_input(self.e_ops))
+        if self.backend is None:
+            object.__setattr__(self, "backend", self.chip.backend)
+        if not self.device_info:
+            object.__setattr__(self, "device_info", tuple(
+                (device.label, device.computational) for device in self.chip.devices
+            ))
 
 
 @dataclass(frozen=True)
@@ -1792,14 +1881,19 @@ class SolveBatch:
     params: Any = None
     shape: tuple[int, ...] = ()
     axes: tuple[tuple[str, Any], ...] = ()
+    # Original collection coordinates for errors raised during compiled execution.
+    _failure_context: tuple[tuple[int, dict[str, Any]], ...] = field(default=(), repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "axes", _capture_solve_input(self.axes))
         if not self.problems:
             return
         reference = self.problems[0]
         expected_dynamic = len(reference.engine_result.dynamic_terms)
         expected_dims = tuple(reference.engine_result.dims)
         for index, problem in enumerate(self.problems):
+            if problem.backend is not reference.backend:
+                raise ValueError("Every SolveProblem in a SolveBatch must share a captured backend.")
             actual_dynamic = len(problem.engine_result.dynamic_terms)
             if actual_dynamic != expected_dynamic:
                 raise ValueError(
@@ -1810,16 +1904,18 @@ class SolveBatch:
                     f"SolveProblem {index} has dims {tuple(problem.engine_result.dims)}; "
                     f"expected {expected_dims}. Structural settings cannot vary in a SolveBatch."
                 )
-            if problem.solver != reference.solver or problem.options != reference.options:
+            if (problem.solver != reference.solver or problem.options != reference.options
+                    or problem.states != reference.states):
                 raise ValueError("Every SolveProblem in a SolveBatch must share solver options.")
-            if problem.tlist is not reference.tlist:
-                if contains_tracer((problem.tlist, reference.tlist)):
-                    raise ValueError("Every SolveProblem in a SolveBatch must share one traced time grid.")
-                if not np.array_equal(np.asarray(problem.tlist), np.asarray(reference.tlist)):
-                    raise ValueError(
-                        "Every SolveProblem in a SolveBatch must share one time grid; "
-                        "use solve_many() for heterogeneous grids."
-                    )
+            if (problem.tlist is not reference.tlist
+                    and not contains_tracer((problem.tlist, reference.tlist))
+                    and np.array_equal(np.asarray(problem.tlist), np.asarray(reference.tlist))):
+                object.__setattr__(problem, "tlist", reference.tlist)
+
+    @property
+    def has_shared_tlist(self) -> bool:
+        """Whether every point has the same captured time grid."""
+        return all(problem.tlist is self.problems[0].tlist for problem in self.problems)
 
     @property
     def batch_size(self) -> int:
@@ -1831,6 +1927,8 @@ class SolveBatch:
 
     @property
     def tlist(self) -> Any:
+        if not self.has_shared_tlist:
+            raise ValueError("Batch points have different time grids; inspect each problem's tlist.")
         return self.problems[0].tlist
 
     def signals_for(self, slot: int) -> tuple[ScalarModulation, ...]:
@@ -1850,7 +1948,7 @@ class SolveBatch:
     def __getitem__(self, item: Any) -> Any:
         if isinstance(item, slice):
             return [self.element(index) for index in range(*item.indices(self.batch_size))]
-        return self.element(int(item))
+        return self.element(item)
 
     def params_at(self, point: int | tuple[int, ...]) -> dict[str, Any]:
         """Return sweep values at one grid coordinate."""
@@ -1860,7 +1958,7 @@ class SolveBatch:
             if point not in (0, ()):
                 raise IndexError(f"Scalar batch only accepts 0 or (), got {point!r}")
             return dict(self.params.item().items())
-        coordinate = point if isinstance(point, tuple) else (point,)
+        coordinate = point if isinstance(point, tuple) else np.unravel_index(point, self.shape)
         return dict(self.params[coordinate].items())
 
     def element(self, index: int) -> SolveProblem:
@@ -1880,10 +1978,9 @@ class DriveOp:
     equipment (e.g. ``"charge_0"``). ``target_label`` resolves in the
     chip's device or coupling label space.
 
-    The pulse window ``[start_time, start_time + envelope.duration]``
-    must overlap the solve ``tlist`` with positive measure — a window
-    that only touches a ``tlist`` endpoint contributes no evolution and
-    is rejected (:func:`~quchip.engine.problem.prepare_solve_problem_context`).
+    The pulse window retains its absolute scheduled time. A solve may
+    select a partial interval; a window wholly outside that interval or
+    touching only an endpoint contributes no evolution.
     """
 
     target_label: str

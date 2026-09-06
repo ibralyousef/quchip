@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 import numpy as np
 
+from quchip.utils.batching import expand_axis_groups
 from quchip.utils.labeling import bare_label_from_mapping, top_components
 
 if TYPE_CHECKING:
@@ -112,29 +113,10 @@ class Sweep:
 
     @staticmethod
     def expand(axes: Sequence[Sweep | ZippedSweep]) -> list[dict[str, Any]]:
-        """Expand sweep axes into a flat list of parameter dicts.
+        """Expand independent axes as a Cartesian product and zipped axes pairwise.
 
-        The Cartesian product of independent :class:`Sweep` axes is
-        taken; :class:`ZippedSweep` bundles remain element-wise. The
-        return order is the grid's C-order (last axis varies fastest).
-
-        This is the params-only view of :func:`_iter_axis_points` — the
-        single enumeration code path — with the grid coordinates dropped.
-
-        Parameters
-        ----------
-        axes
-            :class:`Sweep` and/or :class:`ZippedSweep` axes. Every axis name
-            (including each member of a zipped bundle) must be unique across
-            ``axes``, else :class:`ValueError` is raised — a repeated name
-            would silently overwrite itself in each point's parameter dict.
-
-        Returns
-        -------
-        list[dict[str, Any]]
-            One parameter dict per grid point, length equal to the product
-            of the independent axes' sizes (zipped bundles contribute their
-            shared size once).
+        Return one parameter dict per grid point in C-order (last axis fastest).
+        Every axis name, including each member of a zipped group, must be unique.
         """
         _shape, points = _iter_axis_points(axes)
         return [params for _coord, params in points]
@@ -142,25 +124,19 @@ class Sweep:
 
 def _axis_groups(
     axes: Sequence[Sweep | ZippedSweep],
-) -> tuple[list[list[dict[str, Any]]], tuple[int, ...]]:
-    """Normalize axes into per-group parameter dicts plus a Cartesian shape."""
+) -> list[list[dict[str, Any]]]:
+    """Normalize axes into independent groups of parameter dictionaries."""
     groups: list[list[dict[str, Any]]] = []
     for axis in axes:
         if isinstance(axis, ZippedSweep):
             groups.append([{s.name: s.values[i] for s in axis.sweeps} for i in range(axis.size)])
         else:
             groups.append([{axis.name: value} for value in axis.values])
-    return groups, tuple(len(group) for group in groups)
+    return groups
 
 
 def _check_unique_axis_names(axes: Sequence[Sweep | ZippedSweep]) -> None:
-    """Raise ``ValueError`` if any name repeats across ``axes``, including within a zip.
-
-    ``_iter_axis_points`` merges each grid point's per-axis param dicts with
-    ``dict.update``, so two axes (or two members of one
-    :class:`ZippedSweep`, or a zipped member colliding with an independent
-    axis) sharing a name silently overwrite each other instead of raising.
-    """
+    """Reject duplicate names across independent axes and zipped members."""
     names: list[str] = []
     for axis in axes:
         if isinstance(axis, ZippedSweep):
@@ -177,18 +153,7 @@ def _iter_axis_points(
 ) -> tuple[tuple[int, ...], list[tuple[tuple[int, ...], dict[str, Any]]]]:
     """Yield every (N-D coordinate, param dict) pair on the sweep grid."""
     _check_unique_axis_names(axes)
-    groups, shape = _axis_groups(axes)
-    if not shape:
-        return (), [((), {})]
-
-    expanded: list[tuple[tuple[int, ...], dict[str, Any]]] = []
-    for coord in np.ndindex(*shape):
-        params: dict[str, Any] = {}
-        for group_index, entry_index in enumerate(coord):
-            params.update(groups[group_index][entry_index])
-        expanded.append((coord, params))
-    return shape, expanded
-
+    return expand_axis_groups(_axis_groups(axes))
 
 def _axis_metadata(
     axes: Sequence[Sweep | ZippedSweep],
@@ -285,12 +250,9 @@ class SpectrumSweepResult:
         device_states: Mapping[str, int] | None,
         device_state_kwargs: Mapping[str, int],
     ) -> tuple[int, ...]:
-        """Resolve partial device-state specifications into a full bare-label tuple.
+        """Build a bare-state tuple from device-or-label keys, defaulting to level zero.
 
-        Delegates to :func:`quchip.utils.labeling.bare_label_from_mapping`,
-        the single canonical spec-to-tuple definition: keys may be device
-        objects or labels, unspecified devices default to Fock index 0, and
-        duplicate or unknown labels raise :class:`ValueError`.
+        Duplicate or unknown labels raise ``ValueError``.
         """
         return bare_label_from_mapping(self.device_labels, device_states, device_state_kwargs)
 

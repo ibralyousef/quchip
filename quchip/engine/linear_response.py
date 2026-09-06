@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
+import jax
+
 from quchip.approximations import Approximation
 from quchip.chip.ports import Port
-from quchip.declarative.expr import PhysicsExpr, materialize_expr
+from quchip.declarative.expr import PhysicsExpr, _bound_values, materialize_expr
 from quchip.devices.spaces import FockSpace
 from quchip.engine.assembly import _apply_2pi_scalar
 from quchip.engine.ir import LinearResponseProblem
 from quchip.engine.reference import cw_transfer
+from quchip.utils.jax_utils import maybe_concrete_scalar
 
 
 class _UnsupportedLinearModel(Exception):
@@ -39,7 +42,7 @@ def _build_linear_response_problem(
     network = chip.port_network
     if network is None:
         raise _UnsupportedLinearModel
-    if chip.dynamic_contributions():
+    if chip.dynamic_contributions() or chip.effective_terms:
         raise _UnsupportedLinearModel
 
     labels = tuple(device.label for device in chip.devices)
@@ -77,20 +80,20 @@ def _build_linear_response_problem(
     for port in network.ports:
         raw_ports[port.label] = _port_coupling_vector(port, chip, mode_index, backend)
 
-    exposures, network_scattering, coupling_maps, generated_pairs, planes, _ = network._compile()
+    compiled = network._compile()
     exposure_couplings = xp.stack(
         [
             sum(
                 (
                     xp.asarray(coefficient) * raw_ports[source]
-                    for source, coefficient in mapping.items()
+                    for source, coefficient in channel.coupling.items()
                 ),
                 start=xp.zeros((len(labels),), dtype=complex),
             )
-            for mapping in coupling_maps
+            for channel in compiled.channels
         ]
     )
-    for downstream, upstream, coefficient in generated_pairs:
+    for downstream, upstream, coefficient in compiled.generated_pairs:
         product = xp.outer(
             xp.conj(raw_ports[downstream]),
             xp.asarray(coefficient) * raw_ports[upstream],
@@ -110,11 +113,11 @@ def _build_linear_response_problem(
         if not hidden_couplings
         else xp.concatenate((exposure_couplings, xp.stack(hidden_couplings)), axis=0)
     )
-    network_size = len(exposures)
+    network_size = len(compiled.channels)
     full_size = network_size + len(hidden_couplings)
     scattering = xp.eye(full_size, dtype=complex)
-    scattering = _set_block(scattering, xp.asarray(network_scattering), network_size)
-    external_labels = tuple(exposure.label for exposure in exposures if not exposure._hidden)
+    scattering = _set_block(scattering, xp.asarray(compiled.scattering), network_size)
+    external_labels = tuple(channel.exposure.label for channel in compiled.channels if not channel.exposure._hidden)
     try:
         plane_indices = tuple(external_labels.index(label) for label in plane_labels)
     except ValueError as error:
@@ -122,7 +125,7 @@ def _build_linear_response_problem(
             f"Unknown linear-response exposure. Available exposures: {list(external_labels)}"
         ) from error
     frequency_values = xp.asarray(frequencies, dtype=float)
-    external_planes = [plane for exposure, plane in zip(exposures, planes, strict=True) if not exposure._hidden]
+    external_planes = [channel.reference for channel in compiled.channels if not channel.exposure._hidden]
 
     def transfer_columns(runs: list[Any]) -> Any:
         return xp.stack(
@@ -214,17 +217,29 @@ def _linear_operator_vector(expression: Any, mode_index: dict[str, int], backend
 
 
 def _operator_terms(expression: PhysicsExpr, backend: Any) -> list[tuple[Any, tuple[tuple[str, str], ...]]]:
-    bindings: dict[str, Any] = {}
-    stack = [expression]
-    while stack:
-        node = stack.pop()
-        bindings.update(node._bindings)
-        stack.extend(arg for arg in node.args if isinstance(arg, PhysicsExpr))
+    bindings = _bound_values(expression)
 
     def expand(node: PhysicsExpr) -> list[tuple[Any, tuple[tuple[str, str], ...]]]:
         if not node.labels:
             return [(_scalar_value(node, backend, bindings=bindings), ())]
+        if node.kind == "level":
+            hamiltonian = node.args[0]
+            if not isinstance(hamiltonian, PhysicsExpr):
+                raise _UnsupportedLinearModel
+            number = ((node.labels[0], "adag"), (node.labels[0], "a"))
+            # Only a positive harmonic spectrum proves that energy order is
+            # Fock order. Unknown or reordered spectra use the general solver.
+            with jax.ensure_compile_time_eval():
+                terms = expand(hamiltonian)
+                if any(factors not in ((), number) for _, factors in terms):
+                    raise _UnsupportedLinearModel
+                frequency = maybe_concrete_scalar(sum(coefficient for coefficient, factors in terms if factors))
+            if frequency is None or not 0 < frequency < float("inf"):
+                raise _UnsupportedLinearModel
+            return [(1.0, number)]
         if node.kind == "op":
+            if type(node.args[1]) is not FockSpace:
+                raise _UnsupportedLinearModel
             name = node.args[0]
             factors: tuple[tuple[str, str], ...]
             if name == "a":

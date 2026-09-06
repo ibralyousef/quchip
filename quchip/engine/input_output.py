@@ -34,7 +34,7 @@ def resolve_stationary_engine(
         raise ValueError(
             f"Exchange-connected devices {list(conflict.cluster)!r} are addressed by distinct stationary tones. {tail}"
         ) from None
-    engine = chip.resolve(frame=plan)
+    engine = chip._resolve(frame=plan, _resolution=resolution)
     if engine.dynamic_terms:
         raise ValueError(
             f"The selected tones leave dynamic Hamiltonian terms after frame and approximation resolution. {tail}"

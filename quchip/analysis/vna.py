@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from functools import partial
 from typing import Any
 
 import numpy as np
 
+from quchip.utils.values import DeferredValue
+from quchip.backend.containers import PreparedStationary
 from quchip.engine.input_output import (
     add_port_inputs,
     port_operators,
@@ -23,12 +26,35 @@ from quchip.results.input_output import (
     OutputCorrelationResult,
     OutputSpectrumResult,
     SParameterResult,
+    _LazyDiagnostics,
 )
+from quchip.results.steady_state import SteadyStateResult
 from quchip.sweep import Sweep, ZippedSweep, _axis_metadata, _iter_axis_points
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar
 from quchip.utils.labeling import resolve_label
 
 _TONE_PREFIX = "__vna_tone_"
+
+
+@dataclass(frozen=True)
+class _OperatingPoint:
+    prepared: PreparedStationary
+    state: SteadyStateResult
+    tones: tuple[tuple[str, Any, Any], ...]
+
+    @property
+    def engine(self) -> EngineResult:
+        return self.prepared.engine_result
+
+    @property
+    def diagnostics(self) -> Mapping[str, Any]:
+        return _LazyDiagnostics({
+            "solver": "stationary_resolvent",
+            "residual": self.state.residual,
+            "trace_error": self.state.trace_error,
+            "positivity_error": DeferredValue(partial(getattr, self.state, "positivity_error")),
+            "condition_number": partial(getattr, self.state, "condition_number"),
+        })
 
 
 @dataclass(frozen=True)
@@ -63,26 +89,26 @@ class _ToneAxis(Sweep):
 
 
 class VNA:
-    """Small-signal scattering between selected external planes of one chip.
+    """Small-signal scattering between selected instrument ports of one chip.
 
-    ``VNA(chip)`` selects every external plane in the chip's ``PortNetwork``.
-    Pass a sequence of exposures or labels as ``planes`` to select a subset;
+    ``VNA(chip)`` selects every exposed instrument port in the chip's ``PortNetwork``.
+    Pass exposed port objects or their labels as ``ports`` to select a subset;
     a bare label string is rejected.
     """
 
-    def __init__(self, chip: Any, *, planes: Sequence[Any] | None = None) -> None:
+    def __init__(self, chip: Any, *, ports: Sequence[Any] | None = None) -> None:
         self.chip = chip
-        if planes is None:
+        if ports is None:
             if chip.port_network is None:
                 raise ValueError("VNA requires a chip with a PortNetwork.")
-            planes = chip.port_network.exposures
-        elif isinstance(planes, str) or not isinstance(planes, Sequence):
-            raise TypeError("VNA planes must be a sequence of exposures or labels.")
-        self.planes = tuple(_resolve_exposure(chip, plane) for plane in planes)
-        if not self.planes:
-            raise ValueError("VNA requires at least one plane.")
-        if len(set(self.planes)) != len(self.planes):
-            raise ValueError(f"VNA planes must be unique, got {list(self.planes)}.")
+            ports = chip.port_network.exposures
+        elif isinstance(ports, str) or not isinstance(ports, Sequence):
+            raise TypeError("VNA ports must be a sequence of exposures or labels.")
+        self.ports = tuple(_resolve_exposure(chip, plane) for plane in ports)
+        if not self.ports:
+            raise ValueError("VNA requires at least one port.")
+        if len(set(self.ports)) != len(self.ports):
+            raise ValueError(f"VNA ports must be unique, got {list(self.ports)}.")
         self._tones: list[PortTone] = []
 
     def pump(self, port: Any, *, freq: Any, amplitude: Any) -> PortTone:
@@ -103,10 +129,10 @@ class VNA:
         options: dict | None = None,
         progress: bool = False,
     ) -> SParameterResult:
-        """Sweep the complete selected-plane small-signal matrix around fixed pumps.
+        """Sweep the complete selected-port small-signal matrix around fixed pumps.
 
-        The result contains every ``S(output, input)`` between the selected planes.
-        Its ``matrix`` has shape ``(*sweep_axes, n_planes, n_planes)`` and is
+        The result contains every ``S(output, input)`` between the selected ports.
+        Its ``matrix`` has shape ``(*sweep_axes, n_ports, n_ports)`` and is
         indexed ``[..., output, input]``. Ordinary ``Sweep`` axes name paths in
         ``chip.parameters`` and rebind the chip at each point; they may be mixed
         with pump-tone axes. At each frequency, the passive-linear route
@@ -121,7 +147,7 @@ class VNA:
         if freq_is_axis:
             shape += (len(freq_values),)
 
-        labels = self.planes
+        labels = self.ports
         xp = self.chip.backend.array_module
         axes = _public_axes(variations)
         if freq_is_axis:
@@ -131,7 +157,7 @@ class VNA:
             block = (*shape, len(labels), len(labels))
             return SParameterResult(
                 frequencies=freq_values if freq_is_axis else freq_values[0],
-                planes=labels,
+                ports=labels,
                 axes=axes,
                 shape=shape,
                 diagnostics=tuple(diagnostics),
@@ -154,22 +180,13 @@ class VNA:
             iterator = tqdm(points, desc="VNA")
 
         blocks: list[tuple[Any, Any]] = []
-        diagnostics: list[dict[str, Any]] = []
+        diagnostics: list[Mapping[str, Any]] = []
         for tones, chip, frequency in iterator:
-            operating_engine, operating, point_diagnostics = _operating_point(
+            operating = _operating_point(
                 chip, tones, frequency, labels, options
             )
-            blocks.append(
-                _small_signal_matrix(
-                    operating_engine,
-                    operating.state,
-                    chip.backend,
-                    port_operators(operating_engine, chip.backend),
-                    labels,
-                    frequency,
-                )
-            )
-            diagnostics.append(point_diagnostics)
+            blocks.append(_small_signal_matrix(operating, labels, frequency))
+            diagnostics.append(operating.diagnostics)
 
         return result(diagnostics, *(xp.stack(part) for part in zip(*blocks, strict=True)))
 
@@ -202,13 +219,13 @@ class VNA:
         metastable branches.
         """
         if input is None:
-            if len(self.planes) != 1:
+            if len(self.ports) != 1:
                 raise ValueError("finite_power() requires input= when more than one plane is selected.")
-            input_label = self.planes[0]
+            input_label = self.ports[0]
         else:
             input_label = _resolve_exposure(self.chip, input)
-            if input_label not in self.planes:
-                raise ValueError(f"finite_power() input {input_label!r} is not a selected plane {list(self.planes)}.")
+            if input_label not in self.ports:
+                raise ValueError(f"finite_power() input {input_label!r} is not a selected port {list(self.ports)}.")
         if any(tone.port == input_label for tone in self._tones):
             raise ValueError(
                 f"Plane {input_label!r} already carries a fixed pump. The finite_power() probe must be "
@@ -227,7 +244,7 @@ class VNA:
         if freq_is_axis:
             shape += (len(freq_values),)
             axes += (("frequency", freq_values),)
-        labels = self.planes
+        labels = self.ports
         xp = self.chip.backend.array_module
 
         points = [
@@ -244,19 +261,19 @@ class VNA:
 
         values: list[Any] = []
         incident: list[Any] = []
-        diagnostics: list[dict[str, Any]] = []
+        diagnostics: list[Mapping[str, Any]] = []
         for tones, chip, amplitude, frequency in iterator:
             all_tones = tones + ((input_label, frequency, amplitude),)
-            operating_engine, operating, point_diagnostics = _operating_point(
+            operating = _operating_point(
                 chip, all_tones, frequency, (), options
             )
             values.append(
-                _plane_means(operating_engine, operating.state, chip.backend, labels, all_tones, frequency)
+                _plane_means(operating.engine, operating.state.state, chip.backend, labels, all_tones, frequency)
             )
             incident.append(xp.asarray(amplitude))
-            diagnostics.append(point_diagnostics)
+            diagnostics.append(operating.diagnostics)
         return MeanFieldResponseResult(
-            planes=labels,
+            ports=labels,
             input=input_label,
             frequencies=freq_values if freq_is_axis else freq_values[0],
             amplitudes=amp_values if amp_is_axis else amp_values[0],
@@ -307,7 +324,10 @@ class VNA:
         """
         output_port = _resolve_exposure(self.chip, output)
         frequency_values, _ = _axis_values(frequencies)
-        engine, state, operators, incoming, tones = self._stationary_output(output_port, options)
+        operating = self._stationary_output(output_port, options)
+        engine, state, tones = operating.engine, operating.state, operating.tones
+        operators = port_operators(engine, self.chip.backend)
+        incoming = _stationary_output_backgrounds(engine, tones, self.chip.backend)
         xp = self.chip.backend.array_module
         rho = xp.asarray(self.chip.backend.to_array(state.state), dtype=complex)
         channel = next(item for item in engine.slh.external_channels if item.key == output_port)
@@ -336,6 +356,7 @@ class VNA:
             ((output_port, source),),
             ((output_port, observable),),
             frequency_values,
+            prepared=operating.prepared,
         )[(output_port, output_port)]
         sideband = carrier + xp.asarray(frequency_values)
         offset_gain = xp.abs(carrier_transfer(channel.reference.outbound, sideband, xp)) ** 2
@@ -389,8 +410,11 @@ class VNA:
         delay_values, _ = _axis_values(delays)
         if not contains_tracer(delay_values) and np.any(np.asarray(delay_values) < 0):
             raise ValueError("Stationary output correlations require non-negative delays.")
-        engine, state, operators, incoming, tones = self._stationary_output(output_port, options)
+        operating = self._stationary_output(output_port, options)
+        engine, state, tones = operating.engine, operating.state, operating.tones
         backend = self.chip.backend
+        operators = port_operators(engine, backend)
+        incoming = _stationary_output_backgrounds(engine, tones, backend)
         xp = backend.array_module
         rho = xp.asarray(backend.to_array(state.state), dtype=complex)
         runs = {item.key: item.reference.outbound for item in engine.slh.external_channels}
@@ -437,6 +461,7 @@ class VNA:
             initial,
             ((output_port, observable),),
             delay_values,
+            prepared=operating.prepared,
         )[output_port]
         denominator = (
             xp.sqrt(input_intensity * output_intensity)
@@ -469,7 +494,7 @@ class VNA:
         self,
         output_label: str,
         options: dict | None,
-    ) -> tuple[EngineResult, Any, dict[str, CanonicalOperator], dict[str, Any], Any]:
+    ) -> _OperatingPoint:
         """Solve stationary output statistics in the applicable reference frames.
 
         Pump tones define the stationary frames when present; otherwise the requested
@@ -481,18 +506,15 @@ class VNA:
         )
         engine = resolve_stationary_engine(self.chip, frames)
         driven_engine = add_port_inputs(engine, self.chip.backend, tones)
-        state = _solve_engine(self.chip, driven_engine, options)
-        incoming = _stationary_output_backgrounds(driven_engine, tones, self.chip.backend)
-        operators = port_operators(driven_engine, self.chip.backend)
-        return driven_engine, state, operators, incoming, tones
+        return _solve_engine(self.chip, driven_engine, tones, options)
 
 
     def _linear_sweep(
         self, chips: list[Any], frequencies: Any, labels: tuple[str, ...]
-    ) -> tuple[list[Any], list[dict[str, Any]]] | None:
+    ) -> tuple[list[Any], list[Mapping[str, Any]]] | None:
         """Solve every chip point in mode space, or return ``None`` if any point is ineligible."""
         matrices: list[Any] = []
-        diagnostics: list[dict[str, Any]] = []
+        diagnostics: list[Mapping[str, Any]] = []
         for chip in chips:
             problem = try_build_linear_response_problem(chip, frequencies, plane_labels=labels)
             if problem is None:
@@ -505,12 +527,12 @@ class VNA:
             )
             matrices.append(chip.backend.array_module.asarray(transfer * solved.responses))
             diagnostics.extend(
-                {
+                _LazyDiagnostics({
                     "solver": "linear_response",
                     "mode_count": len(problem.mode_labels),
                     "residual": solved.residuals[index],
-                    "condition_number": solved.condition_numbers[index],
-                }
+                    "condition_number": lambda index=index, condition=solved._condition_numbers: condition()[index],
+                })
                 for index in range(len(frequencies))
             )
         return matrices, diagnostics
@@ -588,7 +610,7 @@ def _operating_point(
     frequency: Any,
     labels: tuple[str, ...],
     options: dict | None,
-) -> tuple[EngineResult, Any, dict[str, Any]]:
+) -> _OperatingPoint:
     """Solve the pumped stationary state with every selected plane framed at ``frequency``."""
     engine = resolve_stationary_engine(
         chip,
@@ -596,18 +618,12 @@ def _operating_point(
         + tuple((label, frequency) for label in labels),
     )
     operating_engine = add_port_inputs(engine, chip.backend, tones)
-    solved = _solve_engine(chip, operating_engine, options)
-    diagnostics = {
-        "solver": "stationary_resolvent",
-        "residual": solved.residual,
-        "trace_error": solved.trace_error,
-        "positivity_error": solved.positivity_error,
-        "condition_number": solved.condition_number,
-    }
-    return operating_engine, solved, diagnostics
+    return _solve_engine(chip, operating_engine, tones, options)
 
 
-def _solve_engine(chip: Any, engine: EngineResult, options: dict | None) -> Any:
+def _solve_engine(
+    chip: Any, engine: EngineResult, tones: tuple[tuple[str, Any, Any], ...], options: dict | None,
+) -> _OperatingPoint:
     problem = SteadyStateProblem(
         chip=chip,
         engine_result=engine,
@@ -616,7 +632,8 @@ def _solve_engine(chip: Any, engine: EngineResult, options: dict | None) -> Any:
         resolved_frame=engine.resolved_frame,
         options={} if options is None else options,
     )
-    return solve_steadystate_problem(problem)
+    prepared = problem.backend.prepare_stationary(engine)
+    return _OperatingPoint(prepared, solve_steadystate_problem(problem, prepared=prepared), tones)
 
 
 def _stationary_output_backgrounds(
@@ -647,28 +664,28 @@ def _stationary_output_backgrounds(
 
 
 def _small_signal_matrix(
-    engine: EngineResult,
-    state: Any,
-    backend: Any,
-    port_operators: dict[str, CanonicalOperator],
+    operating: _OperatingPoint,
     labels: tuple[str, ...],
     frequency: Any,
 ) -> tuple[Any, Any]:
-    """Return the selected-plane ``S_ji(f)`` and phase-conjugating ``T_ji(f)`` matrices.
+    """Return the selected-port ``S_ji(f)`` and phase-conjugating ``T_ji(f)`` matrices.
 
-    Rows are output planes and columns are input planes. Around a phase-sensitive
+    Rows are output ports and columns are input ports. Around a phase-sensitive
     operating point the linear response is ``delta <b_out> = S delta beta + T
     conj(delta beta)``; one shifted-Liouvillian factorization serves both source
     sets for all input columns.
     """
+    engine = operating.engine
+    backend = operating.prepared.backend
+    channels = port_operators(engine, backend)
     xp = backend.array_module
-    rho = xp.asarray(backend.to_array(state), dtype=complex)
+    rho = xp.asarray(backend.to_array(operating.state.state), dtype=complex)
     external = engine.slh.external_channels
     exposure_index = {channel.key: index for index, channel in enumerate(external)}
     indices = [exposure_index[label] for label in labels]
-    template = port_operators[external[0].key]
+    template = channels[external[0].key]
     operators = xp.stack(
-        [xp.asarray(port_operators[channel.key].to_dense(), dtype=complex) for channel in engine.slh.channels]
+        [xp.asarray(channels[channel.key].to_dense(), dtype=complex) for channel in engine.slh.channels]
     )
     scattering = xp.asarray(engine.slh.S)
     sources = []
@@ -684,8 +701,9 @@ def _small_signal_matrix(
     response = backend.stationary_resolvent(
         engine,
         tuple(sources),
-        tuple((label, port_operators[label]) for label in labels),
+        tuple((label, channels[label]) for label in labels),
         (0.0,),
+        prepared=operating.prepared,
     )
     inbound = xp.stack([cw_transfer(external[i].reference.inbound, frequency, xp) for i in indices])
     outbound = xp.stack([cw_transfer(external[i].reference.outbound, frequency, xp) for i in indices])
@@ -730,7 +748,7 @@ def _plane_means(
     tones: tuple[tuple[str, Any, Any], ...],
     frequency: Any,
 ) -> Any:
-    """Return stationary output means at the selected planes.
+    """Return stationary output means at the selected ports.
 
     For each plane, apply its outbound continuous-wave transfer to
     ``sum_i S_ji beta_boundary,i + <L_j>`` at ``frequency``. Every selected
@@ -748,7 +766,7 @@ def _plane_means(
         if not same_frequency(carrier, frequency):
             raise ValueError(
                 f"Plane {label!r} resolves at {carrier!r} GHz, not at the probe frequency "
-                f"{frequency!r} GHz. Narrow VNA(..., planes=...) to planes at the probe carrier."
+                f"{frequency!r} GHz. Narrow VNA(..., ports=...) to ports at the probe carrier."
             )
         boundary = backgrounds[label] + xp.trace(xp.asarray(operators[label].to_dense(), dtype=complex) @ rho)
         means.append(cw_transfer(channel.reference.outbound, carrier, xp) * boundary)

@@ -28,6 +28,73 @@ def test_damped_mode_has_vacuum_steady_state() -> None:
     assert result.is_unique
 
 
+@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
+def test_state_positivity_is_computed_on_request_from_captured_state(backend, monkeypatch):
+    mode = Resonator(freq=6.0, levels=2, T1=20.0, thermal_population=0.1, label="r")
+    chip = Chip([mode], frame="rotating", backend=backend)
+    xp = chip.backend.array_module
+    eigvalsh = xp.linalg.eigvalsh
+    evaluated = []
+
+    def measured(state):
+        evaluated.append(state.shape)
+        return eigvalsh(state)
+
+    monkeypatch.setattr(xp.linalg, "eigvalsh", measured)
+    result = chip.steadystate(e_ops={"r": "n"})
+    assert result.expect("r") == pytest.approx(1 / 12, abs=1e-10)
+    assert evaluated == []
+    mode.thermal_population = 0.5
+    assert result.minimum_eigenvalue == pytest.approx(1 / 12, abs=1e-10)
+    assert evaluated == [(2, 2)]
+    assert result.positivity_error == pytest.approx(0.0, abs=1e-12)
+    assert result.trace_error < 1e-12
+    assert result.hermiticity_error < 1e-12
+
+
+def test_requested_stationary_diagnostic_keeps_native_gradient():
+    import jax
+    import jax.numpy as jnp
+
+    @jax.jit
+    @jax.value_and_grad
+    def minimum(occupation):
+        mode = Resonator(freq=6.0, levels=2, T1=20.0,
+                         thermal_population=occupation, label="r")
+        return Chip([mode], frame="rotating", backend="dynamiqs").steadystate().minimum_eigenvalue
+
+    value, derivative = minimum(jnp.asarray(0.1))
+    assert value == pytest.approx(1 / 12, abs=1e-10)
+    assert derivative == pytest.approx(1 / 1.2**2, abs=1e-10)
+
+
+def test_built_stationary_request_keeps_its_backend_and_local_context() -> None:
+    """Source edits and a new default backend cannot reinterpret a built stationary solve."""
+    from quchip.backend import reset_default_backend, set_default_backend
+    from quchip.backend.qutip import QuTiPBackend
+    from quchip.engine.steady_state import build_steadystate_problem, solve_steadystate_problem
+
+    class LaterBackend(QuTiPBackend):
+        def steadystate(self, problem):
+            raise AssertionError("old stationary request used new backend")
+
+    reset_default_backend()
+    mode = Resonator(freq=6.0, levels=3, label="r", T1=20.0)
+    chip = Chip([mode], frame="rotating")
+    problem = build_steadystate_problem(chip, e_ops={mode: mode.number_operator()})
+    mode.levels = 4
+    mode.computational = True
+    try:
+        set_default_backend(LaterBackend())
+        result = solve_steadystate_problem(problem)
+        assert result.dims == (3,)
+        assert result.device_info == (("r", False),)
+        assert result.reduced_state("r").shape == (3, 3)
+        assert result.expect("r") == pytest.approx(0.0, abs=1e-12)
+    finally:
+        reset_default_backend()
+
+
 def test_qutip_skips_dense_rank_diagnostics_above_default_cap() -> None:
     """Large sparse QuTiP solves keep a sparse residual without forcing a dense SVD."""
     mode = Resonator(freq=6.0, levels=17, label="r", T1=20.0)

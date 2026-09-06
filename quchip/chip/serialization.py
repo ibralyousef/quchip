@@ -17,8 +17,11 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from quchip.approximations import Approximation
 from quchip.chip.coupling_base import BaseCoupling
+from quchip.chip.effective import EffectiveTerms
+from quchip.chip.states import copy_state_configuration
 from quchip.control.equipment import ControlEquipment
 from quchip.devices.base import BaseDevice
+from quchip.utils.values import copy_value
 
 if TYPE_CHECKING:
     from quchip.chip.chip import Chip
@@ -43,6 +46,7 @@ def serialize_chip(chip: "Chip") -> dict[str, Any]:
     afterwards.
     """
     data: dict[str, Any] = {
+        "format_version": 1,
         "label": chip.label,
         "frame": _serialize_frame(chip.frame),
         "approximation": chip.approximation.to_dict(),
@@ -50,6 +54,11 @@ def serialize_chip(chip: "Chip") -> dict[str, Any]:
         "devices": [device.to_dict() for device in chip.devices],
         "couplings": [coupling.to_dict() for coupling in chip.couplings],
     }
+    if chip._state_order is not None:
+        data["state_order"] = list(chip._state_order)
+        data["level_symbols"] = dict(chip._level_symbols)
+    if chip.effective_terms:
+        data["effective_terms"] = [terms.to_dict() for terms in chip.effective_terms]
     if chip.baths:
         data["baths"] = [bath.to_dict() for bath in chip.baths]
     if chip.port_network is not None:
@@ -70,7 +79,10 @@ def deserialize_chip(data: dict[str, Any]) -> "Chip":
     """
     from quchip.chip.chip import Chip
 
+    if type(data.get("format_version")) is not int or data["format_version"] != 1:
+        raise ValueError("Unsupported Chip format_version; recreate older models with quchip 0.3.")
     allowed = {
+        "format_version",
         "label",
         "frame",
         "approximation",
@@ -80,6 +92,9 @@ def deserialize_chip(data: dict[str, Any]) -> "Chip":
         "baths",
         "port_network",
         "control_equipment",
+        "state_order",
+        "level_symbols",
+        "effective_terms",
     }
     unknown = set(data) - allowed
     if unknown:
@@ -90,14 +105,17 @@ def deserialize_chip(data: dict[str, Any]) -> "Chip":
 
     devices = [BaseDevice.from_dict(d) for d in data.get("devices", [])]
     device_map = {device.label: device for device in devices}
+    if len(device_map) != len(devices):
+        raise ValueError("Serialized Chip contains duplicate device labels.")
 
     couplings: list[BaseCoupling] = []
     for cd in data.get("couplings", []):
         if "rwa" in cd:
             raise TypeError("Unsupported serialized coupling fields: ['rwa']")
-        couplings.append(
-            BaseCoupling.from_dict(cd, device_map[cd["device_a_label"]], device_map[cd["device_b_label"]])
-        )
+        endpoints = [cd.get(key) for key in ("device_a_label", "device_b_label")]
+        if any(label not in device_map for label in endpoints):
+            raise ValueError(f"Serialized coupling references unknown device endpoints: {endpoints}")
+        couplings.append(BaseCoupling.from_dict(cd, *(device_map[label] for label in endpoints)))
     coupling_map = {coupling.label: coupling for coupling in couplings}
 
     from quchip.chip.baths import Bath
@@ -125,10 +143,13 @@ def deserialize_chip(data: dict[str, Any]) -> "Chip":
         approximation=approximation,
         basis=cast(Literal["native", "eigen"], data.get("basis", "native")),
         baths=baths or None,
+        effective_terms=[EffectiveTerms.from_dict(item) for item in data.get("effective_terms", [])],
         port_network=port_network,
     )
     if control_equipment is not None:
         chip.connect(control_equipment)
+    if data.get("state_order") is not None:
+        chip.set_state_order(*data["state_order"], levels=data.get("level_symbols"))
     return chip
 
 
@@ -145,19 +166,20 @@ def clone_chip(chip: "Chip") -> "Chip":
     devices = [device.copy() for device in chip.devices]
     device_map = {device.label: device for device in devices}
     couplings = [coupling.copy(device_map) for coupling in chip.couplings]
-    frame = dict(chip.frame) if isinstance(chip.frame, dict) else chip.frame
     cloned = Chip(
         devices=devices,
         couplings=couplings or None,
         control_equipment=None,
         label=chip.label,
-        frame=frame,
+        frame=copy_value(chip.frame),
         approximation=chip.approximation,
         basis=chip.basis,
         backend=chip._backend,
         baths=[bath.copy() for bath in chip.baths] or None,
+        effective_terms=chip.effective_terms,
         port_network=None if chip.port_network is None else chip.port_network.copy(),
     )
     if chip.control_equipment is not None:
         cloned.connect(chip.control_equipment.copy(device_map, cloned.coupling_map))
+    copy_state_configuration(chip, cloned)
     return cloned

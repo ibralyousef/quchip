@@ -11,7 +11,6 @@ import quchip.engine.ir as ir
 from quchip.engine.ir import (
     CanonicalOperator,
     Carrier,
-    CollapseTerm,
     DynamicTerm,
     EngineResult,
     ResolvedSLH,
@@ -21,55 +20,59 @@ from quchip.engine.ir import (
 )
 
 
-# ── Template shape contract ──────────────────────────────────────────
+@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
+@pytest.mark.parametrize("change", ["reorder", "add", "remove"])
+def test_template_signal_routes_preserve_operator_identity(backend, change):
+    from quchip import Chip, ChargeDrive, ControlEquipment, DuffingTransmon, QuantumSequence, Square
+    from quchip.control.signal import SignalTransform
+    from quchip.engine.assembly import compile_hamiltonian_template, instantiate_engine_result
+
+    class Routing(SignalTransform):
+        change = None
+
+        def apply(self, signals):
+            delivered = dict(signals)
+            if self.change == "reorder":
+                return dict(reversed(list(delivered.items())))
+            if self.change == "add":
+                delivered[("db", 0)] = signals[("da", 0)]
+            if self.change == "remove":
+                del delivered[("da", 0)]
+            return delivered
+
+    first = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="a")
+    second = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="b")
+    drives = [ChargeDrive(first, label="da"), ChargeDrive(second, label="db")]
+    equipment = ControlEquipment(lines=drives, signal_chain=[Routing()])
+    chip = Chip([first, second], frame="rotating", backend=backend, control_equipment=equipment)
+    sequence = QuantumSequence(chip)
+    sequence.schedule(drives[0], envelope=Square(duration=1.0, amplitude=0.02), freq=5.0)
+    sequence.schedule(drives[1], envelope=Square(duration=1.0, amplitude=0.06), freq=5.0)
+    operations = sequence._materialize_drive_ops()
+    resolved = chip.resolve()
+
+    def compile_template():
+        return compile_hamiltonian_template(
+            chip, operations, resolved_frame=resolved.resolved_frame,
+            _base_result=resolved,
+        )
+
+    template = compile_template()
+    before = instantiate_engine_result(template, operations, chip).hamiltonian().matrix(backend=chip.backend, t=0.2)
+    chip.control_equipment.signal_chain[0].change = change
+    if change == "reorder":
+        after = instantiate_engine_result(template, operations, chip).hamiltonian().matrix(backend=chip.backend, t=0.2)
+        np.testing.assert_allclose(after, before, atol=1e-12)
+    else:
+        with pytest.raises(ValueError, match="Signal routes changed"):
+            instantiate_engine_result(template, operations, chip)
+        after = instantiate_engine_result(compile_template(), operations, chip).hamiltonian().matrix(
+            backend=chip.backend, t=0.2,
+        )
+        assert np.linalg.norm(after - before) > 0.005
+    assert np.linalg.norm(before) > 0.01
 
 
-def test_compiled_template_tracks_drive_terms_only() -> None:
-    """HamiltonianTemplate must expose drive_terms but not crosstalk_term_templates."""
-    from quchip.chip.chip import Chip
-    from quchip.control.drive import ChargeDrive
-    from quchip.control.envelopes import Square
-    from quchip.control.equipment import ControlEquipment
-    from quchip.devices.transmon.duffing import DuffingTransmon
-    from quchip.engine.ir import DriveOp
-    from quchip.engine.frames import resolve_frame
-    from quchip.engine.assembly import compile_hamiltonian_template
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q_tmpl")
-    d = ChargeDrive(target=q)
-    chip = Chip([q], frame="rotating", control_equipment=ControlEquipment(lines=[d]))
-    drive_op = DriveOp(
-        target_label="q_tmpl",
-        envelope=Square(amplitude=0.02, duration=50),
-        freq=5.0,
-        start_time=0.0,
-        drive_label=d.label,
-    )
-
-    template = compile_hamiltonian_template(
-        chip,
-        [drive_op],
-        resolved_frame=resolve_frame(chip, chip.frame),
-    )
-
-    assert hasattr(template, "drive_terms")
-    assert not hasattr(template, "crosstalk_term_templates")
-    assert not hasattr(template, "chip")
-
-
-def test_ir_exports_scalar_modulation_not_time_dependence() -> None:
-    """``ir`` exports ScalarModulation, not the removed TimeDependence."""
-    assert hasattr(ir, "ScalarModulation")
-    assert not hasattr(ir, "TimeDependence")
-
-
-def test_carrier_default_sign_matches_rotating_frame_convention() -> None:
-    """Carrier defaults to sign=-1, matching the rotating-frame convention."""
-    carrier = ir.Carrier(freq=5.0)
-    assert carrier.sign == -1
-
-
-# ── Carrier-band decomposition ───────────────────────────────────────
 #
 # Correctness-critical: backends rely on decompose_carrier_bands to keep
 # fast carriers analytic. A carrier-algebra error would silently corrupt
@@ -149,20 +152,6 @@ class TestCarrierBandDecomposition:
 
 
 class TestCanonicalOperator:
-    def test_valid_construction(self):
-        """CanonicalOperator.from_dense stores shape, dims, basis, and layout."""
-        data = np.eye(6, dtype=complex)
-        op = CanonicalOperator.from_dense(
-            data,
-            dims=(2, 3),
-            basis="fock",
-            subsystem_labels=("q0", "r0"),
-        )
-        assert op.shape == (6, 6)
-        assert op.dims == (2, 3)
-        assert op.basis == "fock"
-        assert op.layout == "dense"
-
     @pytest.mark.parametrize("layout", ["dense", "csr", "dia"])
     def test_diagonal_reads_each_layout_without_dense_materialization(self, layout, monkeypatch):
         """Canonical diagonal access is layout-native for dense, CSR, and DIA payloads."""
@@ -198,133 +187,24 @@ class TestCanonicalOperator:
         monkeypatch.setattr(CanonicalOperator, "to_dense", lambda self: pytest.fail("densified"))
 
         np.testing.assert_allclose(op.diagonal(), np.diag(matrix))
-
-    def test_rejects_non_square(self):
-        """A non-square operator raises ValueError."""
-        with pytest.raises(ValueError, match="square"):
+    @pytest.mark.parametrize(
+        "shape,dims,labels,message",
+        [
+            ((2, 3), (2,), ("q",), "square"),
+            ((4, 4), (2, 3), ("a", "b"), "Product of dims"),
+            ((4, 4), (2, 2), ("a",), "subsystem_labels length"),
+        ],
+    )
+    def test_rejects_inconsistent_shape_metadata(self, shape, dims, labels, message):
+        """Shape, tensor dimensions, and subsystem labels must agree."""
+        with pytest.raises(ValueError, match=message):
             CanonicalOperator(
-                layout="dense",
-                values=np.ones((2, 3), dtype=complex),
-                shape=(2, 3),
-                dims=(2,),
-                basis="fock",
-                subsystem_labels=("q",),
-            )
-
-    def test_rejects_dims_mismatch(self):
-        """dims whose product mismatches the operator shape raises ValueError."""
-        with pytest.raises(ValueError, match="Product of dims"):
-            CanonicalOperator(
-                layout="dense",
-                values=np.eye(4, dtype=complex),
-                shape=(4, 4),
-                dims=(2, 3),
-                basis="fock",
-                subsystem_labels=("a", "b"),
-            )
-
-    def test_rejects_labels_mismatch(self):
-        """subsystem_labels length mismatching dims raises ValueError."""
-        with pytest.raises(ValueError, match="subsystem_labels length"):
-            CanonicalOperator(
-                layout="dense",
-                values=np.eye(4, dtype=complex),
-                shape=(4, 4),
-                dims=(2, 2),
-                basis="fock",
-                subsystem_labels=("a",),
+                layout="dense", values=np.ones(shape, dtype=complex), shape=shape,
+                dims=dims, basis="fock", subsystem_labels=labels,
             )
 
 
 class TestTermTypes:
-    def test_static_term_stores_canonical(self):
-        """StaticTerm stores the CanonicalOperator and defaults coefficient to 1.0."""
-        op = CanonicalOperator.from_dense(
-            np.eye(3, dtype=complex),
-            dims=(3,),
-            basis="fock",
-            subsystem_labels=("q",),
-        )
-        term = StaticTerm(operator=op, origin="device")
-        assert isinstance(term.operator, CanonicalOperator)
-        assert term.coefficient == 1.0
-
-    def test_dynamic_term_scalar_modulation_carrier(self):
-        """DynamicTerm carries a ScalarModulation wrapping a Carrier signal."""
-        op = CanonicalOperator.from_dense(
-            np.eye(3, dtype=complex),
-            dims=(3,),
-            basis="fock",
-            subsystem_labels=("q",),
-        )
-        term = DynamicTerm(
-            operator=op,
-            time_dependence=ScalarModulation(signal=Carrier(freq=5.0, sign=-1)),
-            origin="coupling",
-        )
-        assert isinstance(term.time_dependence, ScalarModulation)
-        assert isinstance(term.time_dependence.signal, Carrier)
-        assert term.time_dependence.signal.freq == pytest.approx(5.0)
-
-    def test_hamiltonian_description_assembly(self):
-        """EngineResult assembles static/dynamic terms with dims and metadata."""
-        op = CanonicalOperator.from_dense(
-            np.eye(3, dtype=complex),
-            dims=(3,),
-            basis="fock",
-            subsystem_labels=("q",),
-        )
-        static = StaticTerm(operator=op, origin="device")
-        dynamic = DynamicTerm(
-            operator=op,
-            time_dependence=ScalarModulation(signal=Carrier(freq=1.0, sign=-1)),
-            origin="coupling",
-        )
-        desc = EngineResult(
-            slh=ResolvedSLH.from_terms(
-                static_terms=(static,),
-                dynamic_terms=(dynamic,),
-                collapse_terms=(),
-            ),
-            dims=(3,),
-            metadata={"frame_mode": "rotating"},
-        )
-        assert len(desc.static_terms) == 1
-        assert len(desc.dynamic_terms) == 1
-        assert desc.dims == (3,)
-        assert desc.metadata["frame_mode"] == "rotating"
-
-    def test_engine_result_exposes_slh_term_views(self):
-        """The existing term properties are read-only views of one resolved SLH value."""
-        operator = CanonicalOperator.from_dense(
-            np.eye(2, dtype=complex),
-            dims=(2,),
-            basis="native",
-            subsystem_labels=("q",),
-        )
-        static = StaticTerm(operator=operator)
-        dynamic = DynamicTerm(
-            operator=operator,
-            time_dependence=ScalarModulation(signal=Carrier(freq=1.0)),
-        )
-        collapse = CollapseTerm(
-            operator=operator,
-            rate=0.1,
-            source="q",
-            channel="relaxation",
-        )
-
-        slh = ResolvedSLH.from_terms(
-            static_terms=(static,),
-            dynamic_terms=(dynamic,),
-            collapse_terms=(collapse,),
-        )
-        result = EngineResult(slh=slh)
-
-        assert result.static_terms is result.slh.H.static_terms
-        assert result.dynamic_terms is result.slh.H.dynamic_terms
-        assert result.collapse_terms == tuple(channel.collapse for channel in result.slh.channels)
-
     def test_engine_result_hamiltonian_matrix_is_public_ghz_time_slice(self):
         """Hamiltonian inspection converts canonical angular terms back to public GHz."""
         op = CanonicalOperator.from_dense(
@@ -352,14 +232,6 @@ class TestTermTypes:
 
 
 class TestPolarScale:
-    def test_polar_scale_evaluates_amplitude_times_exp_theta(self):
-        """PolarScale evaluates to amplitude * exp(i*theta) times the child signal."""
-        from quchip.engine.ir import PolarScale, Constant, evaluate_signal_program
-
-        signal = PolarScale(child=Constant(1.0 + 0j), amplitude=0.5, theta=0.0)
-        result = evaluate_signal_program(signal, np.array([0.0]))
-        np.testing.assert_allclose(result, [0.5 + 0j])
-
     def test_polar_scale_with_nonzero_theta(self):
         """Nonzero theta rotates PolarScale's output onto the imaginary axis."""
         from quchip.engine.ir import PolarScale, Constant, evaluate_signal_program
@@ -367,18 +239,6 @@ class TestPolarScale:
         signal = PolarScale(child=Constant(1.0 + 0j), amplitude=0.1, theta=np.pi / 2)
         result = evaluate_signal_program(signal, np.array([0.0]))
         np.testing.assert_allclose(result, [0.1j], atol=1e-15)
-
-    def test_crosstalk_apply_uses_polar_scale_not_numpy(self):
-        """Crosstalk.apply builds a PolarScale node instead of an eagerly-computed numpy factor."""
-        from quchip.engine.ir import PolarScale, Constant
-        from quchip.control.signal import AnalyticSignal, Crosstalk
-
-        edge = Crosstalk(source="charge_0", victim="charge_1", beta=0.1, theta=0.3)
-        signals = {("charge_0", 0): AnalyticSignal(Constant(1.0 + 0j))}
-        result = edge.apply(signals)
-        victim_signal = result[("charge_1", 0)]
-        assert isinstance(victim_signal.program, PolarScale)
-
 
 class TestSolveProblem:
     def test_rejects_backend_in_options(self):
@@ -392,22 +252,11 @@ class TestSolveProblem:
                 options={"backend": "something"},
             )
 
-    def test_accepts_valid_options(self):
-        """SolveProblem stores arbitrary non-'backend' options."""
-        problem = SolveProblem(
-            chip=None,
-            engine_result=None,
-            initial_state=None,
-            tlist=np.linspace(0, 100, 200),
-            options={"nsteps": 5000},
-        )
-        assert problem.options == {"nsteps": 5000}
-
-
 class TestDroppedTerms:
     """Surface RWA-dropped terms on EngineResult (issue #59)."""
 
-    def test_capacitive_rwa_reports_counter_rotating_drops(self):
+    @pytest.mark.parametrize("approximation", [RWA(), Exact()])
+    def test_capacitive_reports_drops_for_selected_approximation(self, approximation):
         """RWA on a Capacitive coupling records the dropped counter-rotating terms."""
         from quchip.chip.chip import Chip
         from quchip.chip.couplings import Capacitive
@@ -419,9 +268,14 @@ class TestDroppedTerms:
         q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
         q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.25, levels=3, label="q1")
         cap = Capacitive(q0, q1, g=0.01, label="cap_q0_q1")
-        chip = Chip([q0, q1], couplings=[cap], frame="rotating")
+        chip = Chip([q0, q1], couplings=[cap], frame="rotating", approximation=approximation)
 
         description = build_engine_result(chip, [], resolved_frame=resolve_frame(chip, chip.frame))
+
+        if isinstance(approximation, Exact):
+            assert description.dropped_terms == ()
+            assert description.dropped_terms_summary() == "No dropped terms."
+            return
 
         assert all(isinstance(dt, DroppedTerm) for dt in description.dropped_terms)
         operators = {dt.operator for dt in description.dropped_terms}
@@ -448,27 +302,8 @@ class TestDroppedTerms:
         assert "amp 0.02 GHz" in summary
         assert "freq 10.2" in summary
 
-    def test_capacitive_without_rwa_reports_nothing(self):
-        """Capacitive coupling without RWA drops no terms."""
-        from quchip.chip.chip import Chip
-        from quchip.chip.couplings import Capacitive
-        from quchip.devices.transmon.duffing import DuffingTransmon
-        from quchip.engine.frames import resolve_frame
-        from quchip.engine.assembly import build_engine_result
-
-        q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="qa")
-        q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.25, levels=3, label="qb")
-        chip = Chip(
-            [q0, q1],
-            couplings=[Capacitive(q0, q1, g=0.01)],
-            frame="rotating",
-            approximation=Exact(),
-        )
-        description = build_engine_result(chip, [], resolved_frame=resolve_frame(chip, chip.frame))
-        assert description.dropped_terms == ()
-        assert description.dropped_terms_summary() == "No dropped terms."
-
-    def test_drive_rwa_reports_fast_partners(self):
+    @pytest.mark.parametrize("approximation", [RWA(), Exact()])
+    def test_drive_reports_drops_for_selected_approximation(self, approximation):
         """Each nonzero-weight single-tone band drops one counter-rotating partner at f_d + |w|·f_ref."""
         import numpy as np
 
@@ -485,42 +320,21 @@ class TestDroppedTerms:
             [q0],
             control_equipment=ControlEquipment(lines=[drive]),
             frame={q0: 5.0},
-            approximation=RWA(),
+            approximation=approximation,
         )
         sequence = QuantumSequence(chip)
         sequence.schedule(drive, envelope=Gaussian(duration=20.0, amplitude=0.02, sigmas=3), freq=5.0)
         problem = sequence.build_problem(tlist=np.linspace(0.0, 20.0, 21), initial_state=chip.bare_state(q0=0))
 
         records = problem.engine_result.dropped_terms
+        if isinstance(approximation, Exact):
+            assert records == ()
+            return
         assert {dt.band_weights for dt in records} == {(-1,), (1,)}
         for dt in records:
             assert dt.source == "d0"
             assert dt.amplitude is None  # drive prefactors are envelopes, not scalars
             assert dt.frequency == pytest.approx(10.0)  # f_d + |w|·f_ref = 5 + 5
-
-    def test_drive_without_rwa_reports_nothing(self):
-        """approximation=Exact() keeps both drive components — nothing to audit."""
-        import numpy as np
-
-        from quchip.chip.chip import Chip
-        from quchip.control.drive import ChargeDrive
-        from quchip.control.envelopes import Gaussian
-        from quchip.control.equipment import ControlEquipment
-        from quchip.control.sequence import QuantumSequence
-        from quchip.devices.transmon.duffing import DuffingTransmon
-
-        q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
-        drive = ChargeDrive(target=q0, label="d0")
-        chip = Chip(
-            [q0],
-            control_equipment=ControlEquipment(lines=[drive]),
-            frame={q0: 5.0},
-            approximation=Exact(),
-        )
-        sequence = QuantumSequence(chip)
-        sequence.schedule(drive, envelope=Gaussian(duration=20.0, amplitude=0.02, sigmas=3), freq=5.0)
-        problem = sequence.build_problem(tlist=np.linspace(0.0, 20.0, 21), initial_state=chip.bare_state(q0=0))
-        assert problem.engine_result.dropped_terms == ()
 
     def test_summary_prints_traced_values_as_placeholder(self):
         """Traced amplitudes format as 'traced' — the summary never concretizes them."""

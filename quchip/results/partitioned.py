@@ -47,6 +47,14 @@ class PartitionedSimulationResult:
         return self._results
 
     @property
+    def dissipation(self) -> bool:
+        """Return the shared dissipation choice of this partitioned calculation."""
+        choices = {result.dissipation for result in self._results}
+        if len(choices) != 1:
+            raise ValueError("Component results have different dissipation choices.")
+        return choices.pop()
+
+    @property
     def partition(self) -> Any:
         return self._partition
 
@@ -62,24 +70,6 @@ class PartitionedSimulationResult:
         match the joint solve exactly.
         """
         return self._partition.chip_order
-
-    def _current_order(self) -> list[str]:
-        """Return device labels in the order the per-component states concatenate into."""
-        return [label for comp in self._partition.components for label in comp.labels]
-
-    def _permutation_to_chip_order(self) -> tuple[list[int], list[int]]:
-        """Return ``(dims, order)`` permuting a concatenated-component state into chip order.
-
-        ``dims`` are the per-device levels in the *current* (concatenated
-        component) order; ``order`` follows
-        :meth:`~quchip.backend.protocol.Backend.permute_state`'s
-        ``numpy.transpose`` convention.
-        """
-        current_labels = self._current_order()
-        dims = [d for result in self._results for d in result.dims]
-        index_of = {label: i for i, label in enumerate(current_labels)}
-        order = [index_of[label] for label in self._partition.chip_order]
-        return dims, order
 
     def _normalize_key(self, key: Any) -> Any:
         return tuple(resolve_label(k) for k in key) if isinstance(key, tuple) else resolve_label(key)
@@ -103,6 +93,10 @@ class PartitionedSimulationResult:
             return self._local_values(entry.a, None) * self._local_values(entry.b, None)
         return self._local_values(entry, index)
 
+    def observable_at(self, t: Any, values: Any, *, method: str = "exact") -> Any:
+        """Select or linearly interpolate observable values on the shared grid."""
+        return self._results[0].observable_at(t, values, method=method)
+
     def expect_final(self, key: Any, index: int | None = None) -> Any:
         return self.expect(key, index)[-1]
 
@@ -113,9 +107,6 @@ class PartitionedSimulationResult:
 
     def population(self, device: Any, level: int = 0) -> Any:
         return self._owner_result(device).population(device, level)
-
-    def population_array(self, device: Any, level: int = 0) -> Any:
-        return self._owner_result(device).population_array(device, level)
 
     def check_truncation(self, threshold: float = 1e-3) -> dict[str, float]:
         """Run each component's truncation check and merge the per-device results.
@@ -135,9 +126,12 @@ class PartitionedSimulationResult:
         Returns ``None`` when the concatenated component order already
         matches :attr:`device_order` and permuting would be a no-op.
         """
-        dims, order = self._permutation_to_chip_order()
+        current_labels = [label for comp in self._partition.components for label in comp.labels]
+        index_of = {label: i for i, label in enumerate(current_labels)}
+        order = [index_of[label] for label in self._partition.chip_order]
         if order == list(range(len(order))):
             return None
+        dims = [d for result in self._results for d in result.dims]
         return dims, order
 
     def _collect_component_ket_trajectories(self) -> list:
@@ -151,8 +145,6 @@ class PartitionedSimulationResult:
         """
         trajectories = []
         for result in self._results:
-            if result.states is None:
-                raise RuntimeError("A component solve did not store states.")
             if not result._is_ket_trajectory():
                 raise NotImplementedError(
                     "Joint-state reconstruction is implemented for ket trajectories only."
@@ -214,10 +206,16 @@ class PartitionedSimulationResult:
         into :attr:`device_order` so it matches a joint solve of the
         original chip exactly.
         """
-        warnings.warn(_JOINT_WARNING, UserWarning, stacklevel=2)
+        return self._joint_state([r.final_state for r in self._results])
+
+    def state_at(self, t: Any, *, method: str = "exact") -> Any:
+        """Reconstruct a joint state at a saved time, with optional nearest selection."""
+        return self._joint_state([r.state_at(t, method=method) for r in self._results])
+
+    def _joint_state(self, states: list) -> Any:
+        warnings.warn(_JOINT_WARNING, UserWarning, stacklevel=3)
         backend = self._results[0]._backend
-        finals = self._promote_to_common_state_kind(backend, [r.final_state for r in self._results])
-        joint = backend.tensor_states(*finals)
+        joint = backend.tensor_states(*self._promote_to_common_state_kind(backend, states))
         permutation = self._chip_order_permutation()
         if permutation is None:
             return joint

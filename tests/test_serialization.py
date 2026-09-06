@@ -31,7 +31,6 @@ from quchip.control.envelopes import Envelope
 from quchip.devices.base import BaseDevice
 from quchip.extensions import FrequencyModulatedMode, ModulatedCapacitive
 from quchip.engine.ir import DriveOp
-from quchip.utils.labeling import reset_label_counters
 
 
 def _assert_json_primitives(value: Any) -> None:
@@ -47,13 +46,6 @@ def _assert_json_primitives(value: Any) -> None:
             _assert_json_primitives(item)
         return
     raise AssertionError(f"Non-JSON-safe value encountered: {value!r}")
-
-
-@pytest.fixture(autouse=True)
-def _reset_labels() -> None:
-    reset_label_counters()
-    yield
-    reset_label_counters()
 
 
 def _build_chip(frame: str | float | dict[str, float] = "rotating") -> Chip:
@@ -129,6 +121,14 @@ def test_device_round_trip_is_json_safe() -> None:
     assert restored.levels == device.levels
     assert restored.label == device.label
     assert restored.thermal_population == pytest.approx(device.thermal_population)
+    for levels in (3.5, "3"):
+        with pytest.raises(TypeError):
+            DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=levels)
+        with pytest.raises(TypeError):
+            BaseDevice.from_dict({**payload, "levels": levels})
+        with pytest.raises(TypeError):
+            device.levels = levels
+    assert device.levels == 4
 
 
 def test_resonator_round_trip_preserves_internal_quality_factor() -> None:
@@ -195,6 +195,22 @@ def test_signal_chain_round_trip_is_json_safe() -> None:
     assert restored.signal_chain[1].factor == pytest.approx(0.2 + 0.05j)
 
 
+def test_transform_settings_preserve_containers_and_numeric_values() -> None:
+    """Saved metadata cannot be mistaken for numeric type tags."""
+    from quchip.control import SignalTransform
+    from quchip.declarative import setting
+
+    class Metadata(SignalTransform, serializable=True):
+        config: Any = setting()
+
+        def apply(self, signals):
+            return signals
+
+    config = ({"array": [1, 2]}, {"complex": [1, 2]}, {"tuple": []}, {7: 1j, "units": "GHz"})
+    saved = json.loads(json.dumps(Metadata(config=config).to_dict()))
+    assert SignalTransform.from_dict(saved).config == config
+
+
 def test_envelope_round_trip_is_json_safe() -> None:
     """A Gaussian envelope's to_dict/from_dict round trip preserves its parameters."""
     envelope = Gaussian(duration=20.0, sigmas=4.0, amplitude=0.25)
@@ -233,6 +249,16 @@ def test_chip_round_trip_preserves_topology_and_frame(
     assert restored.devices[0].label == "q"
     assert restored.devices[1].label == "r"
     assert restored.couplings[0].g == pytest.approx(chip.couplings[0].g)
+
+
+def test_saved_chip_rejects_unsupported_versions_and_dangling_edges() -> None:
+    payload = _build_chip().to_dict()
+    for version in (None, True, 0, 2):
+        with pytest.raises(ValueError, match="format_version"):
+            Chip.from_dict({**payload, "format_version": version})
+    payload["couplings"][0]["device_a_label"] = "missing"
+    with pytest.raises(ValueError, match="unknown device endpoints"):
+        Chip.from_dict(payload)
 
 
 def test_chip_round_trip_preserves_control_equipment() -> None:
@@ -279,7 +305,7 @@ def test_chip_round_trip_can_dress_and_simulate() -> None:
     seq.schedule(
         restored["r"]["readout"],
         envelope=Square(duration=10.0, amplitude=0.005),
-        freq=restored["r"].drive_freq + 1.0,
+        freq=restored.freq("r") + 1.0,
     )
     result = seq.simulate(tlist=np.linspace(0.0, 10.0, 101))
 

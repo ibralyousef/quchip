@@ -171,7 +171,7 @@ def test_flux_drive_on_three_survivor_mode_converts_one_pump_per_edge():
     # emission-order choice); the rest carry derived labels.
     assert set(lines) == {"cflux", "cflux_q0_q2", "cflux_q1_q2"}
     pump_targets = {line.target_label for line in lines.values()}
-    assert pump_targets == {entry["folded_into"] for entry in exchange.values()}
+    assert pump_targets == {entry["coupling"] for entry in exchange.values()}
 
     copies = [t for t in ce.signal_chain if isinstance(t, Crosstalk)]
     gains = {t.line: t for t in ce.signal_chain if isinstance(t, Gain)}
@@ -199,9 +199,10 @@ def test_three_survivor_replay_compiles_through_stage_two():
     seq = QuantumSequence(res.chip)
     seq.schedule("cflux", envelope=Square(duration=100.0, amplitude=0.02))
     problem = seq.build_problem(tlist=np.linspace(0.0, 100.0, 11))
-    tags = [t.tag for t in problem.engine_result.dynamic_terms]
-    # All three emitted edges receive drive terms: the scheduled pump compiles
-    # its own edge (2 exchange bands), and the two copy-fed pumps compile
-    # through the crosstalk path (2 bands each).
-    assert tags.count("edge_pump") == 2
-    assert tags.count("crosstalk") == 4
+    driven = np.asarray(problem.engine_result.hamiltonian().matrix(t=5.0))
+    idle = np.asarray(res.chip.hamiltonian().matrix())
+    for pair, values in res.effective_params["exchange"].items():
+        indices = [np.ravel_multi_index(tuple(int(device.label == label) for device in res.chip.devices),
+                                       res.chip.dims) for label in pair]
+        assert driven[indices[0], indices[1]] - idle[indices[0], indices[1]] == pytest.approx(
+            0.02 * float(values["dJ_domega_c"]), abs=1e-12)

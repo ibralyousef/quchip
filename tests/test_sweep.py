@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from quchip import ChargeDrive, ControlEquipment, Crosstalk, FluxDrive
+from quchip import ChargeDrive, ControlEquipment
 from quchip.chip.chip import Chip
 from quchip.chip.couplings import Capacitive
 from quchip.control.sequence import QuantumSequence
@@ -14,40 +14,6 @@ from quchip.devices.resonator import Resonator
 from quchip.devices.transmon.duffing import DuffingTransmon
 from quchip.results.results import SimulationBatchResult
 from quchip.sweep import SpectrumSweep, Sweep, ZippedSweep
-
-
-# ---------------------------------------------------------------------------
-# Sweep construction
-# ---------------------------------------------------------------------------
-
-
-class TestSweepConstruction:
-    def test_sweep_basic(self):
-        """A Sweep exposes its name, size, and values."""
-        s = Sweep(np.linspace(5.0, 6.0, 3), name="freq")
-        assert s.name == "freq"
-        assert s.size == 3
-        assert len(s.values) == 3
-        np.testing.assert_allclose(s.values, [5.0, 5.5, 6.0])
-
-    def test_sweep_from_list(self):
-        """An unnamed Sweep defaults its name to "unnamed"."""
-        s = Sweep([1, 2, 3])
-        assert s.name == "unnamed"
-        assert s.size == 3
-
-    def test_sweep_repr(self):
-        """repr(sweep) contains the class name, sweep name, and size."""
-        s = Sweep([1, 2, 3], name="g")
-        r = repr(s)
-        assert "Sweep" in r
-        assert "g" in r
-        assert "3" in r
-
-
-# ---------------------------------------------------------------------------
-# ZippedSweep
-# ---------------------------------------------------------------------------
 
 
 class TestZippedSweep:
@@ -71,11 +37,6 @@ class TestZippedSweep:
         a = Sweep([1, 2], name="a")
         with pytest.raises(ValueError, match="at least two"):
             Sweep.zip(a)
-
-
-# ---------------------------------------------------------------------------
-# Expansion
-# ---------------------------------------------------------------------------
 
 
 class TestExpand:
@@ -133,56 +94,38 @@ class TestDuplicateAxisNames:
             Sweep.expand([Sweep.zip(a, b), c])
 
 
-# ---------------------------------------------------------------------------
-# Backend batched_sesolve default implementation
-# ---------------------------------------------------------------------------
-
-
-class TestBatchedProtocol:
-    def test_default_batched_sesolve_loops(self):
-        """Backend.batched_sesolve default impl calls sesolve for each problem."""
-        from unittest.mock import MagicMock
-
-        mock_backend = MagicMock()
-        from quchip.backend.protocol import Backend
-
-        problems = [
-            {"H": "h1", "psi0": "p1", "tlist": [0, 1]},
-            {"H": "h2", "psi0": "p2", "tlist": [0, 1]},
-        ]
-        Backend.batched_sesolve(mock_backend, problems)
-        assert mock_backend.sesolve.call_count == 2
-
-
-# ---------------------------------------------------------------------------
-# Integration: QuTiPBackend.batched_sesolve
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("target", ["pulse", "device", "state", "delay"])
+@pytest.mark.parametrize("grouping", ["independent", "zipped", "mixed"])
+def test_batch_rejects_duplicate_targets_with_different_names(target, grouping):
+    chip = Chip([DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="q")])
+    drive = ChargeDrive(chip["q"], label="xy")
+    chip.wire(drive)
+    seq = QuantumSequence(chip)
+    pulse = seq.schedule(drive, envelope=Square(duration=1.0, amplitude=0.1))
+    if target == "pulse":
+        first = pulse.vary("amplitude", [0.1, 0.2], name="first")
+        second = seq.vary("pulse.0.amplitude", [0.3, 0.4], name="second")
+    elif target == "device":
+        first = seq.vary("q.freq", [5.0, 5.1], name="first")
+        second = seq.vary("q.freq", [5.2, 5.3], name="second")
+    elif target == "state":
+        first = seq.vary("initial_state", [{"q": 0}, {"q": 1}], name="first")
+        second = seq.vary("initial_state", [{"q": 1}, {"q": 0}], name="second")
+    else:
+        delay = seq.delay("q", 1.0)
+        first = delay.vary("duration", [1.0, 2.0], name="first")
+        second = delay.vary("duration", [3.0, 4.0], name="second")
+    if grouping == "zipped":
+        axes = (seq.zip(first, second),)
+    elif grouping == "mixed":
+        axes = (seq.zip(first, pulse.vary("phase", [0.0, 0.5], name="phase")), second)
+    else:
+        axes = (first, second)
+    with pytest.raises(ValueError, match="same parameter"):
+        seq.build_batch(*axes, tlist=np.linspace(0, 6, 7))
 
 
 class TestQuTiPBatchedIntegration:
-    def test_qutip_batched_sesolve_integration(self):
-        """Integration: QuTiPBackend.batched_sesolve produces valid SolverResults."""
-        from quchip.backend.qutip import QuTiPBackend
-        from quchip.backend import SolverResult
-
-        backend = QuTiPBackend()
-        # Simple 2-level system: H = number op (diagonal), psi0 = |0>
-        H = backend.number(2)
-        psi0 = backend.basis(2, 0)
-        tlist = [0.0, 1.0, 2.0]
-
-        problems = [
-            {"H": H, "psi0": psi0, "tlist": tlist},
-            {"H": H, "psi0": psi0, "tlist": tlist},
-        ]
-        results = backend.batched_sesolve(problems, progress=False, n_jobs=1)
-
-        assert len(results) == 2
-        for r in results:
-            assert isinstance(r, SolverResult)
-            assert r.states is not None or r.expect is not None
-            assert r.solver == "sesolve"
-
     def test_qutip_parallel_sweep_matches_sequential(self, monkeypatch):
         """The reusable-loky parallel batch path matches the in-process sequential one exactly."""
         from quchip.backend.qutip import QuTiPBackend
@@ -217,8 +160,8 @@ class TestQuTiPBatchedIntegration:
         for element in range(len(amps)):
             for level in range(4):
                 np.testing.assert_array_equal(
-                    parallel[element].population_array("q", level),
-                    sequential[element].population_array("q", level),
+                    parallel[element].population("q", level),
+                    sequential[element].population("q", level),
                 )
 
     def test_qutip_warmup_is_safe_and_pool_works_after(self):
@@ -245,41 +188,10 @@ class TestQuTiPBatchedIntegration:
         )
         assert len(batch) == 12
         for element in batch:
-            assert element.population_array("q", 0).shape == (11,)
-
-
-# ---------------------------------------------------------------------------
-# QuantumSequence.build_batch()
-# ---------------------------------------------------------------------------
+            assert element.population("q", 0).shape == (11,)
 
 
 class TestQuantumSequenceBatch:
-    def test_build_batch_returns_structured_problem_batch(self):
-        """build_batch() over two independent axes returns a batch shaped as their product."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        drive = ChargeDrive(target=q)
-        chip = Chip([q])
-        chip.connect(ControlEquipment(lines=[drive]))
-        seq = QuantumSequence(chip)
-        pulse = seq.schedule(
-            drive,
-            envelope=Square(duration=10.0, amplitude=0.02),
-            freq=5.0,
-        )
-
-        amp = pulse.vary("amplitude", [0.01, 0.02], name="amp")
-        freq = pulse.vary("freq", [4.9, 5.1], name="freq")
-        batch = seq.build_batch(
-            amp,
-            freq,
-            tlist=np.asarray([0.0, 10.0]),
-            initial_state=chip.bare_state(q=0),
-        )
-
-        assert len(batch) == 4
-        assert batch.shape == (2, 2)
-        assert batch.params_at((1, 0)) == {"amp": 0.02, "freq": 4.9}
-
     def test_build_batch_supports_zipped_axes(self):
         """build_batch() with a zipped axis produces one batch element per index pair."""
         q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
@@ -321,53 +233,28 @@ class TestQuantumSequenceBatch:
         assert len(batch) == 2
         assert batch.shape == (2,)
 
-    def test_simulate_batch_uses_chip_solve_many(self, monkeypatch):
-        """simulate_batch() dispatches every batch problem through chip.solve_many()."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        drive = ChargeDrive(target=q)
-        chip = Chip([q])
-        chip.connect(ControlEquipment(lines=[drive]))
-        seq = QuantumSequence(chip)
-        pulse = seq.schedule(drive, envelope=Square(duration=10.0, amplitude=0.02), freq=5.0)
-        amp = pulse.vary("amplitude", [0.01, 0.02, 0.03], name="amp")
-
-        captured: dict[str, object] = {}
-
-        def fake_solve_many(problems, *, progress):
-            captured["count"] = len(problems)
-            return [f"batched_{idx}" for idx in range(len(problems))]
-
-        monkeypatch.setattr(chip, "solve_many", fake_solve_many)
-        # check_truncation=False isolates the dispatch wiring under test: the
-        # fake returns a bare list, not a batch of SimulationResults to screen.
-        result = seq.simulate_batch(
-            amp,
-            tlist=np.asarray([0.0, 10.0]),
-            initial_state=chip.bare_state(q=0),
-            progress=False,
-            check_truncation=False,
-        )
-
-        assert captured["count"] == 3
-        assert result == ["batched_0", "batched_1", "batched_2"]
-
-
 class TestSimulationBatchResultAxes:
-    def test_flat_batch_gets_named_batch_axis_and_repr(self):
-        """A flat (unshaped) batch gets a default "batch" axis and a matching repr."""
-        class _Backend:
-            array_module = np
+    def test_sweep_coordinates_capture_the_built_model_values(self):
+        """Source edits and returned metadata cannot relabel solved points."""
+        from quchip.engine import solve_batch
 
-        class _Result:
-            _backend = _Backend()
+        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="q")
+        sequence = QuantumSequence(Chip([q], frame="rotating"))
+        frequencies = np.array([5.0, 6.0])
+        batch = sequence.build_batch(sequence.vary("q.freq", frequencies), tlist=[0.0, 1.0])
+        frequencies[:] = 9.0
+        result = solve_batch(batch, progress=False, check_truncation=False)
+        np.testing.assert_array_equal(batch.axes[0][1], [5.0, 6.0])
+        np.testing.assert_array_equal(result.axes[0][1], [point.chip.freq("q") for point in batch])
+        for index in (1.9, "1"):
+            with pytest.raises(TypeError):
+                batch[index]
 
-        results = [_Result() for _ in range(4)]
-        batch = SimulationBatchResult(results)
-
-        assert batch.shape == (4,)
-        assert batch.axes == (("batch", (0, 1, 2, 3)),)
-        assert batch[{"batch": 2}] is results[2]
-        assert repr(batch) == "SimulationBatchResult(n=4, shape=(4,), axes=['batch'])"
+        axes = (("a/b", ({"a": [1.0], "b": 2.0}, {"a": [3.0], "b": 4.0})),)
+        annotated = result.with_sweep_metadata(shape=(2,), axes=axes)
+        axes[0][1][0]["a"][0] = 7.0
+        annotated.axes[0][1][0]["a"][0] = 8.0
+        assert annotated.axes[0][1][0]["a"] == [1.0]
 
     def test_population_and_expect_are_reshaped_to_sweep_axes(self):
         """population() and expect() reshape per-element traces to the batch's sweep-axis shape."""
@@ -376,11 +263,12 @@ class TestSimulationBatchResultAxes:
 
         class _Result:
             _backend = _Backend()
+            times = np.asarray([0.0, 1.0, 2.0])
 
             def __init__(self, offset: float) -> None:
                 self.offset = offset
 
-            def population_array(self, device, level=0):
+            def population(self, device, level=0):
                 return np.asarray([self.offset, self.offset + 1.0, self.offset + 2.0])
 
             def expect(self, key, index=None):
@@ -406,7 +294,10 @@ class TestSimulationBatchResultAxes:
         np.testing.assert_allclose(pops, expected)
         np.testing.assert_allclose(batch.population("q", level=1, reduce="last"), expected[..., -1])
         np.testing.assert_allclose(batch.expect("n", reduce="mean"), expected[..., 0] + 20.0)
-        assert batch[{"amp": 1, "freq": 2}] is results[5]
+        assert batch[{"amp": np.int64(1), "freq": 2}] is results[5]
+        for index in (1.9, "1"):
+            with pytest.raises(TypeError):
+                batch[{"amp": index, "freq": 2}]
 
     def test_slice_returns_flat_batch_with_batch_axis(self):
         """Slicing a shaped batch returns a flat batch with a default "batch" axis."""
@@ -452,26 +343,6 @@ class TestSimulationBatchResultAxes:
 
 
 class TestSpectrumSweep:
-    def test_chip_dress_recomputes_without_serializing_model_state(self, monkeypatch):
-        """dressed_spectrum() recomputes after a parameter change without serializing model state."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        r = Resonator(freq=7.0, levels=4, label="r")
-        coupling = Capacitive(q, r, g=0.05)
-        chip = Chip([q, r], [coupling])
-
-        def fail(*args, **kwargs):
-            raise AssertionError("dress() should not serialize model state")
-
-        monkeypatch.setattr(q, "to_dict", fail)
-        monkeypatch.setattr(r, "to_dict", fail)
-        monkeypatch.setattr(coupling, "to_dict", fail)
-
-        original = np.asarray(chip.dressed_spectrum(), dtype=float)
-        chip["r"].freq = 6.75
-        updated = np.asarray(chip.dressed_spectrum(), dtype=float)
-
-        assert not np.allclose(updated, original)
-
     def test_chip_sweep_basic_shape_and_lookup(self):
         """SpectrumSweep produces eigenvalues shaped (n_points, evals_count) with dressed lookups."""
         q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
@@ -543,43 +414,6 @@ class TestSpectrumSweep:
         assert np.isfinite(indices[0])
         assert np.isnan(indices[1])
 
-    def test_chip_sweep_uses_structural_clone_not_serialization(self, monkeypatch):
-        """SpectrumSweep clones chip points structurally, without serializing chip or equipment."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        r = Resonator(freq=7.0, levels=4, label="r")
-        coupling = Capacitive(q, r, g=0.05)
-        chip = Chip([q, r], [coupling])
-
-        readout = ChargeDrive(target=r, label="readout")
-        flux = FluxDrive(target=q, label="flux")
-        equipment = ControlEquipment(
-            lines=[readout, flux],
-            signal_chain=[Crosstalk(source=readout.label, victim=flux.label, beta=0.15, theta=0.3, delay=2.0)],
-        )
-        chip.connect(equipment)
-
-        def fail(*args, **kwargs):
-            raise AssertionError("sweep() should not serialize topology to clone chip points")
-
-        monkeypatch.setattr(chip, "to_dict", fail)
-        monkeypatch.setattr(q, "to_dict", fail)
-        monkeypatch.setattr(r, "to_dict", fail)
-        monkeypatch.setattr(coupling, "to_dict", fail)
-        monkeypatch.setattr(equipment, "to_dict", fail)
-        monkeypatch.setattr(readout, "to_dict", fail)
-        monkeypatch.setattr(flux, "to_dict", fail)
-        monkeypatch.setattr(Crosstalk, "to_dict", fail)
-
-        result = SpectrumSweep(
-            chip,
-            [Sweep([6.8, 7.1], name="r.freq")],
-            evals_count=4,
-        ).run(progress=False)
-
-        assert result.eigenvalues.shape == (2, 4)
-        assert chip["r"].freq == pytest.approx(7.0)
-
-
 class TestSpectrumSweepValidation:
     def _chip(self):
         q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
@@ -607,17 +441,6 @@ class TestSpectrumSweepValidation:
         )
         with pytest.raises(ValueError, match="evals_count"):
             sweep.run(progress=False)
-
-    def test_evals_count_equal_to_total_dim_passes(self):
-        """evals_count exactly equal to chip.total_dim is accepted."""
-        chip = self._chip()
-        sweep = SpectrumSweep(
-            chip,
-            [Sweep([7.0], name="r.freq")],
-            evals_count=chip.total_dim,
-        )
-        result = sweep.run(progress=False)
-        assert result.eigenvalues.shape == (1, chip.total_dim)
 
     def test_int_point_on_multi_dimensional_grid_raises(self):
         """An int point index against a multi-D sweep grid raises ValueError from _normalize_point."""

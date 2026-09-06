@@ -95,7 +95,6 @@ class Capacitive(CouplingModel):
     """
 
     _type_prefix: ClassVar[str] = "cap"
-    folds_exchange: ClassVar[bool] = True
     reduces_to_crosskerr: ClassVar[bool] = True
     default_fit_observable: ClassVar[str] = "cross_kerr"
 
@@ -208,7 +207,6 @@ class TunableCapacitive(CouplingModel):
 
     _type_prefix: ClassVar[str] = "tunable_cap"
     is_effective: ClassVar[bool] = True
-    folds_exchange: ClassVar[bool] = True
     reduces_to_crosskerr: ClassVar[bool] = True
     default_fit_observable: ClassVar[str] = "cross_kerr"
 
@@ -328,6 +326,7 @@ class Coupling(_BaseCoupling):
     """
 
     _type_prefix: ClassVar[str] = "coupling"
+    structural_setting_names: ClassVar[tuple[str, ...]] = ("_op_a", "_op_b", "_interaction")
 
     def __init__(
         self,

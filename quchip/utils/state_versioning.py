@@ -1,28 +1,13 @@
-"""StateVersioned — shared mutation-tracking / cache-invalidation mixin.
+"""Track public attribute assignments for device and coupling cache invalidation.
 
-The engine caches assembled Hamiltonians (and dressed-state analyses) keyed
-on a per-object ``state_version`` counter. After construction finishes,
-every tracked public mutation bumps the counter so stale caches invalidate
-deterministically. Both :class:`~quchip.devices.base.BaseDevice` and
-:class:`~quchip.chip.coupling_base.BaseCoupling` need exactly this
-machinery, so it lives here once instead of being copy-pasted into each
-base.
+After construction, tracked assignments increment ``state_version``; private
+attributes and ``_untracked_names`` are excluded. This counter tracks writes,
+not in-place edits to mutable attribute values.
 
-:meth:`_finish_init` flips mutation tracking on and fires exactly once per
-instance. :meth:`__init_subclass__` wraps each concrete subclass's own
-``__init__``; the wrapper calls :meth:`_finish_init` only when
-``type(self).__init__`` resolves to itself — the entry-point init for the
-instance's actual type — so ``super().__init__`` chains and explicit
-inner-init forwards never re-fire it.
-
-Subclass-authored init machinery that synthesizes ``__init__`` after the
-``__init_subclass__`` super-chain runs (the declarative ``DeviceModel``)
-must call :func:`_wrap_init_for_finish` on the freshly-installed init
-itself; the helper is idempotent, so a repeat call is harmless.
-
-The JAX pytree ``_unflatten`` path bypasses ``__init__`` entirely — it
-builds via ``cls.__new__`` and sets ``_tracking_enabled`` directly — and so
-bypasses the wrapper as well.
+The outermost ``__init__`` enables tracking once. Classes that synthesize an
+initializer after ``__init_subclass__`` must apply :func:`_wrap_init_for_finish`
+themselves. JAX pytree unflattening bypasses initialization and installs the
+tracking state directly.
 """
 
 from __future__ import annotations
@@ -32,13 +17,10 @@ from typing import Any, ClassVar
 
 
 def _wrap_init_for_finish(cls: type) -> None:
-    """Wrap ``cls.__dict__['__init__']`` so :meth:`_finish_init` fires once.
+    """Wrap the class's own initializer to enable tracking after its outermost call.
 
-    No-op when *cls* defines no own ``__init__`` or when its ``__init__`` is
-    already wrapped (idempotent). The wrapper runs the original init, then calls
-    ``_finish_init`` only when ``type(self).__init__`` resolves to this wrapper
-    — the entry-point init for the instance's actual type — so nested
-    ``super().__init__`` / explicit inner-init calls never re-fire it.
+    Does nothing if the initializer is absent or already wrapped. The identity
+    check prevents nested ``super().__init__`` calls from finishing early.
     """
     init = cls.__dict__.get("__init__")
     if init is None or getattr(init, "_sv_wrapped", False):

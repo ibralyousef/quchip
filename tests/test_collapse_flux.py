@@ -41,11 +41,11 @@ def test_collapse_flux_requires_stored_states_and_known_keys() -> None:
     result = QuantumSequence(chip).simulate(
         np.linspace(0.0, 10.0, 11),
         initial_state=chip.bare_state(q=1),
-        options={"store_states": False},
+        states="final",
         partition=False,
         check_truncation=False,
     )
-    with pytest.raises(RuntimeError, match="store_states"):
+    with pytest.raises(RuntimeError, match='states="all"'):
         result.collapse_flux(result.collapse_channels[0])
     with pytest.raises(KeyError, match="matches no channel"):
         result.collapse_flux("nothing")
@@ -98,3 +98,15 @@ def test_batch_collapse_flux_stacks_per_point_traces() -> None:
     assert stacked.shape == (2, 21)
     assert stacked[1, -1] > stacked[0, -1]  # the stronger pulse leaves more excitation to decay
     assert np.asarray(batch.collapse_integral(key, reduce="last")).shape == (2,)
+
+
+def test_later_eager_flux_query_does_not_reuse_a_traced_cache():
+    import jax
+
+    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, T1=10.0, label="q")
+    chip = Chip([q], backend="dynamiqs", frame="rotating")
+    result = QuantumSequence(chip).simulate(tlist=[0.0, 1.0, 3.0], initial_state={"q": 1},
+                                            check_truncation=False)
+    key = result.collapse_channels[0]
+    compiled = jax.jit(lambda: result.collapse_flux(key))()
+    np.testing.assert_allclose(result.collapse_flux(key), compiled)

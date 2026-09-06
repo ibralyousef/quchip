@@ -7,8 +7,8 @@ builds on `JAX <https://github.com/google/jax>`_) to provide:
   evaluates inside JAX, so gradients flow through frame resolution, carrier
   phases, envelope parameters, crosstalk mixing, and dissipator strengths.
 * **Native batched solves.** A typed :class:`~quchip.engine.ir.SolveBatch`
-  is stacked along a batch axis and integrated with a single ``dq.sesolve``
-  / ``dq.mesolve`` call (``vmap`` under the hood) in :meth:`solve_batch`.
+  is stacked along a batch axis and integrated with native Dynamiqs integrators
+  under ``vmap`` in :meth:`solve_batch`.
   Structurally heterogeneous batches fail loudly — no silent sequential
   fallback — so the caller can regroup them via
   :func:`quchip.engine.solve_many`.
@@ -27,6 +27,7 @@ from __future__ import annotations
 import itertools
 import math
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Sequence
 
 import dynamiqs as dq
@@ -42,6 +43,7 @@ import jax.numpy as jnp  # noqa: E402
 import jax.scipy.linalg as jsp_linalg  # noqa: E402
 import jax.tree_util as jtu  # noqa: E402
 
+from quchip.utils.values import DeferredValue
 from quchip.backend._dims import (  # noqa: E402
     compute_two_body_permutation,
     default_solver_steps,
@@ -52,6 +54,7 @@ from quchip.backend.containers import (  # noqa: E402
     DeferredBatch,
     EigensystemData,
     PreparedHamiltonian,
+    PreparedStationary,
     LinearResponseSolverResult,
     SolverResult,
     SteadyStateSolverResult,
@@ -61,7 +64,14 @@ from quchip.engine.ir import (  # noqa: E402
     ScalarModulation,
     _aggregate_batch_metadata,
     evaluate_signal_program,
+    signal_window_bounds,
 )
+
+
+def _signal_discontinuities(signal: Any) -> Any:
+    """Flatten absolute pulse edges across native batch points for Diffrax."""
+    edges = [jnp.ravel(edge) for bounds in signal_window_bounds(signal) for edge in bounds]
+    return jnp.concatenate(edges) if edges else None
 
 
 class _SignalCallable(eqx.Module):
@@ -75,24 +85,6 @@ class _SignalCallable(eqx.Module):
 
     def __call__(self, t: float) -> Any:
         return jnp.asarray(evaluate_signal_program(self.signal, t, xp=jnp))
-
-
-class _BatchedSignalQArrayCallable(eqx.Module):
-    """JAX-traceable ``signal(t) * operator`` with scalar/batch broadcasting.
-
-    When ``signal`` is a scalar the product is a single qarray; when ``signal``
-    carries a leading batch axis the product broadcasts against the operator's
-    trailing two matrix axes, producing a batched operator ready for vmap.
-    """
-
-    signal: Any
-    operator: Any
-
-    def __call__(self, t: float) -> Any:
-        prefactor = jnp.asarray(evaluate_signal_program(self.signal, t, xp=jnp), dtype=jnp.complex128)
-        if prefactor.ndim == 0:
-            return prefactor * self.operator
-        return prefactor[..., None, None] * self.operator
 
 
 @dataclass(frozen=True)
@@ -219,7 +211,14 @@ class DynamiqsBackend(Backend):
         return SparseDIAQArray(dim_tuple, False, (0,), v[None, :])
 
     def from_array(self, data: Any, dims: list[list[int]] | None = None) -> Operator:
-        """Construct a native ``QArray`` from a dense matrix (row/col or flat *dims*)."""
+        """Construct a native operator, preserving native sparse storage."""
+        if isinstance(data, (DenseQArray, SparseDIAQArray)):
+            dims_tuple = self._coerce_dims(dims, data.shape)
+            if dims_tuple is None or dims_tuple == data.dims:
+                return data
+            if isinstance(data, SparseDIAQArray):
+                return SparseDIAQArray(dims_tuple, data.vectorized, data.offsets, data.diags)
+            return DenseQArray(dims_tuple, data.vectorized, data.data)
         if hasattr(data, "to_jax"):
             data = data.to_jax()
         elif hasattr(data, "full"):
@@ -447,28 +446,14 @@ class DynamiqsBackend(Backend):
         (see that function's docstring for the heuristic) — the same
         heuristic the QuTiP backend uses.
 
-        ``max_steps`` is an abort ceiling on the integrator's total internal
-        step count, not a bound on individual step size. Unlike the QuTiP
-        backend, this backend does not consume ``metadata['max_step_ns']``:
-        dynamiqs' deterministic adaptive methods (``Tsit5``, ``Dopri5``,
-        ``Dopri8``, ``Kvaerno3``/``Kvaerno5``) expose no step-size-bound
-        parameter analogous to QuTiP's ``max_step`` (verified against
-        dynamiqs 0.3.3 — none of those methods accept a ``dtmax``-style
-        argument). ``dq.method.Event`` does accept ``dtmax``, but it governs
-        only the no-click evolution inside ``dq.jssesolve``'s jump-SSE
-        integration, not the deterministic ``sesolve``/``mesolve`` path this
-        backend uses; wrapping a deterministic solve in ``Event`` to borrow
-        its ``dtmax`` would fail before integration even starts.
-
-        Consequence: a finite-support pulse embedded in a long idle span can
-        be silently skipped by dynamiqs' adaptive step selection, the same
-        failure mode :meth:`quchip.backend.qutip.QuTiPBackend.resolve_solver_options`
-        fixes via ``max_step``. Dynamiqs' deterministic methods do not expose
-        a corresponding step-size option, so this backend cannot apply the
-        engine's ``max_step_ns`` hint.
+        ``max_steps`` limits the total internal step count. Pulse edges are
+        supplied separately through the native Hamiltonian's discontinuities,
+        so adaptive integration visits short pulses even inside long idles.
+        The deterministic adaptive methods expose no ``max_step`` option;
+        their tolerances and supported native method choices remain explicit.
         """
         resolved = self._normalize_dq_options(options)
-        if "max_steps" not in resolved:
+        if "max_steps" not in resolved and resolved.get("method") is None:
             default = default_solver_steps(metadata, tlist)
             if default is not None:
                 resolved["max_steps"] = default
@@ -481,16 +466,32 @@ class DynamiqsBackend(Backend):
         * ``progress_bar`` → ``progress_meter``
         * ``nsteps`` → ``max_steps``
 
-        Returns a fresh dict and is idempotent (a canonical key already present
-        is left untouched), so it is safe to apply at every point those aliases
-        are consumed — the option-merge boundary and the ``Options`` / method
-        builders alike.
+        Return a fresh validated dict. Supplying both an alias and its canonical
+        name is ambiguous and raises. Normalized dictionaries can be checked
+        again at the native options and method boundaries.
         """
         resolved = {} if options is None else dict(options)
-        if "progress_meter" not in resolved and "progress_bar" in resolved:
-            resolved["progress_meter"] = resolved.pop("progress_bar")
-        if "max_steps" not in resolved and "nsteps" in resolved:
-            resolved["max_steps"] = resolved.pop("nsteps")
+        for alias, canonical in (("progress_bar", "progress_meter"), ("nsteps", "max_steps")):
+            if alias in resolved:
+                if canonical in resolved:
+                    raise ValueError(f"Supply only one of {alias!r} and {canonical!r}.")
+                resolved[canonical] = resolved.pop(alias)
+        supported = {"store_states", "store_final_state", "progress_meter", "max_steps", "method", "gradient"}
+        unknown = set(resolved) - supported
+        if unknown:
+            raise ValueError(
+                f"Unsupported Dynamiqs options: {sorted(unknown)}. "
+                "Configure tolerances and integration controls on a native dynamiqs.method object."
+            )
+        method = resolved.get("method")
+        if method is not None:
+            if not isinstance(method, dq.method.Method):
+                raise ValueError("Dynamiqs method must be a dynamiqs.method.Method instance.")
+            if isinstance(method, (dq.method.JumpMonteCarlo, dq.method.DiffusiveMonteCarlo)):
+                raise ValueError("quchip supports deterministic evolution methods; Monte Carlo trajectories "
+                                 "and their termination diagnostics are not supported.")
+            if resolved.get("max_steps") is not None:
+                raise ValueError("Set max_steps on the explicit Dynamiqs method, not in both places.")
         return resolved
 
     def coerce_state(self, state: State, dims: tuple[int, ...] | None = None) -> State:
@@ -525,7 +526,7 @@ class DynamiqsBackend(Backend):
             H, psi0, jnp.asarray(tlist, dtype=float),
             **self._solve_kwargs(e_ops, options),
         )
-        return self._wrap_result(result, solver="sesolve")
+        return self._wrap_result(result, solver="sesolve", options=options)
 
     def mesolve(
         self,
@@ -541,7 +542,7 @@ class DynamiqsBackend(Backend):
             H, [] if c_ops is None else c_ops, rho0, jnp.asarray(tlist, dtype=float),
             **self._solve_kwargs(e_ops, options),
         )
-        return self._wrap_result(result, solver="mesolve")
+        return self._wrap_result(result, solver="mesolve", options=options)
 
     def _stationary_liouvillian(self, engine_result: Any) -> Any:
         """Lower one static engine description to Dynamiqs' JAX Liouvillian."""
@@ -551,7 +552,7 @@ class DynamiqsBackend(Backend):
         collapse_ops = self._collapse_operators(engine_result)
         return self.to_array(dq.slindbladian(hamiltonian, collapse_ops))
 
-    def steadystate(self, problem: Any) -> SteadyStateSolverResult:
+    def steadystate(self, problem: Any, *, prepared: PreparedStationary | None = None) -> SteadyStateSolverResult:
         """Solve a static Lindblad generator by a trace-constrained JAX solve."""
         options = dict(problem.options)
         method = options.pop("method", "direct")
@@ -563,7 +564,7 @@ class DynamiqsBackend(Backend):
                 "Unknown Dynamiqs steady-state options: " + ", ".join(sorted(options))
             )
 
-        liouvillian = self._stationary_liouvillian(problem.engine_result)
+        liouvillian = self.prepare_stationary(problem.engine_result, prepared=prepared).liouvillian
         dimension = math.prod(problem.engine_result.dims)
 
         trace_row = jnp.zeros((dimension * dimension,), dtype=jnp.complex128)
@@ -589,7 +590,6 @@ class DynamiqsBackend(Backend):
         )
         state = dq.asqarray(state_array, dims=tuple(problem.engine_result.dims))
         residual = jnp.linalg.norm(liouvillian @ state_vector)
-        condition_number = jnp.linalg.cond(constrained)
         expectations = None
         if isinstance(problem.e_ops, list):
             expectations = [dq.expect(operator, state) for operator in problem.e_ops]
@@ -600,8 +600,18 @@ class DynamiqsBackend(Backend):
             stats={"method": method, "uniqueness_enforced": True},
             residual=residual,
             nullity=nullity,
-            condition_number=condition_number,
+            _condition_number=DeferredValue(partial(self._stationary_condition_number, problem.engine_result)),
         )
+
+    def _stationary_condition_number(self, engine_result: Any) -> Any:
+        liouvillian = self._stationary_liouvillian(engine_result)
+        dimension = math.prod(engine_result.dims)
+        trace_row = jnp.zeros((dimension * dimension,), dtype=jnp.complex128).at[:: dimension + 1].set(1.0)
+        return jnp.linalg.cond(liouvillian.at[-1, :].set(trace_row))
+
+    @staticmethod
+    def _linear_response_systems(drift: Any, frequencies: Any) -> Any:
+        return -1j * 2.0 * jnp.pi * frequencies[:, None, None] * jnp.eye(drift.shape[0])[None, :, :] - drift[None, :, :]
 
     def linear_response(self, problem: Any) -> LinearResponseSolverResult:
         """Solve passive-linear scattering with batched JAX mode matrices."""
@@ -612,18 +622,16 @@ class DynamiqsBackend(Backend):
         drift = -1j * hamiltonian - 0.5 * couplings.conj().T @ couplings
         indices = jnp.asarray(problem.plane_indices)
         sources = -couplings.conj().T @ scattering[:, indices]
-        systems = (
-            -1j * 2.0 * jnp.pi * frequencies[:, None, None]
-            * jnp.eye(len(problem.mode_labels), dtype=jnp.complex128)[None, :, :]
-            - drift[None, :, :]
-        )
+        systems = self._linear_response_systems(drift, frequencies)
         amplitudes = jnp.linalg.solve(systems, sources[None, :, :])
         responses = scattering[jnp.ix_(indices, indices)][None, :, :] + couplings[indices] @ amplitudes
         residuals = jnp.linalg.norm(systems @ amplitudes - sources[None, :, :], axis=(-2, -1))
         return LinearResponseSolverResult(
             responses=responses,
             residuals=residuals,
-            condition_numbers=jnp.linalg.cond(systems),
+            _condition_numbers=DeferredValue(
+                lambda: jnp.linalg.cond(self._linear_response_systems(drift, frequencies))
+            ),
         )
 
     def stationary_resolvent(
@@ -632,9 +640,11 @@ class DynamiqsBackend(Backend):
         sources: tuple[tuple[str, Any], ...],
         observables: tuple[tuple[str, Any], ...],
         frequencies: Any,
+        *,
+        prepared: PreparedStationary | None = None,
     ) -> dict[tuple[str, str], Any]:
         """Evaluate stationary resolvents with Dynamiqs' JAX Liouvillian."""
-        liouvillian = self._stationary_liouvillian(engine_result)
+        liouvillian = self.prepare_stationary(engine_result, prepared=prepared).liouvillian
         dimension = math.prod(engine_result.dims)
         targets = jnp.stack(
             [
@@ -672,9 +682,11 @@ class DynamiqsBackend(Backend):
         initial: Any,
         observables: tuple[tuple[str, Any], ...],
         times: Any,
+        *,
+        prepared: PreparedStationary | None = None,
     ) -> dict[str, Any]:
         """Propagate regression operators with Dynamiqs' JAX Liouvillian."""
-        liouvillian = self._stationary_liouvillian(engine_result)
+        liouvillian = self.prepare_stationary(engine_result, prepared=prepared).liouvillian
         dimension = math.prod(engine_result.dims)
         initial_vector = jnp.asarray(initial.to_dense(), dtype=jnp.complex128).T.reshape(-1)
         native_observables = tuple(
@@ -779,10 +791,10 @@ class DynamiqsBackend(Backend):
             dyn_mods,
             c_ops,
             e_ops_arg if e_ops_arg is not None else [],
-            self.coerce_state(problem.initial_state, dims=problem.chip.dims),
+            self.coerce_state(problem.initial_state, dims=problem.engine_result.dims),
             tlist_arr,
         )
-        return self._wrap_result(result, solver=solver_name)
+        return self._wrap_result(result, solver=solver_name, options=opts)
 
     @staticmethod
     def _engine_result_is_cacheable(engine_result: Any) -> bool:
@@ -802,6 +814,7 @@ class DynamiqsBackend(Backend):
         self,
         *,
         batched: bool = False,
+        point_e_ops: bool = False,
         solver_name: str,
         options_obj: Any,
         method_obj: Any,
@@ -824,6 +837,7 @@ class DynamiqsBackend(Backend):
         """
         key = (
             "batch" if batched else "single",
+            point_e_ops,
             solver_name,
             options_obj,
             method_obj,
@@ -854,24 +868,32 @@ class DynamiqsBackend(Backend):
             state0,
             tarr,
         ):
+            def native_solve(hamiltonian, jumps, observables, state):
+                if solver_name == "mesolve":
+                    return dq.mesolve(hamiltonian, list(jumps), state, tarr, exp_ops=observables, **kwargs)
+                return dq.sesolve(hamiltonian, state, tarr, exp_ops=observables, **kwargs)
+
             if batched:
-                rhs = self._assemble_batched_rhs(
-                    static_ops,
-                    static_coeffs,
-                    dynamic_ops,
-                    dynamic_payloads,
-                )
-            else:
-                rhs = self._assemble_modulated_rhs(
-                    static_ops,
-                    static_coeffs,
-                    dynamic_ops,
-                    [modulation.signal for modulation in dynamic_payloads],
-                )
-            exp_ops = list(e_ops) if has_e_ops else None
-            if solver_name == "mesolve":
-                return dq.mesolve(rhs, list(c_ops), state0, tarr, exp_ops=exp_ops, **kwargs)
-            return dq.sesolve(rhs, state0, tarr, exp_ops=exp_ops, **kwargs)
+                from quchip.backend._dynamiqs_status import solve_with_status
+
+                # Build single-point callables after mapping their numerical leaves.
+                def solve_point(sops, coeffs, dops, signals, jumps, observables, state):
+                    rhs = self._assemble_modulated_rhs(sops, coeffs, dops, signals)
+                    return solve_with_status(rhs, list(jumps), state, tarr,
+                        list(observables) if has_e_ops else None, solver=solver_name, **kwargs)
+
+                axes = (tuple(0 if op.ndim > 2 else None for op in static_ops),
+                        tuple(0 if jnp.ndim(coeff) else None for coeff in static_coeffs),
+                        tuple(0 if op.ndim > 2 else None for op in dynamic_ops),
+                        0 if state0.shape[0] > 1 else None, 0, 0 if point_e_ops else None, 0)
+                result_type = dq.MESolveResult if solver_name == "mesolve" else dq.SESolveResult
+                return jax.vmap(solve_point, in_axes=axes, out_axes=(result_type.out_axes(), 0))(
+                    static_ops, static_coeffs, dynamic_ops, dynamic_payloads, c_ops, e_ops, state0)
+            rhs = self._assemble_modulated_rhs(
+                static_ops, static_coeffs, dynamic_ops,
+                [modulation.signal for modulation in dynamic_payloads],
+            )
+            return native_solve(rhs, c_ops, list(e_ops) if has_e_ops else None, state0)
 
         jitted = jax.jit(_solve)
         cache[key] = jitted
@@ -953,25 +975,7 @@ class DynamiqsBackend(Backend):
             term = coeff * op
             rhs = term if rhs is None else rhs + term
         for op, signal in zip(dyn_ops, dyn_signals):
-            dynamic = dq.modulated(_SignalCallable(signal), op)
-            rhs = dynamic if rhs is None else rhs + dynamic
-        return rhs
-
-    @staticmethod
-    def _assemble_batched_rhs(
-        static_ops: Sequence[Any],
-        static_coeffs: Sequence[Any],
-        dynamic_ops: Sequence[Any],
-        dynamic_signals: Sequence[Any],
-    ) -> Any:
-        """Assemble one native-batched RHS from stable operator and signal leaves."""
-        rhs = DynamiqsBackend._assemble_modulated_rhs(
-            static_ops, static_coeffs, (), ()
-        )
-        for operator, signal in zip(dynamic_ops, dynamic_signals):
-            dynamic = dq.timecallable(
-                _BatchedSignalQArrayCallable(signal=signal, operator=operator)
-            )
+            dynamic = dq.modulated(_SignalCallable(signal), op, discontinuity_ts=_signal_discontinuities(signal))
             rhs = dynamic if rhs is None else rhs + dynamic
         return rhs
 
@@ -1008,12 +1012,11 @@ class DynamiqsBackend(Backend):
                 self._sum_terms(result.static_terms, cached_native)
                 for result in engine_results
             ]
-            if any(value is None for value in static_rhs):
-                raise ValueError("Every SolveBatch point must contain a static Hamiltonian.")
-            static_operators = [self._stack_qarray_batch(static_rhs)]
+            reference_rhs = next(value for value in static_rhs if value is not None)
+            static_operators = [self._stack_qarray_batch([
+                value if value is not None else 0 * reference_rhs for value in static_rhs
+            ])]
             static_coefficients = [jnp.asarray(1.0, dtype=jnp.complex128)]
-        if not static_operators:
-            raise ValueError("Every SolveBatch point must contain a static Hamiltonian.")
 
         dynamic_operators: list[Any] = []
         dynamic_signals: list[Any] = []
@@ -1072,12 +1075,12 @@ class DynamiqsBackend(Backend):
         if len(solver_names) != 1:
             raise ValueError("Every SolveBatch point must resolve to the same solver.")
         solver_name = solver_names.pop()
-        opts = self._merge_options(reference.options, metadata=prepared.metadata, tlist=tlist_arr)
+        opts = self._resolve_problem_options(
+            reference, metadata=prepared.metadata, tlist=tlist_arr, solver_name=solver_name,
+        )
         e_ops, point_e_ops = self._batch_e_ops(batch)
-        requested_store_states = bool(opts.get("store_states", True))
         if point_e_ops is not None:
-            opts = dict(opts)
-            opts["store_states"] = True
+            e_ops = point_e_ops
         options = self._options_from_dict(opts, cartesian_batching=False)
         method = self._method_from_dict(opts)
         gradient = opts.get("gradient")
@@ -1085,11 +1088,12 @@ class DynamiqsBackend(Backend):
         hamiltonian = prepared.shared
         if not isinstance(hamiltonian, _DynamiqsBatchHamiltonian):
             raise TypeError("Dynamiqs prepare_batch returned an invalid native batch payload.")
-        chip_dims = getattr(batch.chip, "dims", None)
+        chip_dims = reference.engine_result.dims
         native_states = [self.coerce_state(s, dims=chip_dims) for s in batch.initial_states]
         stacked_state = self._stack_qarray_batch(native_states)
         solve_fn = self._cached_jit_solve(
             batched=True,
+            point_e_ops=point_e_ops is not None,
             solver_name=solver_name,
             options_obj=options,
             method_obj=method,
@@ -1100,40 +1104,22 @@ class DynamiqsBackend(Backend):
             n_c_ops=len(c_ops),
         )
 
-        try:
-            batched_result = solve_fn(
-                hamiltonian.static_operators,
-                hamiltonian.static_coefficients,
-                hamiltonian.dynamic_operators,
-                hamiltonian.dynamic_signals,
-                c_ops,
-                e_ops if e_ops is not None else [],
-                stacked_state,
-                tlist_arr,
-            )
-        except (ValueError, TypeError, AttributeError) as exc:
-            raise RuntimeError(
-                "Dynamiqs native batched solve_batch failed; refusing to silently fall back."
-            ) from exc
+        batched_result, status = solve_fn(
+            hamiltonian.static_operators,
+            hamiltonian.static_coefficients,
+            hamiltonian.dynamic_operators,
+            hamiltonian.dynamic_signals,
+            c_ops,
+            e_ops if e_ops is not None else [],
+            stacked_state,
+            tlist_arr,
+        )
 
-        results = self._split_batched_result(batched_result, solver=solver_name, count=batch.batch_size)
-        if point_e_ops is not None:
-            states = self.to_array(batched_result.states)
-            dims = batch.problems[0].engine_result.dims
-            expectation_batches = [
-                jax.vmap(
-                    lambda op, state: dq.expect(
-                        dq.asqarray(op, dims=dims),
-                        dq.asqarray(state, dims=dims),
-                    )
-                )(self.to_array(operator), states)
-                for operator in point_e_ops
-            ]
-            for index, result in enumerate(results):
-                result.expect = [values[index] for values in expectation_batches]
-                if not requested_store_states:
-                    result.states = None
-        return results
+        from quchip.backend._dynamiqs_status import require_success
+
+        batched_result = require_success(batched_result, status,
+            tuple(batch.params_at(i) for i in range(batch.batch_size)), traced_context=batch._failure_context)
+        return self._split_batched_result(batched_result, solver=solver_name, count=batch.batch_size, options=opts)
 
     # ------------------------------------------------------------------
     # Internal: dims / shape coercion
@@ -1341,7 +1327,7 @@ class DynamiqsBackend(Backend):
         ]
 
     def _batch_e_ops(self, batch: Any) -> tuple[list[Operator] | None, list[Operator] | None]:
-        """Return shared solver observables or point-aligned post-solve observables."""
+        """Return shared observables or operators aligned with the native solve axis."""
         per_point = [problem.e_ops for problem in batch.problems]
         if all(ops is None for ops in per_point):
             return None, None
@@ -1349,6 +1335,15 @@ class DynamiqsBackend(Backend):
             raise ValueError("Every SolveBatch point must share the same expectation-operator structure.")
         if all(ops is per_point[0] for ops in per_point[1:]):
             return per_point[0], None
+        from quchip.utils.values import value_fingerprint
+
+        try:
+            keys = [tuple(value_fingerprint(self.to_array(op)) for op in ops) for ops in per_point]
+        except ValueError:
+            pass  # Traced operator values must remain point-specific.
+        else:
+            if all(key == keys[0] for key in keys[1:]):
+                return per_point[0], None
         counts = {len(ops) for ops in per_point}
         if len(counts) != 1:
             raise ValueError("Every SolveBatch point must have the same number of expectation operators.")
@@ -1364,11 +1359,23 @@ class DynamiqsBackend(Backend):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _split_batched_result(result: Any, *, solver: str, count: int) -> list[SolverResult]:
+    def _native_final_state(result: Any, solver: str) -> Any:
+        """Restore vectorized final-only ME states, preserving subsystem dimensions."""
+        state = result.final_state
+        if solver == "mesolve" and state.vectorized:
+            # Native Expm 0.3.4 unvectorizes sampled saves but retains ylast as a vector.
+            state = dq.asqarray(dq.unvectorize(state).to_jax(), dims=state.dims)
+        return state
+
+    @staticmethod
+    def _split_batched_result(
+        result: Any, *, solver: str, count: int, options: dict[str, Any],
+    ) -> list[SolverResult]:
         """Unpack a dynamiqs flat-batched solve into per-problem :class:`SolverResult`s."""
-        has_states = getattr(result, "states", None) is not None
+        has_states = options.get("store_states", True) and result.states is not None
         has_expects = getattr(result, "expects", None) is not None
-        final_state = getattr(result, "final_state", None)
+        final_state = (DynamiqsBackend._native_final_state(result, solver)
+                       if options.get("store_final_state", True) else None)
 
         return [
             SolverResult(
@@ -1380,24 +1387,33 @@ class DynamiqsBackend(Backend):
                 # states for viz.
                 states=result.states[i] if has_states else None,
                 expect=list(result.expects[i]) if has_expects else None,
-                final_state=final_state[i] if final_state is not None else None,
-                stats={"batched": True, "batch_index": i},
+                final_state=(
+                    final_state[i] if options.get("store_final_state", True) and final_state is not None else None
+                ),
+                stats={"batched": True, "batch_index": i, "options": DynamiqsBackend._effective_options(result)},
                 solver=solver,
             )
             for i in range(count)
         ]
 
     @staticmethod
-    def _wrap_result(result: Any, solver: str) -> SolverResult:
+    def _wrap_result(
+        result: Any, solver: str, *, options: dict[str, Any] | None = None,
+    ) -> SolverResult:
         """Convert a single dynamiqs ``Result`` into a :class:`SolverResult`."""
+        if isinstance(result.method, dq.method.Expm):
+            from quchip.backend._dynamiqs_status import expm_status, require_success
+
+            status = jtu.tree_map(jnp.atleast_1d, expm_status(result))
+            result = require_success(result, status, ({},), single=True)
         # Keep the stacked ``QArray`` (shape ``(T, n, 1/n)``) intact rather than
         # exploding it into ``T`` separate states: the over-time extractors read
         # the stacked form directly and a stacked QArray still indexes/iterates
         # per-time for viz.
-        states = result.states if getattr(result, "states", None) is not None else None
+        states = result.states if (options or {}).get("store_states", True) else None
         expect = list(result.expects) if getattr(result, "expects", None) is not None else None
 
-        stats: dict[str, Any] = {}
+        stats: dict[str, Any] = {"options": DynamiqsBackend._effective_options(result)}
         infos = getattr(result, "infos", None)
         if infos is not None:
             stats["infos"] = str(infos)
@@ -1409,10 +1425,18 @@ class DynamiqsBackend(Backend):
             times=result.tsave,
             states=states,
             expect=expect,
-            final_state=getattr(result, "final_state", None),
+            final_state=(
+                DynamiqsBackend._native_final_state(result, solver)
+                if (options or {}).get("store_final_state", True) else None
+            ),
             stats=stats,
             solver=solver,
         )
+
+    @staticmethod
+    def _effective_options(result: Any) -> dict[str, Any]:
+        """Capture the native solver settings, including resolved method defaults."""
+        return {**vars(result.options), "method": result.method, "gradient": result.gradient}
 
     @staticmethod
     def _extract_nsteps(infos: Any) -> int | None:

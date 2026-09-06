@@ -119,6 +119,21 @@ def test_beta_uses_the_existing_complex_signal_convention_without_rescaling() ->
     assert evaluate_signal_program(engine.coherent_inputs[0].beta, time) == pytest.approx(expected)
 
 
+def test_incident_field_and_hamiltonian_capture_the_same_envelope() -> None:
+    """Editing an authored pulse cannot change either part of a resolved field calculation."""
+    chip, _ = _one_port_chip()
+    envelope = Square(duration=2.0, amplitude=0.3)
+    sequence = QuantumSequence(chip)
+    sequence.schedule(CoherentInput("coupler"), envelope=envelope)
+    engine = sequence.build_problem(np.linspace(0.0, 2.0, 21)).engine_result
+    matrix = _dynamic_matrix(engine, 1.0)
+    envelope.amplitude = 0.0
+    field = engine.coherent_inputs[0]
+    assert evaluate_signal_program(field.beta, 1.0) == pytest.approx(0.3)
+    assert evaluate_signal_program(field.reference_beta, 1.0) == pytest.approx(0.3)
+    np.testing.assert_allclose(_dynamic_matrix(engine, 1.0), matrix)
+
+
 def test_scattering_routes_incident_beta_before_it_drives_the_system() -> None:
     """Boundary scattering routes incident beta before Hamiltonian coupling."""
     left = Resonator(freq=5.0, levels=2, label="left")

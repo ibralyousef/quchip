@@ -35,10 +35,10 @@ def _network_of(source: Any) -> PortNetwork:
     return network
 
 
-def _annotation(network: PortNetwork, component: Any) -> list[str]:
+def _annotation(component: Any) -> list[str]:
     """Return the value lines drawn under a component label."""
-    kind = network._component_kinds[component.label]
-    parameters = network._component_parameters.get(component.label, {})
+    kind = component._kind
+    parameters = component._parameters
     ports = [port for port in component._local_ports if port is not None]
     if ports:
         port = ports[0]
@@ -173,7 +173,7 @@ def plot_port_network(
             fill = _REFERENCE_COLOR if reference else "white"
             _box(axis, x, y, 1.6, 1.4, facecolor=fill, edgecolor="#404040", zorder=2)
             axis.text(x, y + 0.4, component.label, ha="center", va="center", fontsize=9, weight="bold", zorder=3)
-            notes = "\n".join(_annotation(network, component))
+            notes = "\n".join(_annotation(component))
             axis.text(x, y + 0.08, notes, ha="center", va="top", fontsize=7, zorder=3)
             if not show_hidden:
                 continue

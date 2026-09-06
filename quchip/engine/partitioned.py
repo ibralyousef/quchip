@@ -7,7 +7,10 @@ only orchestrates: decide, split, run one pipeline per component, combine.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
+from quchip.engine.ir import StateStorage
+from quchip.engine.sampling import AutomaticTimeGrid, interval_bounds
 
 
 def _uses_field_boundary(drive_ops: list, e_ops: dict | None) -> bool:
@@ -47,6 +50,8 @@ def maybe_simulate_partitioned(
     check_truncation: bool,
     truncation_threshold: float,
     approximation: Any | None,
+    states: StateStorage = "all",
+    dissipation: bool = True,
 ) -> Any | None:
     """Run per-component solves when the chip splits; ``None`` declines to the joint path."""
     if initial_state is not None and not isinstance(initial_state, Mapping):
@@ -60,18 +65,20 @@ def maybe_simulate_partitioned(
     from quchip.chip.partition import partition_chip
     from quchip.engine.frames import resolve_for_operations
 
-    resolved = resolve_for_operations(chip, drive_ops, approximation=approximation)
+    resolved = resolve_for_operations(chip, drive_ops, approximation=approximation,
+                                      solve_window=interval_bounds(tlist))
 
     part = partition_chip(
         chip,
         resolved=resolved,
+        clone_trivial=False,
         extra_supports=_scheduled_coupling_supports(chip, drive_ops),
     )
     if part.is_trivial:
         return None
 
     from quchip.chip.partition import split_drive_ops, split_e_ops, split_state_mapping
-    from quchip.engine import simulate
+    from quchip.engine import build_problem, solve_problem
     from quchip.results.partitioned import PartitionedSimulationResult
 
     per_ops = split_drive_ops(part, chip, drive_ops)
@@ -81,16 +88,20 @@ def maybe_simulate_partitioned(
         else [None] * len(part)
     )
 
-    results = []
-    for comp, ops_i, eops_i, state_i in zip(part.components, per_ops, per_eops, per_state):
-        results.append(simulate(
-            comp.chip, ops_i, tlist,
-            solver=solver, options=options,
-            e_ops=eops_i or None,
-            initial_state=state_i,
-            check_truncation=check_truncation,
-            truncation_threshold=truncation_threshold,
-            partition=False,
-            approximation=approximation,
-        ))
+    automatic = isinstance(tlist, AutomaticTimeGrid)
+    times = tlist.bounds if automatic else tlist
+    problems = [
+        build_problem(comp.chip, ops_i, times, solver=solver, options=options,
+                      e_ops=eops_i or None, initial_state=state_i,
+                      approximation=approximation, states=states, dissipation=dissipation)
+        for comp, ops_i, eops_i, state_i in zip(part.components, per_ops, per_eops, per_state)
+    ]
+    if automatic:
+        # All components need one grid for products of simultaneous observables.
+        from quchip.engine.sampling import automatic_tlist
+
+        common_times = automatic_tlist(problems, combine=True)
+        problems = [replace(problem, tlist=common_times) for problem in problems]
+    results = [solve_problem(problem, check_truncation=check_truncation,
+                             truncation_threshold=truncation_threshold) for problem in problems]
     return PartitionedSimulationResult(results, part, key_plan)
