@@ -111,6 +111,11 @@ q1_assignment_overlap = np.asarray(
 <summary>Plotting code</summary>
 
 ```python
+import shutil
+
+plt.style.use("../docs/_static/quchip.mplstyle")
+plt.rcParams["text.usetex"] = bool(shutil.which("latex"))
+
 figure, (axis, overlap_axis) = plt.subplots(
     2,
     1,
@@ -120,8 +125,8 @@ figure, (axis, overlap_axis) = plt.subplots(
     layout="constrained",
 )
 
-axis.plot(q2_frequencies, q2_frequencies, color="0.78", linestyle="--", linewidth=1.1)
-axis.axhline(q1_frequency, color="0.78", linestyle="--", linewidth=1.1, label="bare declarations")
+axis.plot(q2_frequencies, q2_frequencies, color="#9AA0A8", linestyle="--", linewidth=1.1)
+axis.axhline(q1_frequency, color="#9AA0A8", linestyle="--", linewidth=1.1, label="bare declarations")
 for branch_index in (0, 1):
     q1_like = q1_branch == branch_index
     axis.plot(
@@ -141,8 +146,9 @@ for branch_index in (0, 1):
 axis.annotate(
     f"$2J$ = {1.0e3 * minimum_splitting:.1f} MHz",
     xy=(minimum_frequency, 0.5 * (lower_branch[minimum_index] + upper_branch[minimum_index])),
-    xytext=(5.327, 5.270),
-    arrowprops={"arrowstyle": "-", "color": "0.35"},
+    xytext=(40, -40),
+    textcoords="offset points",
+    arrowprops={"arrowstyle": "-", "color": "#6D7277", "linewidth": 0.8},
     fontsize=10,
 )
 axis.set(
@@ -157,21 +163,21 @@ overlap_axis.plot(
     color="#246FA8",
     linewidth=2.0,
 )
-overlap_axis.axhline(0.5, color="0.72", linestyle="--", linewidth=1.0)
+overlap_axis.axhline(0.5, color="#9AA0A8", linestyle="--", linewidth=1.0)
 overlap_axis.set(
     xlabel="Bare q2 frequency (GHz)",
     ylabel=r"$q_1$ assignment",
     ylim=(0.45, 1.02),
 )
 
-figure_path = "../docs/images/resolve_and_sweep.png"
-figure.savefig(figure_path, dpi=180)
+figure_path = "../docs/images/resolve_and_sweep.svg"
+figure.savefig(figure_path)
 plt.show()
 ```
 
 </details>
 
-```{figure} ../images/resolve_and_sweep.png
+```{figure} ../images/resolve_and_sweep.svg
 :width: 720px
 :alt: Dressed transmon avoided crossing with the q1 bare-state assignment weight below
 
@@ -322,7 +328,7 @@ print(f"RESULT statics={json.dumps(statics_receipt, sort_keys=True, separators=(
 Output:
 
 ```text
-RESULT statics={"approximation":"RWA","dressed_frequencies_ghz":{"bus":6.55414143998032,"q1":5.297749744925113,"q2":5.577226664394395},"dropped_rwa_terms":4,"figure":"../docs/images/resolve_and_sweep.png","full_dimension":64,"inferred_exchange_rate_mhz":2.204908100780223,"minimum_at_bare_q2_ghz":5.3,"minimum_splitting_mhz":4.409816201560446,"original_chip_unchanged":true,"relative_difference_to_second_order":0.09293271710857891,"second_order_splitting_scale_mhz":4.000000000000001,"static_zz_khz":22.604309073415152,"sweep_points":181}
+RESULT statics={"approximation":"RWA","dressed_frequencies_ghz":{"bus":6.55414143998032,"q1":5.297749744925113,"q2":5.577226664394395},"dropped_rwa_terms":4,"figure":"../docs/images/resolve_and_sweep.svg","full_dimension":64,"inferred_exchange_rate_mhz":2.204908100780223,"minimum_at_bare_q2_ghz":5.3,"minimum_splitting_mhz":4.409816201560446,"original_chip_unchanged":true,"relative_difference_to_second_order":0.09293271710857891,"second_order_splitting_scale_mhz":4.000000000000001,"static_zz_khz":22.604309073415152,"sweep_points":181}
 ```
 
 <!-- executed-output:end -->
@@ -603,9 +609,9 @@ paper_spectrum_figure, (spectrum_axis, residual_axis) = plt.subplots(
 spectrum_axis.scatter(
     paper_flux,
     measured_f01,
-    s=15,
-    color="#262626",
-    alpha=0.7,
+    s=12,
+    color="#16181C",
+    alpha=0.55,
     label="experiment",
 )
 spectrum_axis.plot(
@@ -616,25 +622,23 @@ spectrum_axis.plot(
     label="quchip",
 )
 spectrum_axis.set_ylabel(r"$f_{01}$ (GHz)")
-spectrum_axis.legend(frameon=False)
-spectrum_axis.grid(color="0.88", linewidth=0.7)
+spectrum_axis.legend()
 
-residual_axis.axhline(0.0, color="0.45", linewidth=1.0)
-residual_axis.scatter(paper_flux, f01_residual_mhz, s=14, color="#246FA8", alpha=0.78)
+residual_axis.axhline(0.0, color="#9AA0A8", linewidth=1.0)
+residual_axis.scatter(paper_flux, f01_residual_mhz, s=12, color="#246FA8", alpha=0.78)
 residual_axis.set(
     xlabel=r"External flux $\Phi_{\mathrm{ext}}/\Phi_0$",
     ylabel="model - data\n(MHz)",
 )
-residual_axis.grid(color="0.88", linewidth=0.7)
 
-paper_spectrum_path = "../docs/images/stefanski_fluxonium_spectrum.png"
-paper_spectrum_figure.savefig(paper_spectrum_path, dpi=180)
+paper_spectrum_path = "../docs/images/stefanski_fluxonium_spectrum.svg"
+paper_spectrum_figure.savefig(paper_spectrum_path)
 plt.show()
 ```
 
 </details>
 
-```{figure} ../images/stefanski_fluxonium_spectrum.png
+```{figure} ../images/stefanski_fluxonium_spectrum.svg
 :width: 720px
 :alt: Measured fluxonium transition frequencies, quchip prediction, and pointwise residuals across external flux
 
@@ -801,21 +805,20 @@ frequency_axis.plot(
     label=r"$q=|1\rangle$",
 )
 frequency_axis.set_ylabel("Readout frequency (GHz)")
-frequency_axis.legend(frameon=False, ncols=2)
-frequency_axis.grid(color="0.88", linewidth=0.7)
+frequency_axis.legend(ncols=2)
 
 chi_axis.scatter(
     readout_flux,
     measured_chi_mhz,
-    s=13,
-    color="#262626",
-    alpha=0.62,
+    s=12,
+    color="#16181C",
+    alpha=0.55,
     label="experiment",
 )
 chi_axis.plot(
     readout_model_flux,
     predicted_chi_grid_mhz,
-    color="#246FA8",
+    color="#C92F33",
     linewidth=2.0,
     label="quchip",
 )
@@ -823,17 +826,16 @@ chi_axis.set(
     xlabel=r"External flux $\Phi_{\mathrm{ext}}/\Phi_0$",
     ylabel=r"$\chi$ (MHz)",
 )
-chi_axis.legend(frameon=False)
-chi_axis.grid(color="0.88", linewidth=0.7)
+chi_axis.legend()
 
-paper_readout_path = "../docs/images/stefanski_fluxonium_readout.png"
-readout_figure.savefig(paper_readout_path, dpi=180)
+paper_readout_path = "../docs/images/stefanski_fluxonium_readout.svg"
+readout_figure.savefig(paper_readout_path)
 plt.show()
 ```
 
 </details>
 
-```{figure} ../images/stefanski_fluxonium_readout.png
+```{figure} ../images/stefanski_fluxonium_readout.svg
 :width: 720px
 :alt: Measured and predicted state-dependent readout resonator frequencies and dispersive shift across external flux
 

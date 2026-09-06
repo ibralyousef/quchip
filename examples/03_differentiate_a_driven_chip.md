@@ -88,7 +88,11 @@ coupling_tangent = observables(theta) + (
 <summary>Plotting code</summary>
 
 ```python
+import shutil
 import matplotlib.pyplot as plt
+
+plt.style.use("../docs/_static/quchip.mplstyle")
+plt.rcParams["text.usetex"] = bool(shutil.which("latex"))
 
 static_figure, static_axes = plt.subplots(1, 2, figsize=(9.2, 3.8), layout="constrained")
 for observable_index, (axis, ylabel, scale) in enumerate(
@@ -102,16 +106,16 @@ for observable_index, (axis, ylabel, scale) in enumerate(
     axis.plot(
         1.0e3 * coupling_values,
         scale * observable_sweep[:, observable_index],
-        color="#246FA8",
+        color="#C92F33",
         linewidth=2.2,
         label="quchip sweep",
     )
     axis.plot(
         1.0e3 * coupling_values,
         scale * coupling_tangent[:, observable_index],
-        color="#C92F33",
+        color="#16181C",
         linestyle="--",
-        linewidth=1.8,
+        linewidth=1.4,
         label="local tangent",
     )
     axis.plot(
@@ -119,21 +123,22 @@ for observable_index, (axis, ylabel, scale) in enumerate(
         scale * observables(theta)[observable_index],
         marker="o",
         color="#16181C",
+        markeredgecolor="white",
+        markersize=7,
         linestyle="none",
     )
     axis.set(xlabel=r"Capacitive coupling $g$ (MHz)", ylabel=ylabel)
-    axis.grid(alpha=0.2)
 
-static_axes[0].legend(frameon=False)
+static_axes[0].legend()
 
-static_figure_path = "../docs/images/differentiate_static_slope.png"
-static_figure.savefig(static_figure_path, dpi=180)
+static_figure_path = "../docs/images/differentiate_static_slope.svg"
+static_figure.savefig(static_figure_path)
 plt.show()
 ```
 
 </details>
 
-```{figure} ../images/differentiate_static_slope.png
+```{figure} ../images/differentiate_static_slope.svg
 :width: 760px
 :alt: Qubit frequency and dispersive shift swept over capacitive coupling with local tangent lines at 50 megahertz
 
@@ -317,6 +322,8 @@ holdout_residual_mhz = 1.0e3 * (
 <summary>Plotting code</summary>
 
 ```python
+from matplotlib.ticker import LogLocator, MaxNLocator, NullFormatter, ScalarFormatter
+
 fit_figure, (fit_axis, history_axis) = plt.subplots(
     1,
     2,
@@ -327,8 +334,7 @@ fit_axis.scatter(
     measured_flux[holdout_mask],
     measured_f01[holdout_mask],
     s=13,
-    color="0.35",
-    alpha=0.55,
+    color="#9AA0A8",
     label="held out",
 )
 fit_axis.scatter(
@@ -344,21 +350,23 @@ fit_axis.set(
     xlabel=r"External flux $\Phi_{\mathrm{ext}}/\Phi_0$",
     ylabel=r"$f_{01}$ (GHz)",
 )
-fit_axis.legend(frameon=False)
-fit_axis.grid(color="0.88")
+fit_axis.legend()
 
 history_axis.semilogy(loss_history, color="#C92F33", linewidth=2.0)
 history_axis.set(xlabel="Optimizer iteration", ylabel="Spectrum loss")
-history_axis.grid(color="0.88")
+history_axis.yaxis.set_major_locator(LogLocator(subs=(1.0, 2.0, 5.0)))
+history_axis.yaxis.set_major_formatter(ScalarFormatter())
+history_axis.yaxis.set_minor_formatter(NullFormatter())
+history_axis.xaxis.set_major_locator(MaxNLocator(integer=True))
 
-experimental_fit_path = "../docs/images/differentiate_fluxonium_fit.png"
-fit_figure.savefig(experimental_fit_path, dpi=180)
+experimental_fit_path = "../docs/images/differentiate_fluxonium_fit.svg"
+fit_figure.savefig(experimental_fit_path)
 plt.show()
 ```
 
 </details>
 
-```{figure} ../images/differentiate_fluxonium_fit.png
+```{figure} ../images/differentiate_fluxonium_fit.svg
 :width: 760px
 :alt: Fluxonium spectrum fitted on sparse experimental points with held-out measurements and convergence history
 
@@ -460,8 +468,8 @@ the population and its derivatives together.
 ```python
 parameter_paths = ("pulse.0.amplitude", "pulse.0.sigmas", "pulse.0.freq")
 perturbation_labels = (
-    "amplitude (+1%)",
-    r"$N_\sigma$ (+1%; $\sigma$ -1%)",
+    r"amplitude (+1\%)",
+    r"$N_\sigma$ (+1\%; $\sigma$ $-$1\%)",
     "detuning (+1 MHz)",
 )
 
@@ -496,19 +504,23 @@ population; narrowing the Gaussian lowers it.
 ```python
 impact = np.asarray(gradient) * 1000
 figure, axis = plt.subplots(figsize=(7.2, 2.8), layout="constrained")
-axis.barh(perturbation_labels, impact,
+axis.barh(perturbation_labels, impact, height=0.55,
           color=["#C92F33" if value >= 0 else "#246FA8" for value in impact])
 axis.axvline(0, color="#16181C", lw=0.8)
 axis.set(xlabel=r"Predicted $\Delta P(q=1)$ ($\times 10^{-3}$)")
 axis.invert_yaxis()
-figure_path = "../docs/images/differentiate_a_driven_chip.png"
-figure.savefig(figure_path, dpi=180)
+axis.grid(False, axis="y")
+axis.grid(True, axis="x")
+axis.spines["left"].set_visible(False)
+axis.tick_params(axis="y", length=0)
+figure_path = "../docs/images/differentiate_a_driven_chip.svg"
+figure.savefig(figure_path)
 plt.show()
 ```
 
 </details>
 
-```{figure} ../images/differentiate_a_driven_chip.png
+```{figure} ../images/differentiate_a_driven_chip.svg
 :width: 720px
 :alt: Final excited-state population sensitivities to amplitude, pulse width and detuning.
 
@@ -599,12 +611,12 @@ multi_loss_gradient = jax.grad(multi_loss)(shared_origin)
 Output:
 
 ```text
-/private/tmp/quchip-030-installed/lib/python3.11/site-packages/dynamiqs/qarrays/qarray.py:550: UserWarning: A sparse qarray has been converted to dense layout due to element-wise addition with a dense qarray.
+/Users/fermious/quchip_public/.venv/lib/python3.11/site-packages/dynamiqs/qarrays/qarray.py:550: UserWarning: A sparse qarray has been converted to dense layout due to element-wise addition with a dense qarray.
   return self + (-y)
 ```
 
 ```text
-/private/tmp/quchip-030-installed/lib/python3.11/site-packages/dynamiqs/qarrays/qarray.py:550: UserWarning: A sparse qarray has been converted to dense layout due to element-wise addition with a dense qarray.
+/Users/fermious/quchip_public/.venv/lib/python3.11/site-packages/dynamiqs/qarrays/qarray.py:550: UserWarning: A sparse qarray has been converted to dense layout due to element-wise addition with a dense qarray.
   return self + (-y)
 ```
 
@@ -649,7 +661,7 @@ print(f"RESULT gradient={json.dumps(gradient_receipt, sort_keys=True, separators
 Output:
 
 ```text
-RESULT gradient={"backend":"dynamiqs","base_population":0.995519779566944,"figure":"../docs/images/differentiate_a_driven_chip.png","first_order_only":true,"fixed_structure_during_trace":true,"gradient_per_reference_perturbation":{"pulse.0.amplitude":0.0015756853452387738,"pulse.0.freq":0.00337825563625915,"pulse.0.sigmas":-0.0015669210705104204},"multi_sequence_count":3,"multi_sequence_jacobian_shape":[3,3],"multi_sequence_loss_gradient":[-0.09312824584720562,0.04532470702716049,0.09312824584720582],"original_sequence_unchanged":true,"parameter_paths":["pulse.0.amplitude","pulse.0.sigmas","pulse.0.freq"],"solver":"sesolve"}
+RESULT gradient={"backend":"dynamiqs","base_population":0.995519779566944,"figure":"../docs/images/differentiate_a_driven_chip.svg","first_order_only":true,"fixed_structure_during_trace":true,"gradient_per_reference_perturbation":{"pulse.0.amplitude":0.0015756853452387738,"pulse.0.freq":0.00337825563625915,"pulse.0.sigmas":-0.0015669210705104204},"multi_sequence_count":3,"multi_sequence_jacobian_shape":[3,3],"multi_sequence_loss_gradient":[-0.09312824584720562,0.04532470702716049,0.09312824584720582],"original_sequence_unchanged":true,"parameter_paths":["pulse.0.amplitude","pulse.0.sigmas","pulse.0.freq"],"solver":"sesolve"}
 ```
 
 <!-- executed-output:end -->

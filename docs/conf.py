@@ -1,6 +1,11 @@
 """Sphinx configuration for the quchip documentation site."""
 
+import os
+import sys
+
 import quchip
+
+sys.path.insert(0, os.path.abspath("_ext"))
 
 project = "quchip"
 author = "Ibraheem AlYousef"
@@ -16,6 +21,7 @@ extensions = [
     "sphinx.ext.viewcode",
     "myst_parser",
     "sphinx_copybutton",
+    "themed_images",
 ]
 
 templates_path = ["_templates"]

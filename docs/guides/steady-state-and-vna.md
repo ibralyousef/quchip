@@ -34,16 +34,14 @@ kappa = coupler.rate + 2 * np.pi * r.freq / r.internal_quality_factor
 <summary>Plot S11</summary>
 
 ```python
+import shutil
 import matplotlib.pyplot as plt
 
-plt.rcParams.update({
-    "font.size": 10, "axes.spines.top": False, "axes.spines.right": False,
-    "axes.labelsize": 10, "legend.fontsize": 9, "lines.linewidth": 1.8,
-    "figure.facecolor": "white", "axes.facecolor": "white",
-    "savefig.facecolor": "white", "svg.fonttype": "none", "pdf.fonttype": 42,
-})
+plt.style.use("../_static/quchip.mplstyle")
+plt.rcParams["text.usetex"] = bool(shutil.which("latex"))
 fig, magnitude_axis = plt.subplots(figsize=(6.4, 3.2), layout="constrained")
 phase_axis = magnitude_axis.twinx()
+phase_axis.grid(False)
 magnitude_axis.plot(frequencies, 20 * np.log10(np.abs(s11)), color="#C92F33")
 phase_axis.plot(frequencies, np.unwrap(np.angle(s11)) * 180 / np.pi, color="#246FA8", ls="--")
 magnitude_axis.set(xlabel="Probe frequency (GHz)", ylabel=r"$|S_{11}|$ (dB)",
@@ -57,9 +55,8 @@ phase_axis.spines["right"].set_visible(True)
 phase_axis.spines["right"].set_color("#246FA8")
 magnitude_axis.spines["left"].set_color("#C92F33")
 magnitude_axis.ticklabel_format(useOffset=False, axis="x")
-magnitude_axis.axvline(r.freq, color="0.8", lw=0.7, ls=":", zorder=0)
+magnitude_axis.axvline(r.freq, color="#9AA0A8", lw=0.7, ls=":", zorder=0)
 fig.savefig("resonator_s11.svg")
-fig.savefig("resonator_s11.pdf")
 plt.close(fig)
 ```
 
@@ -130,61 +127,95 @@ readout_chip = Chip([r], port_network=fridge, frame="rotating")
 <summary>Draw the fridge wiring</summary>
 
 ```python
-from matplotlib.patches import Circle, FancyBboxPatch
+from matplotlib.patches import Arc, Circle, FancyArrowPatch, Polygon, Rectangle
 
-fig, axis = plt.subplots(figsize=(7.2, 6.5), layout="constrained")
-axis.set(xlim=(0, 9.7), ylim=(-0.1, 10.2))
+fig, axis = plt.subplots(figsize=(7.2, 7.6), layout="constrained")
+axis.set(xlim=(0, 10), ylim=(0, 10.6))
 axis.set_aspect("equal")
 axis.axis("off")
-blue, red, ink = "#246FA8", "#C92F33", "#16181C"
-for label, bottom, top, fill in [
-    ("300 K", 8.65, 10.1, "#ffffff"),
-    ("50 K", 7.5, 8.65, "#f2f5f7"),
-    ("4 K", 6.15, 7.5, "#eaf0f5"),
-    ("Still\n800 mK", 4.85, 6.15, "#f2f5f7"),
-    ("Cold plate\n100 mK", 3.5, 4.85, "#eaf0f5"),
-    ("Mixing\nchamber\n20 mK", 0.0, 3.5, "#e0ebf2"),
-]:
-    axis.axhspan(bottom, top, color=fill, zorder=0)
-    axis.text(0.15, (bottom + top) / 2, label, va="center", fontsize=9, color=ink)
-    axis.hlines(bottom, 0, 9.7, color="#cbd5dd", linewidth=0.7)
+blue, red, ink, muted = "#246FA8", "#C92F33", "#16181C", "#50565A"
+stages = [
+    ("300 K", "", 8.6, 10.6), ("50 K", "", 7.5, 8.6), ("4 K", "", 6.1, 7.5),
+    ("Still", "800 mK", 4.85, 6.1), ("Cold plate", "100 mK", 3.6, 4.85), ("Mixing chamber", "20 mK", 0.0, 3.6),
+]
+for index, (name, temperature, bottom, top) in enumerate(stages):
+    axis.axhspan(bottom, top, color="#F2F4F6" if index % 2 else "#FAFBFC", lw=0, zorder=0)
+    if bottom > 0:
+        axis.hlines(bottom, 0, 10, color="#DBDEE1", lw=0.8, ls=(0, (4, 3)), zorder=1)
+    axis.text(0.25, (bottom + top) / 2 + (0.16 if temperature else 0), name, va="center", fontsize=9, color=ink)
+    if temperature:
+        axis.text(0.25, (bottom + top) / 2 - 0.16, temperature, va="center", fontsize=8, color=muted)
 
-# Input descends; output rises. The chip arm is one bidirectional cable.
-axis.plot([2.5, 2.5, 4.75], [9.25, 2.2, 2.2], color=blue, lw=2)
-axis.plot([5.55, 8.15, 8.15], [2.2, 2.2, 9.8], color=red, lw=2)
-axis.annotate("", (5.15, 0.95), (5.15, 1.8), arrowprops={"arrowstyle": "<->", "color": ink, "lw": 1.6})
-for x, direction, color in [(2.5, -1, blue), (8.15, 1, red)]:
-    for y in [8.55, 6.0, 4.75]:
-        axis.annotate("", (x, y + direction * 0.35), (x, y), arrowprops={"arrowstyle": "-|>", "color": color, "lw": 1.4})
-    for y in [8.05, 5.5]:
-        axis.plot(x, y, "o", color=color, ms=4)
-axis.text(3.0, 8.0, "Coax anchored\nat each stage\n50 ns per line", fontsize=8, color="#536574", va="center")
+# Signal path: the input descends the blue line, reaches the chip through the
+# circulator, and the reflection rises the red line. Coax is anchored at every stage.
+x_in, x_out, y_row = 2.7, 8.3, 2.4
+axis.plot([x_in, x_in, 5.0], [10.0, y_row, y_row], color=blue, lw=1.6, zorder=2)
+axis.plot([5.8, x_out, x_out], [y_row, y_row, 10.0], color=red, lw=1.6, zorder=2)
+axis.annotate("", (x_in, 9.55), (x_in, 10.0), arrowprops={"arrowstyle": "-|>", "color": blue, "lw": 1.6, "mutation_scale": 10})
+axis.annotate("", (x_out, 10.0), (x_out, 9.55), arrowprops={"arrowstyle": "-|>", "color": red, "lw": 1.6, "mutation_scale": 10})
+axis.text(x_in + 0.2, 10.25, r"Source $\cdot$ p1", va="center", fontsize=9, color=blue)
+axis.text(x_out - 0.2, 10.25, r"Receiver $\cdot$ p2", va="center", ha="right", fontsize=9, color=red)
+axis.text(x_in + 0.3, 8.05, r"Coax anchored at each stage $\cdot$ 50 ns per line", va="center", fontsize=8, color=muted)
+axis.plot([5.4, 5.4], [y_row - 0.4, 1.18], color=ink, lw=1.4, zorder=2)
 
-for x, y, width, height, label, color in [
-    (2.5, 9.25, 1.65, 0.58, "Source · p1", blue),
-    (2.5, 6.8, 1.45, 0.62, "20 dB", blue),
-    (2.5, 4.2, 1.45, 0.62, "20 dB", blue),
-    (2.5, 2.2, 1.20, 0.62, "20 dB", blue),
-    (3.9, 2.2, 1.00, 0.62, "IR filter\n1 dB", blue),
-    (6.45, 2.2, 1.12, 0.62, "Isolator\n0.5 dB", red),
-    (8.15, 2.2, 1.12, 0.62, "Isolator\n0.5 dB", red),
-    (8.15, 4.2, 1.50, 0.62, "Output coax\n1 dB", red),
-    (8.15, 6.8, 1.50, 0.62, "HEMT\n+40 dB", red),
-    (8.15, 9.0, 1.50, 0.62, "Amplifier\n+20 dB", red),
-    (5.15, 0.55, 2.4, 0.78, "Resonator chip\n7 GHz · one port", ink),
-]:
-    axis.add_patch(FancyBboxPatch((x - width / 2, y - height / 2), width, height,
-                   boxstyle="round,pad=0.04,rounding_size=0.06", ec=color, fc="white", lw=1.1, zorder=3))
-    axis.text(x, y, label, ha="center", va="center", fontsize=8.5, color=ink, zorder=4)
-axis.add_patch(Circle((5.15, 2.2), 0.4, ec=ink, fc="white", lw=1.3, zorder=3))
-axis.text(5.15, 2.2, "↺", ha="center", va="center", fontsize=22, color=ink)
-for x, y, label in [(4.65, 2.52, "1"), (5.42, 1.52, "2"), (5.7, 2.52, "3")]:
-    axis.text(x, y, label, ha="center", fontsize=8, color=ink)
-axis.text(5.15, 3.05, "Circulator\n0.5 dB per pass", ha="center", va="center", fontsize=8, color=ink)
-axis.text(8.15, 10.0, "Receiver · p2", ha="center", fontsize=9, color=red)
-axis.text(6.25, 1.25, "Reverse fields →\nmatched isolator loads", fontsize=8, color="#536574")
+
+def label(x, y, text, ha="center", va="top", fontsize=8):
+    axis.text(x, y, text, ha=ha, va=va, fontsize=fontsize, color=ink, zorder=4)
+
+
+def box(x, y, text, width=0.8, height=0.55):
+    axis.add_patch(Rectangle((x - width / 2, y - height / 2), width, height, ec=ink, fc="white", lw=1.2, zorder=3))
+    label(x, y, text, va="center", fontsize=8.5)
+
+
+def amplifier(x, y, text):
+    axis.add_patch(Polygon([(x - 0.36, y - 0.32), (x + 0.36, y - 0.32), (x, y + 0.36)],
+                           closed=True, ec=ink, fc="white", lw=1.2, zorder=3))
+    label(x + 0.5, y, text, ha="left", va="center", fontsize=8.5)
+
+
+def isolator(x, y):
+    axis.add_patch(Circle((x, y), 0.3, ec=ink, fc="white", lw=1.2, zorder=3))
+    axis.add_patch(FancyArrowPatch((x - 0.17, y), (x + 0.19, y), arrowstyle="-|>",
+                                   mutation_scale=8, color=ink, lw=1.2, zorder=4))
+    label(x, y - 0.42, "Isolator\n0.5 dB")
+
+
+def circulator(x, y):
+    axis.add_patch(Circle((x, y), 0.4, ec=ink, fc="white", lw=1.2, zorder=3))
+    axis.add_patch(Arc((x, y), 0.44, 0.44, theta1=120, theta2=395, color=ink, lw=1.2, zorder=4))
+    head = np.deg2rad(35)
+    tip = np.array([x + 0.22 * np.cos(head), y + 0.22 * np.sin(head)])
+    along = np.array([-np.sin(head), np.cos(head)])
+    normal = np.array([np.cos(head), np.sin(head)])
+    axis.add_patch(Polygon([tip + 0.09 * along, tip - 0.05 * along + 0.06 * normal,
+                            tip - 0.05 * along - 0.06 * normal], closed=True, color=ink, zorder=4))
+    for dx, dy, port in [(-0.5, 0.3, "1"), (0.25, -0.62, "2"), (0.5, 0.3, "3")]:
+        label(x + dx, y + dy, port, va="center")
+    label(x, y + 0.55, r"Circulator $\cdot$ 0.5 dB per pass", va="bottom")
+
+
+def low_pass(x, y):
+    box(x, y, None)
+    phase = np.linspace(0, 2 * np.pi, 60)
+    axis.plot(x - 0.25 + 0.5 * phase / (2 * np.pi), y + 0.12 * np.sin(2 * phase), color=ink, lw=1.1, zorder=4)
+    axis.plot([x - 0.14, x + 0.14], [y - 0.19, y + 0.19], color=ink, lw=1.1, zorder=4)
+    label(x, y - 0.42, "IR filter\n1 dB")
+
+
+box(x_in, 6.8, "20 dB")
+box(x_in, 4.22, "20 dB")
+box(3.3, y_row, "20 dB")
+low_pass(4.3, y_row)
+circulator(5.4, y_row)
+isolator(6.5, y_row)
+isolator(7.4, y_row)
+box(x_out, 4.22, "1 dB")
+label(x_out + 0.5, 4.22, "Output coax", ha="left", va="center", fontsize=8.5)
+amplifier(x_out, 6.8, "HEMT\n+40 dB")
+amplifier(x_out, 9.05, "+20 dB")
+box(5.4, 0.8, "Resonator chip\n" + r"7 GHz $\cdot$ one port", width=2.4, height=0.76)
 fig.savefig("fridge_wiring.svg")
-fig.savefig("fridge_wiring.pdf")
 plt.close(fig)
 ```
 
@@ -226,6 +257,7 @@ np.testing.assert_allclose(response.s(p1, p2), 0.0, atol=1e-12)
 ```python
 fig, magnitude_axis = plt.subplots(figsize=(6.4, 3.2), layout="constrained")
 phase_axis = magnitude_axis.twinx()
+phase_axis.grid(False)
 magnitude_axis.plot(frequencies, 20 * np.log10(np.abs(s21)), color="#C92F33")
 phase_axis.plot(frequencies, np.unwrap(np.angle(s21)) * 180 / np.pi, color="#246FA8", ls="--")
 magnitude_axis.set(xlabel="Probe frequency (GHz)", ylabel=r"$|S_{21}|$ (dB)",
@@ -239,10 +271,9 @@ phase_axis.spines["right"].set_visible(True)
 phase_axis.spines["right"].set_color("#246FA8")
 magnitude_axis.spines["left"].set_color("#C92F33")
 magnitude_axis.ticklabel_format(useOffset=False, axis="x")
-magnitude_axis.axvline(r.freq, color="0.8", lw=0.7, ls=":", zorder=0)
-magnitude_axis.axhline(line_db, color="0.6", ls=":", lw=0.8)
+magnitude_axis.axvline(r.freq, color="#9AA0A8", lw=0.7, ls=":", zorder=0)
+magnitude_axis.axhline(line_db, color="#9AA0A8", ls=":", lw=0.8)
 fig.savefig("fridge_s21.svg")
-fig.savefig("fridge_s21.pdf")
 plt.close(fig)
 ```
 

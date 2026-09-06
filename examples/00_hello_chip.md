@@ -98,12 +98,11 @@ drive_populations = np.asarray([
 <summary>Plot the envelopes and populations</summary>
 
 ```python
+import shutil
 import matplotlib.pyplot as plt
 
-plt.rcParams.update({
-    "font.size": 10, "axes.spines.top": False,
-    "svg.fonttype": "none", "pdf.fonttype": 42,
-})
+plt.style.use("../docs/_static/quchip.mplstyle")
+plt.rcParams["text.usetex"] = bool(shutil.which("latex"))
 colors = ("#16181C", "#246FA8", "#C92F33")
 figure, axes = plt.subplots(2, 1, figsize=(6.6, 5.2), sharex=True, layout="constrained")
 for index, (axis, name, envelope) in enumerate(zip(axes, ("Short", "Long"), drive_pulses)):
@@ -113,16 +112,18 @@ for index, (axis, name, envelope) in enumerate(zip(axes, ("Short", "Long"), driv
     pulse_axis = axis.twinx()
     pulse_axis.plot(drive_times, np.where(drive_times <= envelope.duration,
                     envelope.sample(drive_times, real=True), 0.0),
-                    color="0.6", ls="--", lw=1.2)
+                    color="#6D7277", ls="--", lw=1.2)
     pulse_axis.set(ylabel="Envelope (GHz)", ylim=(0, 1.1 * drive_pulses[0].amplitude))
-    pulse_axis.tick_params(axis="y", colors="0.45")
+    pulse_axis.spines["right"].set_visible(True)
+    pulse_axis.spines["right"].set_color("#6D7277")
+    pulse_axis.yaxis.label.set_color("#6D7277")
+    pulse_axis.tick_params(axis="y", colors="#6D7277")
     axis.set(ylabel="Population", ylim=(-0.02, 1.02), xlim=(0, drive_times[-1]))
-    axis.set_title(f"{name} Gaussian · {envelope.duration:.2f} ns", loc="left", fontsize=10)
-axes[0].legend(frameon=False, ncol=3, loc="upper right", fontsize=8)
+    axis.set_title(fr"{name} Gaussian $\cdot$ {envelope.duration:.2f} ns")
+axes[0].legend(ncol=3, loc="upper right", fontsize=9)
 axes[1].set_xlabel("Time (ns)")
-figure.savefig("../docs/images/hello_qubit_drive_leakage.png", dpi=180)
 figure.savefig("../docs/images/hello_qubit_drive_leakage.svg")
-figure.savefig("../docs/images/hello_qubit_drive_leakage.pdf")
+figure.savefig("../docs/images/hello_qubit_drive_leakage.png")
 plt.show()
 ```
 
@@ -210,12 +211,12 @@ iq_separation = np.abs(alpha[0] - alpha[1])
 <summary>Plot the readout pulse and IQ response</summary>
 
 ```python
-figure, (time_axis, iq_axis) = plt.subplots(2, 1, figsize=(9, 6.5),
-                                         height_ratios=(0.8, 1.2), layout="constrained")
+figure, (time_axis, iq_axis) = plt.subplots(2, 1, figsize=(6.0, 6.4),
+                                         height_ratios=(0.55, 2.2), layout="constrained")
 time_axis.plot(readout_times, 1000 * readout_pulse.sample(readout_times, real=True),
                color="#16181C", lw=1.8)
-time_axis.set(xlabel="Time (ns)", ylabel="Drive envelope (MHz)", xlim=(0, 900))
-time_axis.set_title("(a) Readout pulse", loc="left", fontsize=11)
+time_axis.set(xlabel="Time (ns)", ylabel="Envelope (MHz)", xlim=(0, 900), yticks=[0, 1.2])
+time_axis.set_title("(a) Readout pulse")
 for level, color in enumerate(("#246FA8", "#C92F33")):
     path = alpha[level]
     iq_axis.plot(path.real, path.imag, color=color, lw=1.8,
@@ -223,21 +224,21 @@ for level, color in enumerate(("#246FA8", "#C92F33")):
     for time in (100, 300, 900):
         point = path[np.searchsorted(readout_times, time)]
         iq_axis.plot(point.real, point.imag, "o", color=color, ms=5)
-        iq_axis.annotate(f"{time} ns", (point.real, point.imag),
-                         xytext=(8 if time == 900 else -8, 6 if level == 0 or time == 900 else -14),
-                         textcoords="offset points", ha="left" if time == 900 else "right",
+        offset = {100: (-8, 6 if level == 0 else -14), 300: (10, 7 if level == 0 else -15), 900: (8, 6)}
+        iq_axis.annotate(f"{time} ns", (point.real, point.imag), xytext=offset[time],
+                         textcoords="offset points", ha="right" if time == 100 else "left",
                          color=color, fontsize=9)
     start, end = path[90], path[96]
     iq_axis.annotate("", (end.real, end.imag), (start.real, start.imag),
                      arrowprops={"arrowstyle": "->", "color": color, "lw": 1.8})
 iq_axis.plot(0, 0, "+", color="#16181C", ms=8)
-iq_axis.set(xlabel=r"$\mathrm{Re}\,\alpha$", ylabel=r"$\mathrm{Im}\,\alpha$")
-iq_axis.set_title("(b) Intracavity IQ in the drive frame", loc="left", fontsize=11)
-iq_axis.set_aspect("equal", adjustable="datalim")
-iq_axis.legend(frameon=False, fontsize=9)
-figure.savefig("../docs/images/hello_dispersive_readout_iq.png", dpi=180)
+iq_axis.set(xlabel=r"$\mathrm{Re}\,\alpha$", ylabel=r"$\mathrm{Im}\,\alpha$",
+            xlim=(1.15 * alpha.real.min(), 0.22), ylim=(1.2 * alpha.imag.min(), 1.2 * alpha.imag.max()))
+iq_axis.set_title("(b) Intracavity IQ in the drive frame")
+iq_axis.set_aspect("equal", adjustable="box")
+iq_axis.legend(fontsize=9, loc="upper right")
 figure.savefig("../docs/images/hello_dispersive_readout_iq.svg")
-figure.savefig("../docs/images/hello_dispersive_readout_iq.pdf")
+figure.savefig("../docs/images/hello_dispersive_readout_iq.png")
 plt.show()
 ```
 
@@ -380,13 +381,17 @@ for column, name in enumerate(('Square', 'CLEAR')):
     edges = np.array([100, 900]) if name == 'Square' else segment_edges
     pulse_axis.stairs(np.r_[0, scales, 0], np.r_[0, edges, 1900] / 1000,
                        color='#16181C' if name == 'Square' else '#C92F33', lw=1.8)
-    pulse_axis.set_title(name, loc='left', fontsize=12)
-    pulse_axis.axhline(0, color="0.75", lw=.7)
+    pulse_axis.set_title(name)
+    pulse_axis.axhline(0, color="#DBDEE1", lw=.7)
     pulse_axis.set_ylim(-1.6, 2.7)
+    pulse_axis.grid(False)
     for axis in (pulse_axis, population_axis):
-        axis.axvspan(.1, .9, color='#E9EDF2', zorder=0)
-        axis.axvspan(.9, 1.3, color='#F7E6E7' if name == 'CLEAR' else '#F2F2F2', zorder=0)
-        axis.axvline(1.3, color='0.65', ls=':', lw=.8)
+        axis.axvspan(.1, .9, color='#F2F4F6', zorder=0)
+        if name == 'CLEAR':
+            axis.axvspan(.9, 1.3, color='#C92F33', alpha=0.08, zorder=0)
+        else:
+            axis.axvspan(.9, 1.3, color='#F2F4F6', alpha=0.6, zorder=0)
+        axis.axvline(1.3, color='#9AA0A8', ls=':', lw=.8)
     # Trapezoidal means over 2 ns bins; state 0 is the ground preparation.
     values = clear_occupations[name][:, 0]
     averaged = (values[:, :-1].reshape(3, -1, 10).sum(axis=-1)
@@ -395,15 +400,12 @@ for column, name in enumerate(('Square', 'CLEAR')):
         population_axis.semilogy(plot_times, np.where(averaged[index] > 0, averaged[index], np.nan),
                                  color=color, lw=1.8, label=label)
     population_axis.text(1.1, .075, 'Deplete' if name == 'CLEAR' else 'Passive decay',
-                         ha='center', color='0.35', fontsize=8)
-    population_axis.set(xlabel='Time (µs)', xlim=(0, 1.9), ylim=(1e-7, .15), xticks=[0, .5, 1, 1.5])
-    population_axis.grid(axis='y', color='0.88', lw=.6)
-axes[0, 0].set_ylabel(r'Input $\beta/\beta_{hold}$')
+                         ha='center', color='#6D7277', fontsize=9)
+    population_axis.set(xlabel=r'Time ($\mu$s)', xlim=(0, 1.9), ylim=(1e-7, .15), xticks=[0, .5, 1, 1.5])
+axes[0, 0].set_ylabel(r'Input $\beta/\beta_{\mathrm{hold}}$')
 axes[1, 0].set_ylabel(r'Mean occupation $\langle n\rangle$')
-axes[1, 0].legend(frameon=False, fontsize=9, loc='lower left')
-figure.savefig("../docs/images/clear_populations.png", dpi=180)
+axes[1, 0].legend(fontsize=9, loc='lower left')
 figure.savefig("../docs/images/clear_populations.svg")
-figure.savefig("../docs/images/clear_populations.pdf")
 plt.show()
 ```
 
@@ -427,7 +429,7 @@ back toward zero for both qubit preparations.
 <summary>Plot the readout IQ trajectories</summary>
 
 ```python
-figure, axes = plt.subplots(1, 2, figsize=(11, 4.5), sharex=True, sharey=True, layout='constrained')
+figure, axes = plt.subplots(1, 2, figsize=(5.6, 3.3), sharex=True, sharey=True, layout='constrained')
 readout_end = np.searchsorted(clear_times, 900)
 reset_end = np.searchsorted(clear_times, 1300)
 for axis, name in zip(axes, ('Square', 'CLEAR')):
@@ -440,14 +442,12 @@ for axis, name in zip(axes, ('Square', 'CLEAR')):
         axis.plot(iq[readout_end].real, iq[readout_end].imag, 's', color=color, ms=5)
         axis.plot(iq[reset_end].real, iq[reset_end].imag, 'o', mec=color, mfc='white', mew=1.3, ms=7)
     axis.plot(0, 0, '+', color='#16181C', ms=7, mew=1.2)
-    axis.set_title(name, loc='left', fontsize=12)
+    axis.set_title(name)
     axis.set_xlabel(r'$\mathrm{Re}\,\alpha_r$')
     axis.set_aspect('equal', adjustable='box')
 axes[0].set_ylabel(r'$\mathrm{Im}\,\alpha_r$')
-axes[0].legend(frameon=False, fontsize=9, loc='best')
-figure.savefig("../docs/images/clear_iq.png", dpi=180)
+axes[0].legend(fontsize=9, loc='upper left')
 figure.savefig("../docs/images/clear_iq.svg")
-figure.savefig("../docs/images/clear_iq.pdf")
 plt.show()
 ```
 

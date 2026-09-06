@@ -64,33 +64,34 @@ patch = sequence.active_patch(hops=1, method="sw")
 <summary>Plot the full chain and active patch</summary>
 
 ```python
+import shutil
 import matplotlib.pyplot as plt
 
-plt.rcParams.update({"font.size": 11, "axes.spines.top": False, "axes.spines.right": False,
-                     "svg.fonttype": "none", "pdf.fonttype": 42})
+plt.style.use("../docs/_static/quchip.mplstyle")
+plt.rcParams["text.usetex"] = bool(shutil.which("latex"))
 topology_figure, topology_axes = plt.subplots(2, 1, figsize=(7.2, 3.0), layout="constrained")
 for axis, model, title in zip(
-    topology_axes, (chip, patch.chip), ("Full chain · 81 states", "Active patch · 9 states"),
+    topology_axes, (chip, patch.chip), (r"Full chain $\cdot$ 81 states", r"Active patch $\cdot$ 9 states"),
 ):
     positions = {device.label: index for index, device in enumerate(chip.devices)}
     for coupling in model.couplings:
         x0 = positions[coupling.device_a.label]
         x1 = positions[coupling.device_b.label]
-        axis.plot([x0, x1], [0, 0], color="0.4", lw=1.5, zorder=1)
-        axis.text((x0 + x1) / 2, 0.12, f"{float(coupling.coupling_strength) * 1000:.0f} MHz", ha="center", fontsize=9)
+        axis.plot([x0, x1], [0, 0], color="#9AA0A8", lw=1.5, zorder=1)
+        axis.text((x0 + x1) / 2, 0.12, f"{float(coupling.coupling_strength) * 1000:.0f} MHz",
+                  ha="center", fontsize=9, color="#50565A")
     for device in model.devices:
         x = positions[device.label]
         axis.scatter(x, 0, s=600, color="#246FA8", edgecolors="white", zorder=2)
-        axis.text(x, 0, device.label, color="white", ha="center", va="center", fontsize=10)
-        axis.text(x, -0.25, f"{float(device.freq):.2f} GHz", ha="center", fontsize=9)
+        axis.text(x, 0, f"${device.label[0]}_{device.label[1:]}$", color="white",
+                  ha="center", va="center", fontsize=10)
+        axis.text(x, -0.25, f"{float(device.freq):.2f} GHz", ha="center", fontsize=9, color="#50565A")
     axis.annotate("drive", xy=(0, 0.08), xytext=(-0.45, 0.35), color="#C92F33", fontsize=9,
                   arrowprops={"arrowstyle": "->", "color": "#C92F33"})
     axis.set(xlim=(-0.6, 3.5), ylim=(-0.4, 0.55))
-    axis.set_title(title, loc="right", fontsize=10)
+    axis.set_title(title, loc="left")
     axis.axis("off")
 topology_figure.savefig("../docs/images/active_patch_topology.svg")
-topology_figure.savefig("../docs/images/active_patch_topology.pdf")
-topology_figure.savefig("../docs/images/active_patch_topology.png", dpi=180)
 plt.show()
 ```
 
@@ -127,24 +128,24 @@ population_residual = np.abs(full_population - reduced_population)
 figure, (population_axis, residual_axis) = plt.subplots(
     2,
     1,
-    figsize=(7.4, 5.8),
+    figsize=(7.2, 5.6),
     height_ratios=(3.0, 1.15),
     sharex=True,
     layout="constrained",
 )
 
-population_axis.plot(times, full_population, color="#16181C", linewidth=2.5, label="full chip (81 states)")
+population_axis.plot(times, full_population, color="#16181C", linewidth=2.4, label="full chip (81 states)")
 population_axis.plot(
     times,
     reduced_population,
     color="#C92F33",
-    linewidth=1.7,
+    linewidth=1.6,
     linestyle="--",
     label="active patch (9 states)",
 )
 population_axis.set_ylabel(r"$P(q_0=1)$")
 population_axis.set_ylim(-0.02, 1.02)
-population_axis.legend(frameon=False, loc="upper left")
+population_axis.legend(loc="upper left")
 
 display_residual = np.maximum(population_residual, 1.0e-10)
 residual_axis.semilogy(times, display_residual, color="#C92F33", linewidth=1.8)
@@ -154,10 +155,8 @@ residual_axis.set(
     ylim=(1.0e-10, 2.0e-2),
 )
 
-figure_path = "../docs/images/reduce_and_replay.png"
-figure.savefig(figure_path, dpi=180)
-figure.savefig("../docs/images/reduce_and_replay.svg")
-figure.savefig("../docs/images/reduce_and_replay.pdf")
+figure_path = "../docs/images/reduce_and_replay.svg"
+figure.savefig(figure_path)
 plt.show()
 ```
 
@@ -282,7 +281,7 @@ print(f"RESULT reduction={json.dumps(reduction_receipt, sort_keys=True, separato
 Output:
 
 ```text
-RESULT reduction={"active_labels":["q0","q1"],"all_folds_valid":true,"eliminated_labels":["q3","q2"],"figure":"../docs/images/reduce_and_replay.png","full_dimension":81,"maximum_g_over_delta":0.03432606492529982,"maximum_population_residual":2.920455710375691e-06,"minimum_block_gap_ghz":0.3495885714285709,"original_chip_unchanged":true,"peak_full_population":0.7479949561486069,"reduced_dimension":9,"reduction_method":"sw","residual_tolerance":0.0058774739885992825,"same_schedule":true}
+RESULT reduction={"active_labels":["q0","q1"],"all_folds_valid":true,"eliminated_labels":["q3","q2"],"figure":"../docs/images/reduce_and_replay.svg","full_dimension":81,"maximum_g_over_delta":0.03432606492529982,"maximum_population_residual":2.920455689392476e-06,"minimum_block_gap_ghz":0.3495885714285709,"original_chip_unchanged":true,"peak_full_population":0.7479949561486001,"reduced_dimension":9,"reduction_method":"sw","residual_tolerance":0.0058774739885992825,"same_schedule":true}
 ```
 
 <!-- executed-output:end -->

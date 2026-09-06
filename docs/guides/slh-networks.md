@@ -70,24 +70,23 @@ chips = {"Unfiltered": unfiltered, "Filtered": filtered}
 <summary>Draw the two circuit configurations</summary>
 
 ```python
+import shutil
 import matplotlib.pyplot as plt
 
-plt.rcParams.update({
-    "font.size": 11, "axes.spines.top": False, "axes.spines.right": False,
-    "svg.fonttype": "none", "pdf.fonttype": 42, "savefig.facecolor": "white",
-})
-ink, blue, red = "#16181C", "#246FA8", "#C92F33"
+plt.style.use("../_static/quchip.mplstyle")
+plt.rcParams["text.usetex"] = bool(shutil.which("latex"))
+ink, muted = "#16181C", "#50565A"
 fig, axes = plt.subplots(2, 1, figsize=(7.2, 5.8), layout="constrained")
 for axis, filtered_circuit in zip(axes, [False, True]):
     axis.set(xlim=(-0.1, 11.3), ylim=(-1.0, 3.5), aspect="equal")
     axis.axis("off")
     axis.text(0, 3.15, "(b) With Purcell filter" if filtered_circuit else "(a) Without filter",
-              fontsize=12, weight="bold", color=blue if filtered_circuit else red)
-    modes = [(1.0, "Transmon", "junction", blue), (4.2, "Readout", "inductor", red)]
+              fontsize=11, color=ink)
+    modes = [(1.0, "Transmon", "junction"), (4.2, "Readout", "inductor")]
     if filtered_circuit:
-        modes.append((7.4, "Purcell filter", "inductor", ink))
-    for x, name, kind, color in modes:
-        axis.text(x, 2.55, name, ha="center", color=color, fontsize=11)
+        modes.append((7.4, "Purcell filter", "inductor"))
+    for x, name, kind in modes:
+        axis.text(x, 2.55, name, ha="center", color=muted, fontsize=10.5)
         # Each mode has a shunt capacitor and a Josephson junction or inductor.
         left, right = x - 0.45, x + 0.45
         axis.plot([left, right], [2, 2], color=ink, lw=1.5)
@@ -107,13 +106,14 @@ for axis, filtered_circuit in zip(axes, [False, True]):
         axis.plot([x, x], [0.3, 0.1], color=ink, lw=1.5)
         for y, width in [(0.1, 0.32), (-0.02, 0.21), (-0.14, 0.1)]:
             axis.plot([x - width, x + width], [y, y], color=ink, lw=1.3)
-        parameters = {"Transmon": "5 GHz\nIntrinsic T₁ = 60 µs", "Readout": "7 GHz\nQᵢ = 200,000",
-                      "Purcell filter": "7.02 GHz\nQᵢ = 100,000"}
-        axis.text(x, -0.42, parameters[name], ha="center", va="top", fontsize=10, color=ink)
+        parameters = {"Transmon": r"5 GHz" + "\n" + r"Intrinsic $T_1$ = 60 $\mu$s",
+                      "Readout": r"7 GHz" + "\n" + r"$Q_i$ = 200,000",
+                      "Purcell filter": r"7.02 GHz" + "\n" + r"$Q_i$ = 100,000"}
+        axis.text(x, -0.42, parameters[name], ha="center", va="top", fontsize=9.5, color=muted)
     # Capacitive connections: g, then J when present, then coupling to the line.
-    connections = [(1.45, 3.75, "g = 105 MHz")]
+    connections = [(1.45, 3.75, r"$g$ = 105 MHz")]
     if filtered_circuit:
-        connections.append((4.65, 6.95, f"J = {1000 * J:.2f} MHz"))
+        connections.append((4.65, 6.95, rf"$J$ = {1000 * J:.2f} MHz"))
     connections.append((7.85 if filtered_circuit else 4.65, 10.35, ""))
     for start, end, label in connections:
         center = (start + end) / 2
@@ -121,19 +121,18 @@ for axis, filtered_circuit in zip(axes, [False, True]):
         axis.plot([center + 0.10, end], [2, 2], color=ink, lw=1.5)
         axis.vlines([center - 0.10, center + 0.10], 1.73, 2.27, color=ink, lw=1.5)
         if label:
-            axis.text(center, 1.52, label, ha="center", va="top", fontsize=10)
-    axis.text(10.35, 2.55, "Feedline", ha="center", fontsize=11)
+            axis.text(center, 1.52, label, ha="center", va="top", fontsize=9.5, color=muted)
+    axis.text(10.35, 2.55, "Feedline", ha="center", fontsize=10.5, color=muted)
     axis.plot([10.35, 10.35], [2, 1.55], color=ink, lw=1.5)
     axis.plot([10.35, 10.18, 10.52, 10.18, 10.52, 10.35],
               [1.55, 1.4, 1.15, 0.9, 0.65, 0.5], color=ink, lw=1.5)
     axis.plot([10.35, 10.35], [0.5, 0.1], color=ink, lw=1.5)
-    axis.text(10.67, 1.05, r"$Z_0$", va="center", fontsize=11)
+    axis.text(10.67, 1.05, r"$Z_0$", va="center", fontsize=10.5, color=ink)
     for y, width in [(0.1, 0.32), (-0.02, 0.21), (-0.14, 0.1)]:
         axis.plot([10.35 - width, 10.35 + width], [y, y], color=ink, lw=1.3)
-    linewidth = r"$\kappa_f/2\pi$ = 230 MHz" if filtered_circuit else r"$\kappa_{ext}/2\pi$ = 1 MHz"
-    axis.text(10.6, -0.42, linewidth, ha="right", va="top", fontsize=10)
+    linewidth = r"$\kappa_f/2\pi$ = 230 MHz" if filtered_circuit else r"$\kappa_{\mathrm{ext}}/2\pi$ = 1 MHz"
+    axis.text(10.6, -0.42, linewidth, ha="right", va="top", fontsize=9.5, color=muted)
 fig.savefig("slh_circuits.svg")
-fig.savefig("slh_circuits.pdf")
 plt.close(fig)
 ```
 
@@ -187,12 +186,13 @@ for name, occupation in occupations.items():
 ```python
 fig, axis = plt.subplots(figsize=(6.6, 3.7), layout="constrained")
 for (name, occupation), color in zip(occupations.items(), ["#C92F33", "#246FA8"]):
-    axis.plot(times / 1000, occupation[0], color=color, lw=2.2, label=f"{name}: {lifetimes[name] / 1000:.1f} µs")
-axis.plot(times / 1000, np.exp(-times / 60_000), color="#16181C", ls=":", lw=1.8, label="Intrinsic qubit: 60 µs")
-axis.set(xlabel="Time (µs)", ylabel="Qubit occupation", xlim=(0, 120), ylim=(0, 1.02))
-axis.legend(frameon=False, fontsize=10)
+    axis.plot(times / 1000, occupation[0], color=color, lw=2.2,
+              label=rf"{name}: {lifetimes[name] / 1000:.1f} $\mu$s")
+axis.plot(times / 1000, np.exp(-times / 60_000), color="#16181C", ls=":", lw=1.8,
+          label=r"Intrinsic qubit: 60 $\mu$s")
+axis.set(xlabel=r"Time ($\mu$s)", ylabel="Qubit occupation", xlim=(0, 120), ylim=(0, 1.02))
+axis.legend()
 fig.savefig("slh_t1_budget.svg")
-fig.savefig("slh_t1_budget.pdf")
 plt.close(fig)
 ```
 

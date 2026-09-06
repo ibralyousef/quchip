@@ -45,12 +45,12 @@ batching, and gradients.
 
 The {doc}`cookbook` defines the conventions used by executable quchip examples.
 
-```{figure} images/hello_qubit_drive_leakage.png
+```{figure} images/hello_qubit_drive_leakage.svg
 :width: 760px
 :alt: Short and long Gaussian pulses with multilevel qubit populations
 ```
 
-```{figure} images/hello_dispersive_readout_iq.png
+```{figure} images/hello_dispersive_readout_iq.svg
 :width: 560px
 :alt: Conditional resonator IQ paths with emphasized final points
 ```
