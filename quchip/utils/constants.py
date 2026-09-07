@@ -1,17 +1,10 @@
-"""Physical constants in the quchip ``GHz / ns / mK`` unit convention.
+"""Physical constants in quchip's GHz, ns, and mK units.
 
-quchip does not use an ``hbar = 1`` convention. Domain Hamiltonians express
-energies as ``E / h`` in ordinary (not angular) frequency, GHz; the single
-``2 * pi`` conversion to angular frequency happens later, at the engine
-assembly boundary. Times are expressed in ns and temperatures in mK.
+Hamiltonians express ``E/h`` in GHz; engine assembly converts to angular
+frequency with ``2π``. Time is in ns and temperature in mK.
 
-Constants below are provided for user-facing physics expressions (thermal
-populations, flux quanta, etc.) and derived from SI defining values so the
-GHz/ns/mK-convention constants and their SI counterparts never drift apart.
-
-All numerical values are taken from the **CODATA 2018** recommended
-constants as published by NIST (https://physics.nist.gov/cuu/Constants/)
-and rescaled into the quchip unit system where applicable.
+Values derive from SI defining constants and CODATA 2018, published by NIST
+(https://physics.nist.gov/cuu/Constants/), with unit conversions below.
 """
 
 from __future__ import annotations

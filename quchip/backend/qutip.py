@@ -17,11 +17,11 @@ References
 
 from __future__ import annotations
 
-import logging
 import math
 import os
 import warnings
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable, Sequence
 
 import numpy as np
@@ -31,31 +31,31 @@ from qutip.solver.mesolve import MESolver
 from qutip.solver.sesolve import SESolver
 from scipy import sparse
 
+from quchip.backend._response import linear_response, stationary_condition_number
+from quchip.utils.values import DeferredValue
 from quchip.backend._dims import (
     compute_two_body_permutation,
     default_solver_steps,
     validate_two_body_indices,
 )
 from quchip.backend.containers import (
+    BatchSolveError,
     _DEFAULT_SOLVE_OPTIONS,
     EigensystemData,
     DeferredBatch,
     PreparedHamiltonian,
+    PreparedStationary,
+    LinearResponseSolverResult,
     SolverResult,
     SteadyStateSolverResult,
 )
 from quchip.backend.protocol import Backend, Operator, State
 from quchip.engine.ir import (
-    Shift,
-    Window,
     decompose_carrier_bands,
     evaluate_signal_program,
-    signal_children,
+    signal_window_bounds,
 )
 from quchip.utils.jax_utils import maybe_concrete_scalar
-
-
-_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -132,35 +132,13 @@ _WINDOW_EDGE_PADDING_NS = 1.0
 _CANONICAL_BASE_SKELETON_POINTS = 3
 
 
-def _collect_window_bounds(signal: Any, shift: float = 0.0) -> list[tuple[float, float]]:
-    """Recursively collect every ``Window`` node's absolute ``(start, stop)`` bounds (ns).
-
-    A ``Window``'s own ``start``/``stop`` are local to its child's time
-    frame; an enclosing ``Shift`` translates that frame by ``delta_t``
-    before the window's mask applies (``Shift`` wraps ``Window`` in the
-    scheduled signal built by
-    :meth:`~quchip.control.signal.AnalyticSignal.from_pulse`), so *shift*
-    accumulates while descending through any ``Shift`` ancestor. A subtree
-    whose window bounds or enclosing shift are JAX tracers is skipped —
-    concrete placement is required to add refinement samples, and a QuTiP
-    solve never runs under tracing regardless, so this is purely defensive.
-    """
-    bounds: list[tuple[float, float]] = []
-    if isinstance(signal, Window):
-        start = maybe_concrete_scalar(signal.start)
-        stop = maybe_concrete_scalar(signal.stop)
+def _collect_window_bounds(signal: Any) -> list[tuple[float, float]]:
+    """Concrete absolute windows used to refine QuTiP's coefficient grid."""
+    bounds = []
+    for start, stop in signal_window_bounds(signal):
+        start, stop = maybe_concrete_scalar(start), maybe_concrete_scalar(stop)
         if start is not None and stop is not None and stop > start:
-            bounds.append((start + shift, stop + shift))
-        bounds.extend(_collect_window_bounds(signal.child, shift))
-        return bounds
-    if isinstance(signal, Shift):
-        delta = maybe_concrete_scalar(signal.delta_t)
-        if delta is None:
-            return bounds
-        bounds.extend(_collect_window_bounds(signal.child, shift + delta))
-        return bounds
-    for child in signal_children(signal):
-        bounds.extend(_collect_window_bounds(child, shift))
+            bounds.append((start, stop))
     return bounds
 
 
@@ -214,13 +192,22 @@ def _augmented_sample_grid(envelope: Any, base_grid: Any) -> np.ndarray:
     if not bounds:
         return base
     lo, hi = base[0], base[-1]
+    from quchip.engine.sampling import signal_feature_times
+
     pieces = [np.linspace(lo, hi, _CANONICAL_BASE_SKELETON_POINTS)]
+    for features in signal_feature_times(envelope):
+        pieces.append(features[(features >= lo) & (features <= hi)])
     for start, stop in bounds:
         clipped_start, clipped_stop = max(start, lo), min(stop, hi)
-        if clipped_stop <= clipped_start:
+        if clipped_stop < clipped_start:
             continue
-        subgrid = _local_window_subgrid(clipped_start, clipped_stop)
-        pieces.append(subgrid[(subgrid >= lo) & (subgrid <= hi)])
+        # Adjacent floats preserve a discontinuity without giving it a
+        # finite interpolation ramp, including a pulse touching an endpoint.
+        edges = np.array([np.nextafter(start, -np.inf), start, stop, np.nextafter(stop, np.inf)])
+        pieces.append(edges[(edges >= lo) & (edges <= hi)])
+        if clipped_stop > clipped_start:
+            subgrid = _local_window_subgrid(clipped_start, clipped_stop)
+            pieces.append(subgrid[(subgrid >= lo) & (subgrid <= hi)])
     return np.unique(np.concatenate(pieces))
 
 
@@ -246,10 +233,10 @@ def _sample_coeff_array(signal: Any, sample_tlist: Any) -> np.ndarray:
 # order (unspecified below).
 _WINDOWED_COEFFICIENT_ORDER = 1
 
-# QuTiP's diagonal integrator materializes a dense d x d Hamiltonian or
-# d^2 x d^2 Liouvillian. These measured caps keep that setup bounded.
+# Cap diag at Hilbert D=64 for sesolve and Liouvillian D²=1024 (Hilbert D=32) for mesolve.
+# The mesolve setup scales roughly as D⁶ in time and D⁴ in memory.
 _MAX_STATIC_HILBERT_DIM = 64
-_MAX_STATIC_LIOUVILLIAN_HILBERT_DIM = 12
+_MAX_STATIC_LIOUVILLIAN_DIM = 1024
 
 
 def _envelope_coefficient(envelope: Any, sample_tlist: Any) -> Any:
@@ -266,7 +253,10 @@ def _envelope_coefficient(envelope: Any, sample_tlist: Any) -> Any:
     if sample_tlist is None:
         return qutip.coefficient(_coeff_callable(envelope))
     bounds = _collect_window_bounds(envelope)
-    grid = _augmented_sample_grid(envelope, sample_tlist)
+    try:
+        grid = _augmented_sample_grid(envelope, sample_tlist)
+    except NotImplementedError:
+        return qutip.coefficient(_coeff_callable(envelope))
     arr = _sample_coeff_array(envelope, grid)
     if bounds:
         return qutip.coefficient(
@@ -445,7 +435,7 @@ class QuTiPBackend(Backend):
     def from_array(self, data: Any, dims: list[list[int]] | None = None) -> Operator:
         """Construct a ``Qobj`` from a dense matrix with optional row/col *dims*."""
         if isinstance(data, Qobj):
-            return data if dims is None or data.dims == dims else Qobj(data.full(), dims=dims)
+            return data if dims is None or data.dims == dims else Qobj(data.data, dims=dims)
         if hasattr(data, "to_jax"):
             data = np.asarray(data.to_jax(), dtype=complex)
         return Qobj(data, dims=dims)
@@ -649,13 +639,12 @@ class QuTiPBackend(Backend):
 
     def state_to_dm(self, state: State) -> State:
         """Return a density matrix; pass through if *state* is already one."""
-        if isinstance(state, Qobj) and not state.isket:
-            return state
-        return qutip.ket2dm(state)
+        state = self.coerce_state(state)
+        return state if not state.isket else qutip.ket2dm(state)
 
     def is_ket(self, state: State) -> bool:
-        """Return whether *state* is a ket rather than a density matrix (``Qobj.isket``)."""
-        return state.isket
+        """Return whether *state* is a ket rather than a density matrix; foreign arrays go by shape."""
+        return state.isket if isinstance(state, Qobj) else super().is_ket(state)
 
     def is_native_state(self, state: Any) -> bool:
         """Return whether *state* is a QuTiP quantum object."""
@@ -691,10 +680,11 @@ class QuTiPBackend(Backend):
         authoritative, including QuTiP's own ``max_step=0`` (unbounded):
         the key's *presence* in ``options`` decides, not its truthiness.
 
-        This is QuTiP's single option-merge boundary (shared by the single
-        and batched solve paths), so the dynamiqs-only ``gradient`` knob —
-        which QuTiP's ``SolverOptions`` rejects — is stripped here exactly
-        once for portability; downstream runners trust the merged dict.
+        The automatic step-count budget also covers this step-size cap.
+        An explicit ``nsteps`` remains authoritative.
+
+        Unsupported options are left for the native solver to reject;
+        explicit numerical controls are never removed for portability.
         """
         resolved = dict(options)
         if "nsteps" not in resolved:
@@ -705,7 +695,11 @@ class QuTiPBackend(Backend):
             max_step_ns = maybe_concrete_scalar(metadata.get("max_step_ns"))
             if max_step_ns is not None and max_step_ns > 0 and np.isfinite(max_step_ns):
                 resolved["max_step"] = max_step_ns
-        resolved.pop("gradient", None)
+        max_step = maybe_concrete_scalar(resolved.get("max_step"))
+        span = maybe_concrete_scalar(tlist[-1] - tlist[0])
+        if ("nsteps" not in options and max_step is not None and max_step > 0
+                and span is not None and np.isfinite(span / max_step)):
+            resolved["nsteps"] = max(resolved.get("nsteps", 200_000), 2 * math.ceil(span / max_step))
         return resolved
 
     def _resolve_automatic_solver_options(
@@ -724,36 +718,31 @@ class QuTiPBackend(Backend):
         adaptive_options = {"atol", "rtol", "nsteps", "max_step"}
         explicit_method = user_options.get("method")
         if explicit_method == "diag":
-            discarded = adaptive_options & user_options.keys()
+            incompatible = adaptive_options & user_options.keys()
+            if incompatible:
+                raise ValueError(f"QuTiP method='diag' does not support options {sorted(incompatible)}.")
             for key in adaptive_options:
                 resolved.pop(key, None)
-            if discarded:
-                _LOGGER.info(
-                    "Explicit QuTiP method='diag' discarded unsupported adaptive options: %s.",
-                    ", ".join(sorted(discarded)),
-                )
             return resolved
 
-        if explicit_method is not None or engine_result.dynamic_terms:
+        # Cascade-generated terms can leave a degenerate Liouvillian non-diagonalizable,
+        # so this reads slh.H (the resolved model), not the drive-augmented static terms.
+        if (
+            explicit_method is not None
+            or bool(adaptive_options & user_options.keys())
+            or engine_result.dynamic_terms
+            or engine_result.slh.has_network_hamiltonian
+        ):
             return resolved
 
         dimension = math.prod(engine_result.dims)
-        limit = (
-            _MAX_STATIC_HILBERT_DIM
-            if solver_name == "sesolve"
-            else _MAX_STATIC_LIOUVILLIAN_HILBERT_DIM
-        )
-        if dimension > limit:
+        generator_dim = dimension if solver_name == "sesolve" else dimension**2
+        limit = _MAX_STATIC_HILBERT_DIM if solver_name == "sesolve" else _MAX_STATIC_LIOUVILLIAN_DIM
+        if generator_dim > limit:
             return resolved
 
-        discarded = adaptive_options & user_options.keys()
         for key in adaptive_options:
             resolved.pop(key, None)
-        if discarded:
-            _LOGGER.info(
-                "Automatic QuTiP method='diag' discarded unsupported adaptive options: %s.",
-                ", ".join(sorted(discarded)),
-            )
 
         resolved["method"] = "diag"
         return resolved
@@ -807,13 +796,24 @@ class QuTiPBackend(Backend):
         result = runner.run(rho0, tlist, e_ops=e_ops)
         return self._wrap_result(result, solver="mesolve", extra_stats=self._solver_stats(runner))
 
-    def steadystate(self, problem: Any) -> SteadyStateSolverResult:
-        """Solve a static Lindblad generator with :func:`qutip.steadystate`."""
-        if problem.engine_result.dynamic_terms:
-            raise ValueError("steadystate() requires a static resolved Hamiltonian.")
+    def _stationary_liouvillian(self, engine_result: Any) -> Qobj:
+        """Lower one static engine description to QuTiP's native stationary system."""
+        if engine_result.dynamic_terms:
+            raise ValueError("Stationary analysis requires a static resolved Hamiltonian.")
+        hamiltonian = self.prepare_hamiltonian(engine_result).rhs
+        collapse_ops = self._collapse_operators(engine_result)
+        return qutip.liouvillian(hamiltonian, collapse_ops)
 
-        prepared = self.prepare_hamiltonian(problem.engine_result)
-        collapse_ops = self._collapse_operators(problem.engine_result)
+    @staticmethod
+    def _scipy_liouvillian(liouvillian: Qobj) -> Any:
+        """Expose a QuTiP Liouvillian as SciPy CSR without densifying it."""
+        if hasattr(liouvillian.data, "as_scipy"):
+            return liouvillian.data.as_scipy().tocsr()
+        return sparse.csr_matrix(liouvillian.data.to_array())
+
+    def steadystate(self, problem: Any, *, prepared: PreparedStationary | None = None) -> SteadyStateSolverResult:
+        """Solve a static Lindblad generator with :func:`qutip.steadystate`."""
+        liouvillian = self.prepare_stationary(problem.engine_result, prepared=prepared).liouvillian
         options = dict(problem.options)
         rank_tolerance = options.pop("rank_tolerance", None)
         diagnostic_max_dimension = int(options.pop("diagnostic_max_dimension", 16))
@@ -822,25 +822,17 @@ class QuTiPBackend(Backend):
         method = options.pop("method", "direct")
         solver = options.pop("solver", None)
         state = qutip.steadystate(
-            prepared.rhs,
-            collapse_ops,
+            liouvillian,
             method=method,
             solver=solver,
             **options,
         )
 
-        liouvillian = qutip.liouvillian(prepared.rhs, collapse_ops)
-        if hasattr(liouvillian.data, "as_scipy"):
-            sparse_liouvillian = liouvillian.data.as_scipy().tocsr()
-        else:
-            from scipy.sparse import csr_matrix
-
-            sparse_liouvillian = csr_matrix(liouvillian.data.to_array())
+        sparse_liouvillian = self._scipy_liouvillian(liouvillian)
         state_vector = np.asarray(qutip.operator_to_vector(state).full(), dtype=complex).reshape(-1)
         residual = float(np.linalg.norm(sparse_liouvillian @ state_vector))
         dimension = state.shape[0]
         nullity = None
-        condition_number = None
         if dimension <= diagnostic_max_dimension:
             dense_liouvillian = np.asarray(sparse_liouvillian.toarray(), dtype=complex)
             singular_values = np.linalg.svd(dense_liouvillian, compute_uv=False)
@@ -848,11 +840,6 @@ class QuTiPBackend(Backend):
                 scale = singular_values[0] if singular_values.size else 0.0
                 rank_tolerance = max(dense_liouvillian.shape) * np.finfo(float).eps * scale
             nullity = int(np.count_nonzero(singular_values <= rank_tolerance))
-            trace_row = np.zeros(dense_liouvillian.shape[1], dtype=complex)
-            trace_row[:: dimension + 1] = 1.0
-            constrained = dense_liouvillian.copy()
-            constrained[-1, :] = trace_row
-            condition_number = float(np.linalg.cond(constrained))
         expectations = None
         if isinstance(problem.e_ops, list):
             expectations = [qutip.expect(operator, state) for operator in problem.e_ops]
@@ -868,8 +855,104 @@ class QuTiPBackend(Backend):
             },
             residual=residual,
             nullity=nullity,
-            condition_number=condition_number,
+            _condition_number=(
+                DeferredValue(partial(self._stationary_condition_number, problem.engine_result))
+                if dimension <= diagnostic_max_dimension else None
+            ),
         )
+
+    def _stationary_condition_number(self, engine_result: Any) -> float:
+        liouvillian = self._scipy_liouvillian(self._stationary_liouvillian(engine_result)).toarray()
+        return float(stationary_condition_number(liouvillian, math.prod(engine_result.dims), xp=np))
+
+    def linear_response(self, problem: Any) -> LinearResponseSolverResult:
+        """Solve passive-linear scattering with batched NumPy mode matrices."""
+        return linear_response(problem, xp=np)
+
+    def stationary_resolvent(
+        self,
+        engine_result: Any,
+        sources: tuple[tuple[str, Any], ...],
+        observables: tuple[tuple[str, Any], ...],
+        frequencies: Any,
+        *,
+        prepared: PreparedStationary | None = None,
+    ) -> dict[tuple[str, str], Any]:
+        """Evaluate stationary resolvents with QuTiP's sparse Liouvillian."""
+        liouvillian = self.prepare_stationary(engine_result, prepared=prepared).liouvillian
+        matrix = self._scipy_liouvillian(liouvillian)
+        native_sources = [(label, self.from_canonical_operator(operator)) for label, operator in sources]
+        dims = native_sources[0][1].dims
+        dimension = math.prod(engine_result.dims)
+        targets = np.stack(
+            [
+                np.asarray(qutip.operator_to_vector(operator).full(), dtype=complex).reshape(-1)
+                for _, operator in native_sources
+            ],
+            axis=1,
+        )
+        targets[-1, :] = 0.0
+        size = matrix.shape[0]
+        keep = sparse.diags([1.0] * (size - 1) + [0.0], format="csr", dtype=complex)
+        trace_row = sparse.csr_matrix(
+            (np.ones(dimension, dtype=complex), (np.full(dimension, size - 1), np.arange(0, size, dimension + 1))),
+            shape=(size, size),
+        )
+        base = keep @ matrix + trace_row
+        native_observables = tuple(
+            (label, self.from_canonical_operator(operator))
+            for label, operator in observables
+        )
+        values: dict[tuple[str, str], list[Any]] = {
+            (source_label, label): [] for source_label, _ in sources for label, _ in observables
+        }
+
+        for frequency in np.atleast_1d(np.asarray(frequencies, dtype=float)):
+            constrained = (base + 1j * (2.0 * np.pi) * frequency * keep).tocsc()
+            solutions = sparse.linalg.splu(constrained).solve(targets)
+            for column, (source_label, _) in enumerate(native_sources):
+                response = Qobj(
+                    solutions[:, column].reshape((dimension, dimension), order="F"),
+                    dims=dims,
+                )
+                for label, observable in native_observables:
+                    values[(source_label, label)].append((observable * response).tr())
+
+        return {key: np.asarray(items) for key, items in values.items()}
+
+    def stationary_propagate(
+        self,
+        engine_result: Any,
+        initial: Any,
+        observables: tuple[tuple[str, Any], ...],
+        times: Any,
+        *,
+        prepared: PreparedStationary | None = None,
+    ) -> dict[str, Any]:
+        """Propagate regression operators with QuTiP's sparse Liouvillian."""
+        liouvillian = self.prepare_stationary(engine_result, prepared=prepared).liouvillian
+        matrix = self._scipy_liouvillian(liouvillian)
+        initial_operator = self.from_canonical_operator(initial)
+        initial_vector = np.asarray(
+            qutip.operator_to_vector(initial_operator).full(), dtype=complex
+        ).reshape(-1)
+        dimension = initial_operator.shape[0]
+        native_observables = tuple(
+            (label, self.from_canonical_operator(operator))
+            for label, operator in observables
+        )
+        values: dict[str, list[Any]] = {label: [] for label, _ in observables}
+
+        for time in np.atleast_1d(np.asarray(times, dtype=float)):
+            evolved_vector = sparse.linalg.expm_multiply(matrix * time, initial_vector)
+            evolved = Qobj(
+                evolved_vector.reshape((dimension, dimension), order="F"),
+                dims=initial_operator.dims,
+            )
+            for label, observable in native_observables:
+                values[label].append((observable * evolved).tr())
+
+        return {label: np.asarray(items) for label, items in values.items()}
 
     @staticmethod
     def _runner_options(options: dict[str, Any] | None) -> dict[str, Any]:
@@ -877,8 +960,7 @@ class QuTiPBackend(Backend):
 
         The single option-merge boundary (:meth:`resolve_solver_options`,
         reached via :meth:`_merge_options`) has already applied
-        ``_DEFAULT_SOLVE_OPTIONS`` and stripped the dynamiqs-only ``gradient``
-        knob, so a supplied dict is forwarded as-is (a defensive copy) —
+        ``_DEFAULT_SOLVE_OPTIONS``, so a supplied dict is forwarded as a defensive copy —
         re-merging here would duplicate that work. A bare ``None`` (a direct
         solver call without the merge boundary) still gets the store-state
         defaults.
@@ -1044,7 +1126,7 @@ class QuTiPBackend(Backend):
         for index, problem in enumerate(batch.problems):
             engine_result = problem.engine_result
             c_ops = self._collapse_operators(engine_result)
-            solver_name = problem.solver or ("mesolve" if c_ops else "sesolve")
+            solver_name = problem.solver_name(self)
             opts = self._resolve_problem_options(
                 problem,
                 metadata=engine_result.metadata,
@@ -1058,7 +1140,7 @@ class QuTiPBackend(Backend):
                     dynamic_signals=shared.dynamic_signals[index],
                     initial_state=self.coerce_state(
                         problem.initial_state,
-                        dims=getattr(problem.chip, "dims", None),
+                        dims=problem.engine_result.dims,
                     ),
                     c_ops=tuple(c_ops),
                     solver_name=solver_name,
@@ -1200,15 +1282,22 @@ class QuTiPBackend(Backend):
         Small batches (``< _PARALLEL_MIN_BATCH``) run sequentially in-process —
         the loky pool's fork/import/IPC overhead dominates a handful of fast
         QuTiP solves. Larger batches dispatch through the process-wide reusable
-        loky executor. On any worker-pool failure the pool is shut down (so it
-        self-heals next time) and execution falls back to sequential, keeping
-        SolverResult semantics identical to the parallel path.
+        loky executor. Worker-pool failures may use sequential execution;
+        failures raised by an individual solve retain their point index and
+        propagate without retrying the numerical work.
         """
         from tqdm import tqdm
 
+        def indexed_task(entry: tuple[int, Any]) -> SolverResult:
+            index, item = entry
+            try:
+                return task(item)
+            except Exception as exc:
+                raise BatchSolveError(index, f"{type(exc).__name__}: {exc}") from exc
+
         def sequential() -> list[SolverResult]:
-            iterator = tqdm(items, desc=desc) if progress else items
-            return [task(item) for item in iterator]
+            iterator = tqdm(enumerate(items), total=len(items), desc=desc) if progress else enumerate(items)
+            return [indexed_task(entry) for entry in iterator]
 
         if len(items) < self._PARALLEL_MIN_BATCH:
             return sequential()
@@ -1224,10 +1313,12 @@ class QuTiPBackend(Backend):
             return sequential()
 
         try:
-            mapped = executor.map(task, items)
+            mapped = executor.map(indexed_task, enumerate(items))
             if progress:
                 return list(tqdm(mapped, total=len(items), desc=desc))
             return list(mapped)
+        except BatchSolveError:
+            raise
         except Exception as exc:
             self._shutdown_executor()
             warnings.warn(
@@ -1297,13 +1388,7 @@ class QuTiPBackend(Backend):
         if extra_stats:
             stats.update({key: value for key, value in extra_stats.items() if value is not None})
 
-        # Prefer QuTiP's own ``final_state`` (populated when ``store_final_state=True``)
-        # so the final state survives even when the full trajectory is not stored
-        # (``store_states=False`` — e.g. the auto policy for ``e_ops``-only solves).
-        # Fall back to the last trajectory entry when only ``store_states`` is on.
-        final_state = getattr(qutip_result, "final_state", None)
-        if final_state is None and states:
-            final_state = states[-1]
+        final_state = states[-1] if states else getattr(qutip_result, "final_state", None)
 
         return SolverResult(
             times=qutip_result.times,
@@ -1316,9 +1401,12 @@ class QuTiPBackend(Backend):
 
     @staticmethod
     def _solver_stats(solver_runner: Any) -> dict[str, Any]:
-        """Return integrator diagnostics — currently only ``nsteps`` when exposed."""
+        """Capture effective solver options and the step count when exposed."""
+        stats: dict[str, Any] = {"options": dict(solver_runner.options)}
         nsteps = QuTiPBackend._extract_nsteps(solver_runner)
-        return {"nsteps": nsteps} if nsteps is not None else {}
+        if nsteps is not None:
+            stats["nsteps"] = nsteps
+        return stats
 
     @staticmethod
     def _extract_nsteps(solver_runner: Any) -> int | None:

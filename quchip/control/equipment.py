@@ -5,12 +5,11 @@ Signal transforms are owned here, not by individual drives.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 
 from quchip.control.drive import BaseDrive, CouplingDrive
+from quchip.declarative.parameters import parameter, setting
 from quchip.control.signal import Crosstalk, SignalMap, SignalTransform
 from quchip.utils.jax_utils import (
     is_jax_array as _is_traced,
@@ -27,8 +26,7 @@ def _setitem(arr: Any, idx: tuple[int, int], value: Any) -> Any:
     return out
 
 
-@dataclass(frozen=True)
-class CrosstalkMatrix(SignalTransform):
+class CrosstalkMatrix(SignalTransform, serializable=True):
     """Dense crosstalk transform and matrix view in control-line order.
 
     Attributes
@@ -55,14 +53,16 @@ class CrosstalkMatrix(SignalTransform):
     (``PolarScale``/``Shift``), preserving end-to-end JAX traceability.
     """
 
-    labels: tuple[str, ...]
-    beta: Any
-    theta: Any
-    delay: Any
-    _parameter_names = ("beta", "theta", "delay")
+    labels: tuple[str, ...] = setting()
+    beta: Any = parameter()
+    theta: Any = parameter()
+    delay: Any = parameter()
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "labels", tuple(self.labels))
+    def __init__(self, labels: tuple[str, ...], beta: Any, theta: Any, delay: Any) -> None:
+        super().__init__(labels=tuple(labels), beta=beta, theta=theta, delay=delay)
+
+    def validate(self) -> None:
+        """Require all crosstalk matrices to match the declared line order."""
         shape = (len(self.labels), len(self.labels))
         for name in ("beta", "theta", "delay"):
             matrix = getattr(self, name)
@@ -123,28 +123,6 @@ class CrosstalkMatrix(SignalTransform):
             if victim != source
         ]
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize into a JSON-safe dictionary."""
-        data = super().to_dict()
-        data["labels"] = list(self.labels)
-        for name in ("beta", "theta", "delay"):
-            matrix = getattr(self, name)
-            data[name] = [
-                [float(matrix[i, j]) for j in range(len(self.labels))]
-                for i in range(len(self.labels))
-            ]
-        return data
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "CrosstalkMatrix":
-        return cls(
-            labels=tuple(str(label) for label in d["labels"]),
-            beta=np.asarray(d["beta"], dtype=float),
-            theta=np.asarray(d["theta"], dtype=float),
-            delay=np.asarray(d["delay"], dtype=float),
-        )
-
-
 
 def _leaves(value: Any):
     if isinstance(value, (list, tuple)):
@@ -174,6 +152,12 @@ class ControlEquipment:
         *,
         signal_chain: list[SignalTransform] | None = None,
     ) -> None:
+        invalid = [line for line in lines if not isinstance(line, BaseDrive)]
+        if invalid:
+            raise TypeError(
+                "ControlEquipment lines must be BaseDrive instances; coherent field "
+                "inputs are scheduled directly and propagate through PortNetwork."
+            )
         self._lines = list(lines)
         self._signal_chain = list(signal_chain) if signal_chain else []
 
@@ -362,7 +346,8 @@ class ControlEquipment:
                 copied_lines.append(
                     line.copy(target=None if line.device_label is None else device_map[line.device_label])
                 )
-        return type(self)(lines=copied_lines, signal_chain=list(self._signal_chain) or None)
+        return type(self)(lines=copied_lines,
+                          signal_chain=[transform.copy() for transform in self._signal_chain] or None)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize into a JSON-safe dictionary."""

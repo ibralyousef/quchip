@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,7 +24,7 @@ def _document() -> dict[str, object]:
     rows = []
     for family in ("qutip", "dynamiqs"):
         for n in (1, 2):
-            for path, scale in (("head", 1.1), ("main", 1.0), ("native", 0.8)):
+            for path, scale in (("head", 1.1), ("base", 1.0), ("native", 0.8)):
                 row = {
                     "N": n,
                     "levels": 3,
@@ -35,26 +37,36 @@ def _document() -> dict[str, object]:
                 row.update({name: value * scale * n for name, value in METRICS.items()})
                 rows.append(row)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "complete": True,
         "provenance": {
             "head_commit": "a" * 40,
-            "main_commit": "b" * 40,
+            "base_commit": "b" * 40,
             "parity_tol": 1e-5,
         },
         "rows": rows,
     }
 
 
-def test_load_result_rejects_failed_measurements(tmp_path: Path) -> None:
-    """Reject incomplete or failed measurements before reporting them."""
+@pytest.mark.parametrize("status", ["parity-fail", "error"])
+def test_load_result_rejects_failed_measurements(tmp_path: Path, status: str) -> None:
+    """Keep worker failures visible in both the exit status and job summary."""
     document = _document()
-    document["rows"][0]["status"] = "parity-fail"  # type: ignore[index]
+    document["complete"] = False
+    document["rows"][0].update(status=status, error="failed benchmark cell")  # type: ignore[index]
     path = tmp_path / "result.json"
     path.write_text(json.dumps(document))
 
-    with pytest.raises(ValueError, match="qutip/head/N=1: parity-fail"):
+    with pytest.raises(ValueError, match=f"qutip/head/N=1: {status}"):
         load_result(path)
+    summary = tmp_path / "summary.md"
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).parents[1] / "benchmarks/closed_system.py"),
+         "report", "--data", str(path), "--summary", str(summary)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "failed benchmark cell" in summary.read_text()
 
 
 def test_render_markdown_reports_exact_revisions_and_all_regimes(tmp_path: Path) -> None:
@@ -78,7 +90,7 @@ def test_render_markdown_reports_exact_revisions_and_all_regimes(tmp_path: Path)
 
 
 def test_render_plots_writes_one_simple_comparison(tmp_path: Path) -> None:
-    """Render one PR-versus-main-versus-hand-built comparison."""
+    """Render one head-versus-base-versus-hand-built comparison."""
     path = tmp_path / "result.json"
     path.write_text(json.dumps(_document()))
 
@@ -86,3 +98,24 @@ def test_render_plots_writes_one_simple_comparison(tmp_path: Path) -> None:
 
     assert [output.name for output in outputs] == ["closed-system-comparison.png"]
     assert all(output.stat().st_size > 1_000 for output in outputs)
+
+
+@pytest.mark.parametrize("family", ["qutip", "dynamiqs"])
+def test_benchmark_solves_current_api_without_state_history(family: str) -> None:
+    """Benchmark the current storage contract against native population traces."""
+    pytest.importorskip(family)
+    import numpy as np
+
+    from benchmarks.closed_system import (
+        PARITY_TOL,
+        _build_native_qutip,
+        _build_quchip,
+        _solve_native_qutip,
+        _solve_quchip,
+    )
+
+    problem, labels = _build_quchip(1, 3, family)
+    assert problem.states == "none"
+    measured = _solve_quchip((problem, labels))
+    reference = _solve_native_qutip(_build_native_qutip(1, 3))
+    np.testing.assert_allclose(measured, reference, atol=PARITY_TOL, rtol=0)

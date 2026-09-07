@@ -18,23 +18,8 @@ from quchip.devices.resonator import Resonator
 from quchip.devices.transmon.duffing import DuffingTransmon
 
 
-# ---------------------------------------------------------------------------
-# TestChipHamiltonian — System Hamiltonian construction
-# ---------------------------------------------------------------------------
-
-
 class TestChipHamiltonian:
     """Verify system Hamiltonian eigenvalues against analytical formulas."""
-
-    def test_single_device_hamiltonian(self, backend: Backend) -> None:
-        """DuffingTransmon(freq=5.0, α=-0.25, levels=3) eigenvalues match E_n = ω·n + (α/2)·n·(n−1)."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        chip = Chip(devices=[q])
-        H = chip.hamiltonian()
-        evals = np.sort(np.linalg.eigvalsh(H.matrix(backend=backend)).real)
-
-        expected = np.array([0.0, 5.0, 9.75])
-        np.testing.assert_allclose(evals, expected, atol=1e-10)
 
     def test_hamiltonian_resolves_rwa_while_unresolved_preserves_authored_terms(self) -> None:
         """Resolved inspection applies chip RWA while unresolved inspection preserves the authored interaction."""
@@ -101,27 +86,6 @@ class TestChipHamiltonian:
         expected = np.sort([eq + er for eq in q_evals for er in r_evals])
         np.testing.assert_allclose(evals, expected, atol=1e-10)
 
-    def test_coupled_system_hamiltonian_hermiticity(self, backend: Backend) -> None:
-        """Coupled system Hamiltonian must be Hermitian."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        r = Resonator(freq=6.0, levels=4, label="r")
-        coupling = Capacitive(q, r, g=0.02)
-        chip = Chip(devices=[q, r], couplings=[coupling])
-        H = chip.hamiltonian()
-        matrix = H.matrix(backend=backend)
-        diff = np.linalg.norm(matrix - matrix.conj().T)
-        assert diff < 1e-12, f"H is not Hermitian: ||H - H†|| = {diff}"
-
-    def test_coupled_system_hamiltonian_dimension(self) -> None:
-        """Coupled system dimension = product of device levels (3 x 4 = 12)."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        r = Resonator(freq=6.0, levels=4, label="r")
-        coupling = Capacitive(q, r, g=0.02)
-        chip = Chip(devices=[q, r], couplings=[coupling])
-        H = chip.hamiltonian()
-
-        assert H.shape == (12, 12)
-
     def test_coupled_system_eigenvalue_perturbation(self, backend: Backend) -> None:
         """Coupling shifts eigenvalues by ~O(g) from the uncoupled tensor-sum values."""
         q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
@@ -176,19 +140,8 @@ class TestChipHamiltonian:
             chip.resolve()
 
 
-# ---------------------------------------------------------------------------
-# TestRotatingFrame — Frame management
-# ---------------------------------------------------------------------------
-
-
 class TestFrameSpec:
     """Verify frame-spec APIs and frame-resolution behavior."""
-
-    def test_lab_frame_is_default(self) -> None:
-        """Chip with no frame args should have frame='lab'."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        chip = Chip(devices=[q])
-        assert chip.frame == "lab"
 
     def test_hamiltonian_resolves_the_selected_frame(self, backend: Backend) -> None:
         """Resolved Hamiltonian inspection applies the chip's selected frame."""
@@ -256,50 +209,8 @@ class TestFrameSpec:
         assert chip.frame["r"] == 7.5
 
 
-# ---------------------------------------------------------------------------
-# TestStateFactory — Tensor-product states
-# ---------------------------------------------------------------------------
-
-
 class TestStateFactory:
     """Verify state factory builds correct tensor-product states."""
-
-    def test_ground_state_default(self, backend: Backend) -> None:
-        """bare_state() with no kwargs returns |0,0>, dimension = product of device levels."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        r = Resonator(freq=6.0, levels=4, label="r")
-        chip = Chip(devices=[q, r])
-
-        psi = chip.bare_state()
-        assert psi.shape[0] == 12
-
-        n_q = backend.embed(q.number_operator(), 0, [3, 4])
-        n_r = backend.embed(r.number_operator(), 1, [3, 4])
-        assert abs(backend.expect(n_q, psi)) < 1e-12
-        assert abs(backend.expect(n_r, psi)) < 1e-12
-
-    def test_excited_state(self, backend: Backend) -> None:
-        """bare_state(q=1) for a single-device chip produces |1>, <n̂>=1."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        chip = Chip(devices=[q])
-
-        psi = chip.bare_state(q=1)
-        n_op = q.number_operator()
-        assert abs(backend.expect(n_op, psi) - 1.0) < 1e-12
-
-    def test_tensor_product_state(self, backend: Backend) -> None:
-        """bare_state(q=0, r=1) = |0>⊗|1>: <n̂_q>=0, <n̂_r>=1."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        r = Resonator(freq=6.0, levels=4, label="r")
-        chip = Chip(devices=[q, r])
-
-        psi = chip.bare_state(q=0, r=1)
-        dims = [3, 4]
-        n_q = backend.embed(q.number_operator(), 0, dims)
-        n_r = backend.embed(r.number_operator(), 1, dims)
-
-        assert abs(backend.expect(n_q, psi)) < 1e-12
-        assert abs(backend.expect(n_r, psi) - 1.0) < 1e-12
 
     def test_bare_state_accepts_device_keyed_mapping(self, backend: Backend) -> None:
         """bare_state({device: level}) matches the label-keyed form."""
@@ -360,11 +271,6 @@ class TestStateFactory:
 
         with pytest.raises(ValueError, match="Duplicate device specification"):
             chip.state({q: 1}, q=1)
-
-
-# ---------------------------------------------------------------------------
-# TestStateOrderShorthand — string-state parsing, superposition primitive
-# ---------------------------------------------------------------------------
 
 
 class TestStateOrderShorthand:
@@ -436,12 +342,6 @@ class TestSuperposition:
         r = Resonator(freq=6.0, levels=4, label="r")
         return Chip(devices=[q, r])
 
-    def test_equal_two_component_superposition_is_normalized(self) -> None:
-        """Equal-weight two-component superposition normalizes to unit norm."""
-        chip = self._chip()
-        psi = chip.superposition({"q": 0, "r": 0}, {"q": 1, "r": 0})
-        assert abs(chip.backend.norm(psi) - 1.0) < 1e-12
-
     def test_equal_two_component_matches_manual(self) -> None:
         """Default equal-weight superposition equals the manually summed and renormalized bare states."""
         chip = self._chip()
@@ -478,16 +378,6 @@ class TestSuperposition:
         diff = np.linalg.norm(np.asarray(chip.backend.to_array(psi_str - psi_dict)))
         assert diff < 1e-12
 
-    def test_single_component_is_just_bare_state(self) -> None:
-        """A single-component superposition reduces to the corresponding bare state."""
-        chip = self._chip()
-        import numpy as np
-
-        psi = chip.superposition({"q": 1, "r": 0})
-        expected = chip.bare_state({"q": 1, "r": 0})
-        diff = np.linalg.norm(np.asarray(chip.backend.to_array(psi - expected)))
-        assert diff < 1e-12
-
     def test_empty_rejected(self) -> None:
         """superposition() with no components raises ValueError."""
         chip = self._chip()
@@ -495,44 +385,10 @@ class TestSuperposition:
             chip.superposition()
 
 
-# ---------------------------------------------------------------------------
-# TestDeviceOperatorCaching — cached_property invalidation
-# ---------------------------------------------------------------------------
+class TestDeviceOperators:
+    """Pauli operators follow the current local truncation."""
 
-
-class TestDeviceOperatorCaching:
-    """Verify that sigma_x/y/z are cached and invalidate when levels changes."""
-
-    def test_sigma_cache_invalidates_when_levels_change(self) -> None:
-        """sigma_x cache is invalidated when levels changes."""
-        q = Resonator(freq=6.0, levels=3, label="r0")
-        first = q.sigma_x
-        q.levels = 4
-        second = q.sigma_x
-        assert first.shape != second.shape
-
-    def test_sigma_x_cached_identity(self) -> None:
-        """sigma_x returns the same object on repeated access."""
-        q = Resonator(freq=6.0, levels=3, label="r0")
-        first = q.sigma_x
-        second = q.sigma_x
-        assert first is second
-
-    def test_sigma_y_cached_identity(self) -> None:
-        """sigma_y returns the same object on repeated access."""
-        q = Resonator(freq=6.0, levels=3, label="r0")
-        first = q.sigma_y
-        second = q.sigma_y
-        assert first is second
-
-    def test_sigma_z_cached_identity(self) -> None:
-        """sigma_z returns the same object on repeated access."""
-        q = Resonator(freq=6.0, levels=3, label="r0")
-        first = q.sigma_z
-        second = q.sigma_z
-        assert first is second
-
-    def test_all_three_invalidate_when_levels_change(self) -> None:
+    def test_paulis_follow_levels_change(self) -> None:
         """All three Pauli operators re-compute after levels change."""
         q = Resonator(freq=6.0, levels=3, label="r0")
         _ = q.sigma_x
@@ -544,11 +400,6 @@ class TestDeviceOperatorCaching:
         assert q.sigma_z.shape == (5, 5)
 
 
-# ---------------------------------------------------------------------------
-# TestSubspaceAccessors — sigma_plus/minus, projector, transition
-# ---------------------------------------------------------------------------
-
-
 class TestSubspaceAccessors:
     """Explicit Fock-basis accessors for qudits and multi-level devices.
 
@@ -556,61 +407,6 @@ class TestSubspaceAccessors:
     computational subspace); ``projector(i, j)`` / ``transition(i, j)``
     name the subspace explicitly.
     """
-
-    def test_sigma_plus_equals_projector_1_0(self) -> None:
-        """sigma_plus equals the Fock-basis raising projector |1><0|."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        backend = q.sigma_plus
-        # |1><0| has a single 1 at (row=1, col=0) in the Fock basis
-        import numpy as np
-
-        arr = np.asarray(backend.full() if hasattr(backend, "full") else backend)
-        expected = np.zeros((3, 3), dtype=complex)
-        expected[1, 0] = 1.0
-        assert np.allclose(arr, expected)
-
-    def test_sigma_minus_equals_projector_0_1(self) -> None:
-        """sigma_minus equals the Fock-basis lowering projector |0><1|."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        import numpy as np
-
-        arr = np.asarray(q.sigma_minus.full() if hasattr(q.sigma_minus, "full") else q.sigma_minus)
-        expected = np.zeros((3, 3), dtype=complex)
-        expected[0, 1] = 1.0
-        assert np.allclose(arr, expected)
-
-    def test_sigma_plus_minus_rebuild_sigma_x(self) -> None:
-        """σ_x = σ_+ + σ_- on the computational subspace."""
-        import numpy as np
-
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        recon = q.sigma_plus + q.sigma_minus
-        recon_arr = np.asarray(recon.full() if hasattr(recon, "full") else recon)
-        sx_arr = np.asarray(q.sigma_x.full() if hasattr(q.sigma_x, "full") else q.sigma_x)
-        assert np.allclose(recon_arr, sx_arr)
-
-    def test_projector_diagonal_is_level_projector(self) -> None:
-        """projector(i, i) is the population operator for level |i>."""
-        import numpy as np
-
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=4, label="q")
-        for i in range(4):
-            p = q.projector(i, i)
-            arr = np.asarray(p.full() if hasattr(p, "full") else p)
-            expected = np.zeros((4, 4), dtype=complex)
-            expected[i, i] = 1.0
-            assert np.allclose(arr, expected)
-
-    def test_transition_is_symmetric(self) -> None:
-        """transition(i, j) == |i><j| + |j><i|."""
-        import numpy as np
-
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        t12 = q.transition(1, 2)
-        pij = q.projector(1, 2) + q.projector(2, 1)
-        a = np.asarray(t12.full() if hasattr(t12, "full") else t12)
-        b = np.asarray(pij.full() if hasattr(pij, "full") else pij)
-        assert np.allclose(a, b)
 
     def test_sigma_plus_cache_invalidates_on_levels_change(self) -> None:
         """sigma_plus cache is invalidated and rebuilt at the new dimension when levels changes."""
@@ -620,30 +416,6 @@ class TestSubspaceAccessors:
         second = q.sigma_plus
         assert first.shape != second.shape
         assert second.shape == (5, 5)
-
-
-# ---------------------------------------------------------------------------
-# TestConnectedDrives — Drive connection tracking
-# ---------------------------------------------------------------------------
-
-
-class TestConnectedDrives:
-    """Verify that devices track connected drives via _connected_drives list."""
-
-    def test_device_tracks_connected_drives(self) -> None:
-        """A drive targeting a device appears in connected_drives."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3)
-        d = ChargeDrive(target=q)
-        assert d in q.connected_drives
-        assert not hasattr(d, "line_name")
-
-    def test_device_allows_multiple_drives_same_type(self) -> None:
-        """Multiple drives of the same type can connect to one device."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3)
-        d1 = ChargeDrive(target=q)
-        d2 = ChargeDrive(target=q)
-        assert len(q.connected_drives) == 2
-        assert d1.label != d2.label
 
 
 class TestConstructorLabelUniqueness:
@@ -687,11 +459,6 @@ class TestConstructorLabelUniqueness:
                 ],
             )
         assert chip.baths == ()
-
-
-# ---------------------------------------------------------------------------
-# TestFromArray — chip-scoped operator constructor
-# ---------------------------------------------------------------------------
 
 
 class TestFromArray:

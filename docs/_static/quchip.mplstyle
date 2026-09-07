@@ -1,0 +1,55 @@
+# quchip figure style for the documentation (vendored from quchip_identity).
+# Load with plt.style.use("<path>/quchip.mplstyle"). Palette: ink 16181C,
+# accent C92F33, blue 246FA8, muted 50565A, soft 6D7277, grid E7EAEE.
+# Set text.usetex True after loading when LaTeX with the stix2 package is
+# installed; the preamble below then typesets every label in STIX Two.
+figure.figsize: 7.2, 4.45
+figure.dpi: 120
+figure.facecolor: white
+axes.facecolor: white
+savefig.transparent: True
+savefig.dpi: 200
+savefig.bbox: standard
+axes.edgecolor: 16181C
+axes.labelcolor: 16181C
+text.color: 16181C
+axes.linewidth: 0.8
+axes.spines.top: False
+axes.spines.right: False
+axes.grid: True
+axes.grid.axis: y
+axes.axisbelow: True
+axes.prop_cycle: cycler('color', ['C92F33', '246FA8', '16181C', '6D7277'])
+axes.titlelocation: left
+axes.titlesize: 10.5
+axes.titleweight: normal
+axes.titlepad: 8
+axes.formatter.useoffset: False
+grid.color: E7EAEE
+grid.linewidth: 0.7
+font.family: serif
+font.serif: STIX Two Text
+font.size: 10.5
+mathtext.fontset: stix
+text.usetex: False
+text.latex.preamble: \usepackage[T1]{fontenc}\usepackage{stix2}
+xtick.color: 16181C
+ytick.color: 16181C
+xtick.labelcolor: 50565A
+ytick.labelcolor: 50565A
+xtick.direction: out
+ytick.direction: out
+xtick.major.width: 0.8
+ytick.major.width: 0.8
+xtick.major.size: 3.5
+ytick.major.size: 3.5
+xtick.major.pad: 5
+ytick.major.pad: 5
+lines.linewidth: 2.0
+lines.solid_capstyle: round
+lines.dash_capstyle: round
+legend.frameon: False
+legend.fontsize: 10
+legend.handlelength: 2.4
+pdf.fonttype: 42
+svg.fonttype: path

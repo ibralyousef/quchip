@@ -111,9 +111,17 @@ The [defining and inspecting a chip guide](https://docs.quchip.org/guides/defini
 
 The [dynamics guide](https://docs.quchip.org/guides/dynamics-pulses-and-readout) adds control lines and pulse sequences to the chip above. It compares short and selective Gaussian qubit drives in the full multilevel model, then simulates conditional resonator readout.
 
-![Short and long Gaussian pulses with multilevel qubit populations](https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_qubit_drive_leakage.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_qubit_drive_leakage-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_qubit_drive_leakage.png">
+  <img src="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_qubit_drive_leakage.png" alt="Short and long Gaussian pulses with multilevel qubit populations" width="720">
+</picture>
 
-![Conditional resonator IQ paths with emphasized final points](https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_dispersive_readout_iq.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_dispersive_readout_iq-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_dispersive_readout_iq.png">
+  <img src="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_dispersive_readout_iq.png" alt="Conditional resonator IQ paths with emphasized final points" width="560">
+</picture>
 
 ## Guides
 

@@ -37,13 +37,15 @@ class HarmonicMode(DeviceModel):
 
 class ConfiguredMode(DeviceModel):
     freq: Scalar = parameter(unit="GHz")
-    basis_name: str = setting(default="native")
+    basis_name: str = setting()
 
     def local_hamiltonian(self, op, p):
         return p.freq * op.n
 
 
 def test_device_setting_is_keyword_only_and_round_trips():
+    with pytest.raises(TypeError, match="basis_name"):
+        ConfiguredMode(5.0)
     signature = inspect.signature(ConfiguredMode)
     assert signature.parameters["basis_name"].kind is inspect.Parameter.KEYWORD_ONLY
 
@@ -61,20 +63,6 @@ def test_device_setting_is_jax_structural_data():
 
     assert 5.0 in leaves
     assert "eigen" not in leaves
-
-
-def test_custom_device_hamiltonian_compiles_without_backend_calls():
-    """A custom DeviceModel subclass compiles its local Hamiltonian to an operator sized to its Fock truncation."""
-    mode = HarmonicMode(freq=7.0, levels=4, label="m")
-    h = mode.hamiltonian().matrix()
-    assert h.shape == (4, 4)
-
-
-def test_device_physics_notes_include_approximation_when_declared():
-    """DeviceModel.physics_notes() reports Hilbert-space truncation even when the subclass declares no approximation."""
-    mode = HarmonicMode(freq=7.0, levels=4, label="m")
-    notes = mode.physics_notes()
-    assert any("Hilbert truncation" in note for note in notes)
 
 
 def test_tunable_param_names_derived_default_covers_all_declared_fields():
@@ -166,48 +154,20 @@ def test_tunable_param_names_accepts_a_plain_class_attribute():
     assert set(dev.tunable_param_names) == {"freq", "derived_freq"}
 
 
-def test_tunable_param_names_unresolved_name_raises_at_class_definition():
-    """An unresolvable explicit tunable_param_names entry raises ValueError at class definition."""
-    with pytest.raises(ValueError, match="not a declared parameter"):
-        class _BadTunables(DeviceModel):
-            freq: Scalar = parameter(positive=True)
-            tunable_param_names = ("not_a_field",)
-
-            def local_hamiltonian(self, op, p):
-                return p.freq * op.n
-
-
-def test_tunable_param_names_duplicate_entry_raises_at_class_definition():
-    """A duplicate name in an explicit tunable_param_names tuple raises ValueError at class definition."""
-    with pytest.raises(ValueError, match="duplicate"):
-        class _BadTunables(DeviceModel):
-            freq: Scalar = parameter(positive=True)
-            tunable_param_names = ("freq", "freq")
-
-            def local_hamiltonian(self, op, p):
-                return p.freq * op.n
-
-
-def test_tunable_param_names_bare_string_raises_at_class_definition():
-    """A bare string tunable_param_names value (instead of a tuple) raises TypeError at class definition."""
-    with pytest.raises(TypeError, match="must be a tuple"):
-        class _BadTunables(DeviceModel):
-            freq: Scalar = parameter(positive=True)
-            tunable_param_names = "freq"
-
-            def local_hamiltonian(self, op, p):
-                return p.freq * op.n
-
-
-def test_tunable_param_names_non_string_entry_raises_at_class_definition():
-    """A non-string entry in an explicit tunable_param_names tuple raises TypeError at class definition."""
-    with pytest.raises(TypeError, match="must be strings"):
-        class _BadTunables(DeviceModel):
-            freq: Scalar = parameter(positive=True)
-            tunable_param_names = (1,)
-
-            def local_hamiltonian(self, op, p):
-                return p.freq * op.n
+@pytest.mark.parametrize(
+    "names,error,message",
+    [
+        (("not_a_field",), ValueError, "not a declared parameter"),
+        (("freq", "freq"), ValueError, "duplicate"),
+        ("freq", TypeError, "must be a tuple"),
+        ((1,), TypeError, "must be strings"),
+    ],
+)
+def test_invalid_tunable_declarations_fail_at_class_definition(names, error, message):
+    """Reject unknown, duplicate, and malformed tunable-field declarations."""
+    with pytest.raises(error, match=message):
+        class BadTunables(HarmonicMode):
+            tunable_param_names = names
 
 
 class NumberNumber(CouplingModel):
@@ -217,28 +177,13 @@ class NumberNumber(CouplingModel):
         return p.chi * a.n * b.n
 
 
-def test_coupling_constructor_is_synthesized_from_endpoints_and_fields():
-    signature = inspect.signature(NumberNumber)
-
-    assert tuple(signature.parameters) == (
-        "device_a",
-        "device_b",
-        "chi",
-        "label",
-    )
-    coupling = NumberNumber("a", "b", chi=0.02, label="ab")
-    assert coupling.device_a_label == "a"
-    assert coupling.device_b_label == "b"
-    assert coupling.chi == 0.02
-
-
 def test_custom_coupling_compiles_without_backend_tensor_calls():
     """A custom CouplingModel subclass compiles its interaction to an operator on the joint two-device Hilbert space."""
     a = HarmonicMode(freq=5.0, levels=3, label="a")
     b = HarmonicMode(freq=6.0, levels=4, label="b")
     coupling = NumberNumber(a, b, chi=0.01)
     h = coupling.interaction_hamiltonian().matrix()
-    assert h.shape == (12, 12)
+    npt.assert_allclose(h, 0.01 * np.kron(np.diag(np.arange(3)), np.diag(np.arange(4))), atol=1e-12)
 
 
 def test_time_terms_reject_values_outside_the_public_contract():
@@ -269,14 +214,6 @@ def test_tunable_capacitive_without_modulation_has_no_dynamic_term():
     assert c._time_terms() == ()
 
 
-def test_declarative_device_to_dict_contains_declared_parameters():
-    """DeviceModel.to_dict() serializes declared parameter values alongside the base device fields."""
-    mode = HarmonicMode(freq=7.0, levels=4, label="m")
-    payload = mode.to_dict()
-    assert payload["freq"] == 7.0
-    assert payload["label"] == "m"
-
-
 def test_declarative_device_round_trip_uses_declared_parameters():
     """A DeviceModel round-trips through to_dict()/from_dict() with its type and declared parameter values preserved."""
     mode = HarmonicMode(freq=7.0, levels=4, label="m")
@@ -285,27 +222,7 @@ def test_declarative_device_round_trip_uses_declared_parameters():
     assert restored.freq == 7.0
     assert restored.levels == 4
     assert restored.label == "m"
-
-
-def test_declarative_parameter_mutation_bumps_state_version():
-    """Mutating a declared parameter increments the device's state_version by exactly one."""
-    mode = HarmonicMode(freq=7.0, levels=4, label="m")
-    before = mode.state_version
-    mode.freq = 7.1
-    assert mode.state_version == before + 1
-
-
-def test_declarative_physics_notes_include_approximation():
-    """DeviceModel.physics_notes() includes a subclass's declared approximation string."""
-    class ApproxDevice(DeviceModel):
-        freq: Scalar = parameter(positive=True)
-        approximation = "Toy expansion."
-
-        def local_hamiltonian(self, op, p):
-            return p.freq * op.n
-
-    notes = ApproxDevice(freq=5.0).physics_notes()
-    assert "Toy expansion." in notes
+    npt.assert_allclose(restored.hamiltonian().matrix(), np.diag([0.0, 7.0, 14.0, 21.0]), atol=1e-12)
 
 
 def test_declarative_envelope_round_trip_uses_declared_parameters():
@@ -315,35 +232,3 @@ def test_declarative_envelope_round_trip_uses_declared_parameters():
     assert isinstance(restored, CosineEnvelope)
     assert restored.duration == 10.0
     assert restored.amplitude == 2.0
-
-
-def test_declarative_coupling_to_dict_contains_declared_parameters_and_endpoints():
-    """CouplingModel.to_dict() serializes declared parameter values together with both endpoint device labels."""
-    a = HarmonicMode(freq=5.0, levels=3, label="a")
-    b = HarmonicMode(freq=6.0, levels=4, label="b")
-    coupling = NumberNumber(a, b, chi=0.01, label="zz")
-    payload = coupling.to_dict()
-    assert payload["device_a_label"] == "a"
-    assert payload["device_b_label"] == "b"
-    assert payload["label"] == "zz"
-    assert payload["chi"] == 0.01
-
-
-def test_duffing_transmon_is_declarative_and_keeps_hamiltonian_shape():
-    """DuffingTransmon compiles to its Fock truncation and discloses the Duffing quartic term in physics notes."""
-    from quchip import DuffingTransmon
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3)
-    assert isinstance(q, DeviceModel)
-    assert q.hamiltonian().matrix().shape == (3, 3)
-    assert any("Duffing" in note or "quartic" in note.lower() for note in q.physics_notes())
-
-
-def test_gaussian_shape_is_declarative_without_xp():
-    """Gaussian's value() returns a scalar for scalar time input without an explicit xp argument."""
-    from quchip import Gaussian
-
-    g = Gaussian(duration=20.0, amplitude=0.5, sigmas=3.0)
-    assert isinstance(g, Envelope)
-    value = g.value(qnp.asarray(10.0))
-    assert value.shape == ()

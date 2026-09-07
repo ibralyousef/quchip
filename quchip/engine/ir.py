@@ -16,8 +16,8 @@ defines four families of immutable, JAX-pytree-friendly types:
    dense / CSR / DIA layouts plus subsystem metadata. Backends convert
    to and from this format.
 
-3. Hamiltonian terms — :class:`StaticTerm`, :class:`DynamicTerm`, and
-   their :class:`EngineResult` container.
+3. Resolved open-system physics — :class:`ResolvedSLH` plus
+   solve-applied Hamiltonian terms in :class:`EngineResult`.
 
 4. Solve requests — :class:`SolveProblem` and :class:`SolveBatch`, the
    frozen hand-offs to backends. ``backend`` selection is chip-owned
@@ -37,16 +37,21 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeAlias, cast
 import jax.tree_util as jtu
 import numpy as np
 
+from quchip.engine.reference import ReferencePlane
 from quchip.utils.jax_utils import (
     array_namespace,
     contains_tracer,
     is_jax_namespace,
     maybe_concrete_scalar,
+    select_array_module,
 )
 from quchip.utils.constants import TWO_PI
 
 if TYPE_CHECKING:
+    from quchip.chip.dressing import BareProductReference
     from quchip.control.envelopes import Envelope
+    from quchip.control.signal import SignalKey
+    from quchip.engine.frames import FramePlan
     from quchip.declarative.dynamics import TimeCoefficient
     from quchip.declarative.expr import PhysicsExpr
     from quchip.devices.base import BaseDevice
@@ -464,6 +469,10 @@ class ScalarModulation:
 
     signal: SignalProgram
 
+    def __post_init__(self) -> None:
+        # Reconstruct registered envelopes/coefficients as well as signal nodes.
+        object.__setattr__(self, "signal", jtu.tree_map(_capture_solve_input, self.signal))
+
 
 jtu.register_pytree_node(
     ScalarModulation,
@@ -496,6 +505,20 @@ def signal_children(node: Any) -> tuple:
     if isinstance(node, SignalNode):
         return node.signal_children()
     return ()
+
+
+def signal_window_bounds(signal: Any, shift: Any = 0.0) -> list[tuple[Any, Any]]:
+    """Return absolute window edges, retaining native values and batch axes.
+
+    Enclosing shifts move the clock of every descendant window. Collecting
+    structure requires no numerical decisions, so timing stays differentiable.
+    """
+    if isinstance(signal, Shift):
+        return signal_window_bounds(signal.child, shift + signal.delta_t)
+    bounds = [(signal.start + shift, signal.stop + shift)] if isinstance(signal, Window) else []
+    for child in signal_children(signal):
+        bounds.extend(signal_window_bounds(child, shift))
+    return bounds
 
 
 def evaluate_signal_program(signal: SignalProgram, t: Any, *, xp: Any | None = None) -> Any:
@@ -691,6 +714,8 @@ class CanonicalOperator:
                 f"subsystem_labels length {len(self.subsystem_labels)} does not match dims length {len(self.dims)}"
             )
         self._validate_payload()
+        for name in ("values", "indices", "indptr", "offsets"):
+            object.__setattr__(self, name, _capture_solve_input(getattr(self, name)))
 
     def _validate_payload(self) -> None:
         if self.layout == "dense":
@@ -818,6 +843,14 @@ class CanonicalOperator:
             dims=self.dims if dims is None else dims,
             basis=self.basis if basis is None else basis,
             subsystem_labels=self.subsystem_labels if subsystem_labels is None else subsystem_labels,
+            tag=self.tag if tag is None else tag,
+        )
+
+    def scaled(self, factor: Any, *, tag: str | None = None) -> "CanonicalOperator":
+        """Return a scalar multiple without changing the operator layout."""
+        return replace(
+            self,
+            values=self.values * factor,
             tag=self.tag if tag is None else tag,
         )
 
@@ -954,7 +987,9 @@ class CanonicalOperator:
 
 # ── Hamiltonian Terms ───────────────────────────────────────────────
 
-TermOrigin: TypeAlias = Literal["device", "coupling", "drive", "crosstalk", "flux", "port"]
+TermOrigin: TypeAlias = Literal[
+    "device", "coupling", "drive", "crosstalk", "flux", "port", "network"
+]
 
 
 @dataclass(frozen=True)
@@ -993,13 +1028,20 @@ class DynamicTerm:
 
 @dataclass(frozen=True)
 class CollapseTerm:
-    """Backend-neutral Lindblad operator and its separate rate."""
+    """Backend-neutral Lindblad channel, optionally exposed as a port."""
 
     operator: CanonicalOperator
     rate: Any
     source: str
     channel: str
     parameter_paths: tuple[str, ...] = ()
+    phase: Any = None
+    frame_frequency: Any = None
+
+    @property
+    def label(self) -> str:
+        """Return the input-output label for an accessible channel."""
+        return self.source
 
     def latex(self) -> str:
         """Render this collapse channel as an opaque named operator."""
@@ -1024,17 +1066,190 @@ class CollapseTerm:
         return rf"\hat L_{{{self.source},{self.channel}}}{suffix}"
 
 
+ChannelAccess: TypeAlias = Literal["exposed", "hidden"]
+
+
 @dataclass(frozen=True)
-class PortTerm:
-    """Resolved input-output channel before the ``sqrt(rate)`` scaling."""
+class HamiltonianProgram:
+    """Resolved static and time-dependent Hamiltonian contributions."""
 
-    operator: CanonicalOperator
-    rate: Any
-    phase: Any
-    frame_frequency: Any
-    label: str
-    parameter_paths: tuple[str, ...] = ()
+    static_terms: tuple[StaticTerm, ...] = ()
+    dynamic_terms: tuple[DynamicTerm, ...] = ()
 
+
+@dataclass(frozen=True)
+class SLHChannel:
+    """One resolved Markov channel and its boundary accessibility."""
+
+    key: str
+    accessibility: ChannelAccess
+    collapse: CollapseTerm
+    coupling_operator: CanonicalOperator | None = None
+    reference: ReferencePlane = field(default_factory=ReferencePlane)
+
+    @property
+    def carrier(self) -> Any:
+        """Return this channel's stationary carrier in GHz, zero when unframed."""
+        return 0.0 if self.collapse.frame_frequency is None else self.collapse.frame_frequency
+
+    @property
+    def coupling(self) -> CanonicalOperator:
+        """Return the physical coupling operator for this channel."""
+        if self.coupling_operator is not None:
+            return self.coupling_operator
+        phase = 0.0 if self.collapse.phase is None else self.collapse.phase
+        prefer_jax = contains_tracer((self.collapse.rate, phase)) or any(
+            is_jax_namespace(array_namespace(value))
+            for value in (self.collapse.rate, phase)
+        )
+        xp = select_array_module(prefer_jax)
+        return self.collapse.operator.scaled(
+            xp.exp(1j * xp.asarray(phase)) * xp.sqrt(xp.asarray(self.collapse.rate)),
+            tag=f"slh:{self.key}",
+        )
+
+    @property
+    def collapse_term(self) -> CollapseTerm:
+        """Return the solver-facing collapse record for this resolved channel."""
+        if self.coupling_operator is None:
+            return self.collapse
+        return replace(
+            self.collapse,
+            operator=self.coupling_operator,
+            rate=1.0,
+            source=self.key,
+            channel="resolved_slh",
+            phase=None,
+        )
+
+
+@dataclass(frozen=True)
+class ResolvedSLH:
+    """Immutable, input-free normal form for resolved Markovian physics."""
+
+    scattering: Any
+    hamiltonian: HamiltonianProgram
+    channels: tuple[SLHChannel, ...] = ()
+    support: Any = None
+
+    @property
+    def has_network_hamiltonian(self) -> bool:
+        """Whether connection resolution generated coherent Hamiltonian terms."""
+        return any(term.origin == "network" for term in self.hamiltonian.static_terms)
+
+    def __post_init__(self) -> None:
+        size = len(self.channels)
+        support = (
+            np.ones((size, size), dtype=bool)
+            if self.support is None
+            else np.array(self.support, dtype=bool, copy=True)
+        )
+        if support.shape != (size, size):
+            raise ValueError(
+                f"ResolvedSLH support must be one boolean per channel pair; got {support.shape} for {size} channels."
+            )
+        support.setflags(write=False)
+        object.__setattr__(self, "support", support)
+        scattering = self.scattering
+        if isinstance(scattering, np.ndarray) or not hasattr(scattering, "shape"):
+            scattering = np.array(scattering, dtype=complex, copy=True)
+            scattering.setflags(write=False)
+            object.__setattr__(self, "scattering", scattering)
+        shape = tuple(scattering.shape)
+        expected_shape = (len(self.channels), len(self.channels))
+        if shape != expected_shape:
+            raise ValueError(
+                "ResolvedSLH scattering must have one row and column per channel; "
+                f"got {shape} for {len(self.channels)} channels."
+            )
+
+        keys = tuple(channel.key for channel in self.channels)
+        if len(set(keys)) != len(keys):
+            raise ValueError("ResolvedSLH channel keys must be unique.")
+
+        seen_hidden = False
+        for channel in self.channels:
+            if channel.accessibility == "hidden":
+                seen_hidden = True
+            elif channel.accessibility == "exposed" and seen_hidden:
+                raise ValueError("ResolvedSLH exposed channels must appear before hidden channels.")
+
+        if not contains_tracer(scattering):
+            concrete = np.asarray(scattering, dtype=complex)
+            identity = np.eye(len(self.channels), dtype=complex)
+            if not np.allclose(concrete.conj().T @ concrete, identity, rtol=1e-10, atol=1e-12):
+                raise ValueError("ResolvedSLH concrete scattering must be unitary.")
+
+    @classmethod
+    def from_terms(
+        cls,
+        *,
+        static_terms: tuple[StaticTerm, ...],
+        dynamic_terms: tuple[DynamicTerm, ...],
+        collapse_terms: tuple[CollapseTerm, ...],
+    ) -> "ResolvedSLH":
+        """Build the current identity-scattering model from engine terms."""
+        exposed: list[SLHChannel] = []
+        hidden: list[SLHChannel] = []
+        key_counts: dict[str, int] = {}
+        for collapse in collapse_terms:
+            accessibility: ChannelAccess = (
+                "exposed" if collapse.frame_frequency is not None else "hidden"
+            )
+            prefix = "external" if accessibility == "exposed" else "hidden"
+            base_key = f"{prefix}.{collapse.source}.{collapse.channel}"
+            occurrence = key_counts.get(base_key, 0) + 1
+            key_counts[base_key] = occurrence
+            channel = SLHChannel(
+                key=base_key if occurrence == 1 else f"{base_key}#{occurrence}",
+                accessibility=accessibility,
+                collapse=collapse,
+            )
+            (exposed if accessibility == "exposed" else hidden).append(channel)
+        channels = tuple((*exposed, *hidden))
+        return cls(
+            scattering=np.eye(len(channels), dtype=complex),
+            hamiltonian=HamiltonianProgram(
+                static_terms=tuple(static_terms),
+                dynamic_terms=tuple(dynamic_terms),
+            ),
+            channels=channels,
+            support=np.eye(len(channels), dtype=bool),
+        )
+
+    @property
+    def S(self) -> Any:
+        """Return the scalar scattering matrix."""
+        return self.scattering
+
+    def feeds(self, output_index: int, input_index: int) -> bool:
+        """Return whether input channel ``input_index`` structurally reaches output ``output_index``."""
+        return bool(self.support[output_index, input_index])
+
+    @property
+    def L(self) -> tuple[CanonicalOperator, ...]:
+        """Return physical coupling operators in channel order."""
+        return tuple(channel.coupling for channel in self.channels)
+
+    @property
+    def H(self) -> HamiltonianProgram:
+        """Return the resolved Hamiltonian program."""
+        return self.hamiltonian
+
+    @property
+    def external_channels(self) -> tuple[SLHChannel, ...]:
+        """Return the exposed boundary channels."""
+        return tuple(channel for channel in self.channels if channel.accessibility == "exposed")
+
+    @property
+    def hidden_channels(self) -> tuple[SLHChannel, ...]:
+        """Return channels traced out by the modeled experiment."""
+        return tuple(channel for channel in self.channels if channel.accessibility == "hidden")
+
+    @property
+    def collapse_terms(self) -> tuple[CollapseTerm, ...]:
+        """Return solver-facing collapse records in resolved channel order."""
+        return tuple(channel.collapse_term for channel in self.channels)
 
 @dataclass(frozen=True)
 class DroppedTerm:
@@ -1089,8 +1304,42 @@ class DroppedTerm:
 
 
 @dataclass(frozen=True)
+class BoundCoherentInput:
+    """One solve-bound incident field, retained outside input-free SLH.
+
+    ``reference_beta`` is the signal scheduled at the authored external
+    reference plane. ``beta`` is shifted by the total duration of the exposure's
+    inbound reference run and is the field composed with the Markov boundary.
+    """
+
+    exposure: str
+    source_label: str
+    beta: SignalProgram
+    reference_beta: SignalProgram
+
+    def __post_init__(self) -> None:
+        for name in ("beta", "reference_beta"):
+            object.__setattr__(self, name, jtu.tree_map(_capture_solve_input, getattr(self, name)))
+
+
+@dataclass(frozen=True)
+class _ResolvedDressingContext:
+    """Frozen basis/backend data needed to analyze one resolved snapshot.
+
+    This is deliberately private engine metadata: backends still consume the
+    canonical operators in :class:`EngineResult`, while ``dress()`` uses the
+    backend that created the snapshot to preserve native eigenstate objects.
+    Local reference factors come from captured basis resolution, so later
+    mutation of the source chip cannot change their meaning.
+    """
+
+    backend: Any = field(repr=False, compare=False)
+    reference: BareProductReference = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
 class EngineResult:
-    """Backend-agnostic time-dependent Hamiltonian passed to backends.
+    """Backend-neutral resolved physics passed to backends.
 
     Represents
 
@@ -1098,7 +1347,10 @@ class EngineResult:
         H(t) \\;=\\; \\sum_s c_s \\, O_s
                    \\;+\\; \\sum_d O_d \\, f_d(t)
 
-    where each static / dynamic operator already carries 2π and each
+    The immutable ``slh`` value is the input-free Markov model. Scheduled
+    controls and solve-bound coherent-source Hamiltonians live in
+    ``applied_hamiltonian``; the term properties combine both programs for
+    existing backend consumers. Each static / dynamic operator already carries 2π and each
     ``f_d(t)`` is a :class:`ScalarModulation` over a
     :class:`SignalProgram` AST. ``metadata`` carries advisory solver
     hints (e.g. ``max_carrier_freq_ghz``, ``max_step_ns``); a backend may
@@ -1110,17 +1362,85 @@ class EngineResult:
     etc.) — advisory metadata for auditing, never consumed by backends.
     """
 
-    static_terms: tuple[StaticTerm, ...]
-    dynamic_terms: tuple[DynamicTerm, ...]
+    slh: ResolvedSLH
+    applied_hamiltonian: HamiltonianProgram = field(default_factory=HamiltonianProgram)
+    coherent_inputs: tuple[BoundCoherentInput, ...] = ()
     dims: tuple[int, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
     dropped_terms: tuple[DroppedTerm, ...] = ()
-    collapse_terms: tuple[CollapseTerm, ...] = ()
-    port_terms: tuple[PortTerm, ...] = ()
     bases: Mapping[str, Any] = field(default_factory=dict)
     authored: Any = None
     resolved_frame: Any = None
     approximation: Any = None
+    dynamical_supports: tuple[tuple[str, ...], ...] = ()
+    dissipation: bool = True
+    _dressing_context: _ResolvedDressingContext | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    @property
+    def static_terms(self) -> tuple[StaticTerm, ...]:
+        """Return resolved and solve-applied static Hamiltonian terms."""
+        return self.slh.H.static_terms + self.applied_hamiltonian.static_terms
+
+    @property
+    def dynamic_terms(self) -> tuple[DynamicTerm, ...]:
+        """Return resolved and solve-applied time-dependent Hamiltonian terms."""
+        return self.slh.H.dynamic_terms + self.applied_hamiltonian.dynamic_terms
+
+    @property
+    def collapse_terms(self) -> tuple[CollapseTerm, ...]:
+        """Return active collapse records in SLH channel order."""
+        if not self.dissipation:
+            return ()
+        return tuple(channel.collapse_term for channel in self.slh.channels)
+
+    def dress(
+        self,
+        *,
+        at_time: Any | None = None,
+        overlap_threshold: float = 0.5,
+        labeling: str = "DE",
+    ) -> Any:
+        """Dress this resolved Hamiltonian, optionally at one instant.
+
+        Unlike :meth:`Chip.dress <quchip.Chip.dress>`, this method analyzes
+        the selected frame and approximation stored in this snapshot. A
+        snapshot carrying dynamic Hamiltonian terms requires ``at_time``;
+        the result is an instantaneous eigensystem, not a Floquet analysis.
+        """
+        from quchip.chip.analysis import dress_engine_result
+
+        return dress_engine_result(
+            self,
+            at_time=at_time,
+            overlap_threshold=overlap_threshold,
+            labeling=labeling,
+        )
+
+    def with_applied_hamiltonian_terms(
+        self,
+        *,
+        static_terms: tuple[StaticTerm, ...] | None = None,
+        dynamic_terms: tuple[DynamicTerm, ...] | None = None,
+    ) -> "EngineResult":
+        """Return a copy with solve-bound Hamiltonian terms replaced."""
+        applied = replace(
+            self.applied_hamiltonian,
+            static_terms=(
+                self.applied_hamiltonian.static_terms
+                if static_terms is None
+                else tuple(static_terms)
+            ),
+            dynamic_terms=(
+                self.applied_hamiltonian.dynamic_terms
+                if dynamic_terms is None
+                else tuple(dynamic_terms)
+            ),
+        )
+        return replace(self, applied_hamiltonian=applied)
 
     def _contains_tracer(self) -> bool:
         """Return whether any value-bearing field belongs to a JAX trace.
@@ -1132,7 +1452,6 @@ class EngineResult:
             tuple(term.operator for term in self.static_terms)
             + tuple(term.operator for term in self.dynamic_terms)
             + tuple(term.operator for term in self.collapse_terms)
-            + tuple(term.operator for term in self.port_terms)
         )
         operator_payloads = tuple(
             (
@@ -1144,7 +1463,9 @@ class EngineResult:
             for operator in operators
         )
         basis_payloads = tuple(
-            (record.vectors, record.energies, record.energy_vectors)
+            (record.vectors, record.energies, record.energy_vectors,
+             record.authored_hamiltonian.numeric_values()
+             if hasattr(record.authored_hamiltonian, "numeric_values") else record.authored_hamiltonian)
             for record in self.bases.values()
         )
         authored_values = (
@@ -1157,14 +1478,17 @@ class EngineResult:
                 operator_payloads,
                 tuple(term.coefficient for term in self.static_terms),
                 tuple(term.time_dependence for term in self.dynamic_terms),
-                tuple(term.rate for term in self.collapse_terms),
                 tuple(
                     (term.rate, term.phase, term.frame_frequency)
-                    for term in self.port_terms
+                    for term in self.collapse_terms
                 ),
                 tuple(
                     (term.amplitude, term.frequency)
                     for term in self.dropped_terms
+                ),
+                tuple(
+                    (item.beta, item.reference_beta)
+                    for item in self.coherent_inputs
                 ),
                 basis_payloads,
                 authored_values,
@@ -1172,6 +1496,13 @@ class EngineResult:
                 self.metadata,
             )
         )
+
+    @property
+    def port_terms(self) -> tuple[CollapseTerm, ...]:
+        """Return active collapse channels that cross an accessible port boundary."""
+        if not self.dissipation:
+            return ()
+        return tuple(channel.collapse_term for channel in self.slh.external_channels)
 
     def hamiltonian(self) -> PhysicsExpr:
         """Return the exact canonical Hamiltonian as an inspectable expression.
@@ -1296,7 +1627,8 @@ class HamiltonianTemplate:
     * ``drive_terms`` — pre-embedded, 2π-scaled drive bands
       (:class:`~quchip.engine.assembly.CompiledDriveTerm`) ready
       for per-variant reinstantiation.
-    * ``collapse_terms`` — canonical component-owned Lindblad operators.
+    * ``collapse_terms`` — canonical Lindblad channels, including accessible
+      port metadata where present.
     * ``reference_drive_ops`` — the structural yardstick used by
       :func:`~quchip.engine.assembly.instantiate_engine_result`
       to reject drive-ops that change the template's skeleton (device,
@@ -1310,10 +1642,13 @@ class HamiltonianTemplate:
     resolved_frame: Any  # ResolvedFrame
     approximation: Any
     dims: tuple[int, ...]
+    slh: Any  # ResolvedSLH
     static_terms: tuple[Any, ...] = ()              # tuple[StaticTerm, ...]
     invariant_dynamic_terms: tuple[Any, ...] = ()   # tuple[DynamicTerm, ...]
     drive_terms: tuple[Any, ...] = ()               # tuple[assembly.CompiledDriveTerm, ...]
+    coherent_terms: tuple[Any, ...] = ()            # tuple[assembly.CompiledCoherentTerm, ...]
     reference_drive_ops: tuple[Any, ...] = ()       # tuple[DriveOp, ...]
+    delivered_keys: frozenset[SignalKey] = frozenset()
     dropped_terms: tuple[Any, ...] = ()             # tuple[DroppedTerm, ...]
     #: Single-tone weight-zero bands dropped structurally under RWA during engine assembly.
     #: time (:func:`~quchip.engine.assembly._compile_drive_terms`).
@@ -1329,9 +1664,10 @@ class HamiltonianTemplate:
     #: variant-specific carrier-frequency hint is recomputed per instantiation.
     static_spectral_bound_ghz: float | None = None
     collapse_terms: tuple[Any, ...] = ()            # tuple[CollapseTerm, ...]
-    port_terms: tuple[Any, ...] = ()                # tuple[PortTerm, ...]
     bases: Mapping[str, Any] = field(default_factory=dict)
     authored: Any = None
+    dressing_context: Any = None
+    dynamical_supports: tuple[tuple[str, ...], ...] = ()
 
 
 # ── Frame Types ─────────────────────────────────────────────────────
@@ -1341,7 +1677,7 @@ class HamiltonianTemplate:
 ScalarLike = int | float
 
 if TYPE_CHECKING:
-    FrameSpec: TypeAlias = Literal["lab", "rotating"] | ScalarLike | dict[str | BaseDevice, ScalarLike]
+    FrameSpec: TypeAlias = Literal["lab", "rotating", "auto"] | ScalarLike | dict[str | BaseDevice, ScalarLike]
 
 
 def _is_scalar_like(value: Any) -> bool:
@@ -1366,13 +1702,16 @@ class ResolvedFrame:
       :attr:`~quchip.devices.base.BaseDevice.reference_freq`); it
       merely defaults to the dressed drive frequency when not set
       explicitly.
-    * ``mode`` — one of ``"lab"`` / ``"rotating"`` / ``"float"`` /
-      ``"dict"``.
+    * ``mode`` — one of ``"lab"`` / ``"rotating"`` / ``"auto"`` /
+      ``"float"`` / ``"dict"``.
+    * ``plan`` — the :class:`~quchip.engine.frames.FramePlan` selected for
+      ``"auto"``, or ``None`` for an explicit frame.
     """
 
     frequencies: dict[str, Any]
     demod_freqs: dict[str, Any]
     mode: str
+    plan: FramePlan | None = None
 
 
 # ── Solve Problem ───────────────────────────────────────────────────
@@ -1393,6 +1732,9 @@ def _reject_backend_option(options: dict[str, Any], *, cls_name: str) -> dict[st
     return dict(options)
 
 
+StateStorage: TypeAlias = Literal["all", "final", "none"]
+
+
 @dataclass(frozen=True)
 class SolveProblem:
     """Immutable simulation request handed from the chip pipeline to a backend.
@@ -1400,7 +1742,7 @@ class SolveProblem:
     Bundles the :class:`EngineResult` (Hamiltonian and collapse terms), an
     ``initial_state``, solver time grid, decomposed
     ``e_ops`` + their :class:`BandMeta`, the :class:`ResolvedFrame`, and
-    solver options. ``chip`` owns backend selection, so ``options`` must
+    solver options. Backend selection is captured at construction, so ``options`` must
     not contain a ``"backend"`` key (enforced in ``__post_init__``).
     ``e_ops_meta`` is the metadata observable reconstruction uses to recombine flattened
     band expectations back into dict-keyed observables.
@@ -1415,9 +1757,91 @@ class SolveProblem:
     resolved_frame: Any = None
     solver: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
+    truncation: Any = field(default=None, repr=False, compare=False, kw_only=True)
+    states: StateStorage = field(default="all", kw_only=True)
+    backend: Any = field(default=None, repr=False, compare=False, kw_only=True)
+    device_info: tuple[tuple[str, bool], ...] = field(default=(), kw_only=True)
+
+    @property
+    def dissipation(self) -> bool:
+        """Whether this calculation includes the resolved dissipators."""
+        return self.engine_result.dissipation
+
+    def solver_name(self, backend: Any) -> str:
+        """Return the selected solver name.
+
+        An explicit ``solver`` takes precedence, but ``sesolve`` is rejected for a
+        density matrix. Otherwise select ``sesolve`` only for a ket with no collapse
+        terms; select ``mesolve`` for a density matrix or any problem with collapse terms.
+        """
+        is_ket = backend.is_ket(self.initial_state)
+        if self.solver is not None:
+            if self.solver == "sesolve" and not is_ket:
+                raise ValueError("sesolve evolves kets only; a density matrix needs mesolve.")
+            if self.solver == "sesolve" and self.engine_result.collapse_terms:
+                raise ValueError(
+                    "sesolve cannot include dissipation; use mesolve or explicitly build with dissipation=False."
+                )
+            return self.solver
+        return "sesolve" if is_ket and not self.engine_result.collapse_terms else "mesolve"
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "options", _reject_backend_option(self.options, cls_name="SolveProblem"))
+        if self.solver not in (None, "sesolve", "mesolve"):
+            raise ValueError(f"Unknown solver {self.solver!r}; choose 'sesolve' or 'mesolve'.")
+        if not isinstance(self.states, str) or self.states not in ("all", "final", "none"):
+            raise ValueError('states must be "all", "final", or "none".')
+        options = _reject_backend_option(self.options, cls_name="SolveProblem")
+        if "t0" in options:
+            raise ValueError("The initial-state time is tlist[0]; set tlist instead of option 't0'.")
+        if {"store_states", "store_final_state"} & options.keys():
+            raise ValueError('Use states="all"|"final"|"none" instead of storage flags in options.')
+        object.__setattr__(self, "options", _capture_solve_input(options))
+        object.__setattr__(self, "tlist", _capture_solve_input(self.tlist))
+        object.__setattr__(self, "e_ops", _capture_solve_input(self.e_ops))
+        if self.backend is None and self.chip is not None:
+            object.__setattr__(self, "backend", self.chip.backend)
+        if not self.device_info:
+            object.__setattr__(self, "device_info", tuple(
+                (device.label, device.computational) for device in getattr(self.chip, "devices", ())
+            ))
+        if self.truncation is None and self.chip is not None and isinstance(self.engine_result, EngineResult):
+            from quchip.engine.truncation import capture_truncation
+
+            object.__setattr__(self, "truncation", capture_truncation(self.chip, self.engine_result))
+        copy_state = getattr(self.initial_state, "copy", None)
+        if copy_state is not None:
+            object.__setattr__(self, "initial_state", copy_state())
+
+
+def _capture_solve_input(value: Any) -> Any:
+    """Copy mutable input containers and NumPy buffers, retaining native JAX values."""
+    from quchip.utils.values import copy_value
+
+    return copy_value(value, readonly=True)
+
+
+@dataclass(frozen=True)
+class LinearResponseProblem:
+    """Passive-linear input-output request handed to a backend.
+
+    ``hamiltonian`` is the number-conserving mode matrix in angular units,
+    ``couplings`` stacks the channel rows of ``L = C a``, and ``scattering``
+    is the complete instantaneous SLH matrix including hidden vacuum and loss
+    channels. Frequencies remain ordinary GHz at the public boundary.
+    ``plane_indices`` selects the external channels used as matrix rows and
+    columns. ``inbound_transfer`` and ``outbound_transfer`` contain the
+    per-frequency reference factors for each external channel. Backends return
+    the undecorated Markov response; the engine applies both factors.
+    """
+
+    frequencies: Any
+    mode_labels: tuple[str, ...]
+    hamiltonian: Any
+    couplings: Any
+    scattering: Any
+    plane_indices: tuple[int, ...]
+    inbound_transfer: Any
+    outbound_transfer: Any
 
 
 @dataclass(frozen=True)
@@ -1430,13 +1854,22 @@ class SteadyStateProblem:
     e_ops_meta: Any = None
     resolved_frame: Any = None
     options: dict[str, Any] = field(default_factory=dict)
+    backend: Any = field(default=None, repr=False, compare=False, kw_only=True)
+    device_info: tuple[tuple[str, bool], ...] = field(default=(), kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "options",
-            _reject_backend_option(self.options, cls_name="SteadyStateProblem"),
+            _capture_solve_input(_reject_backend_option(self.options, cls_name="SteadyStateProblem")),
         )
+        object.__setattr__(self, "e_ops", _capture_solve_input(self.e_ops))
+        if self.backend is None:
+            object.__setattr__(self, "backend", self.chip.backend)
+        if not self.device_info:
+            object.__setattr__(self, "device_info", tuple(
+                (device.label, device.computational) for device in self.chip.devices
+            ))
 
 
 @dataclass(frozen=True)
@@ -1448,14 +1881,19 @@ class SolveBatch:
     params: Any = None
     shape: tuple[int, ...] = ()
     axes: tuple[tuple[str, Any], ...] = ()
+    # Original collection coordinates for errors raised during compiled execution.
+    _failure_context: tuple[tuple[int, dict[str, Any]], ...] = field(default=(), repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "axes", _capture_solve_input(self.axes))
         if not self.problems:
             return
         reference = self.problems[0]
         expected_dynamic = len(reference.engine_result.dynamic_terms)
         expected_dims = tuple(reference.engine_result.dims)
         for index, problem in enumerate(self.problems):
+            if problem.backend is not reference.backend:
+                raise ValueError("Every SolveProblem in a SolveBatch must share a captured backend.")
             actual_dynamic = len(problem.engine_result.dynamic_terms)
             if actual_dynamic != expected_dynamic:
                 raise ValueError(
@@ -1466,16 +1904,18 @@ class SolveBatch:
                     f"SolveProblem {index} has dims {tuple(problem.engine_result.dims)}; "
                     f"expected {expected_dims}. Structural settings cannot vary in a SolveBatch."
                 )
-            if problem.solver != reference.solver or problem.options != reference.options:
+            if (problem.solver != reference.solver or problem.options != reference.options
+                    or problem.states != reference.states):
                 raise ValueError("Every SolveProblem in a SolveBatch must share solver options.")
-            if problem.tlist is not reference.tlist:
-                if contains_tracer((problem.tlist, reference.tlist)):
-                    raise ValueError("Every SolveProblem in a SolveBatch must share one traced time grid.")
-                if not np.array_equal(np.asarray(problem.tlist), np.asarray(reference.tlist)):
-                    raise ValueError(
-                        "Every SolveProblem in a SolveBatch must share one time grid; "
-                        "use solve_many() for heterogeneous grids."
-                    )
+            if (problem.tlist is not reference.tlist
+                    and not contains_tracer((problem.tlist, reference.tlist))
+                    and np.array_equal(np.asarray(problem.tlist), np.asarray(reference.tlist))):
+                object.__setattr__(problem, "tlist", reference.tlist)
+
+    @property
+    def has_shared_tlist(self) -> bool:
+        """Whether every point has the same captured time grid."""
+        return all(problem.tlist is self.problems[0].tlist for problem in self.problems)
 
     @property
     def batch_size(self) -> int:
@@ -1487,6 +1927,8 @@ class SolveBatch:
 
     @property
     def tlist(self) -> Any:
+        if not self.has_shared_tlist:
+            raise ValueError("Batch points have different time grids; inspect each problem's tlist.")
         return self.problems[0].tlist
 
     def signals_for(self, slot: int) -> tuple[ScalarModulation, ...]:
@@ -1506,7 +1948,7 @@ class SolveBatch:
     def __getitem__(self, item: Any) -> Any:
         if isinstance(item, slice):
             return [self.element(index) for index in range(*item.indices(self.batch_size))]
-        return self.element(int(item))
+        return self.element(item)
 
     def params_at(self, point: int | tuple[int, ...]) -> dict[str, Any]:
         """Return sweep values at one grid coordinate."""
@@ -1516,7 +1958,7 @@ class SolveBatch:
             if point not in (0, ()):
                 raise IndexError(f"Scalar batch only accepts 0 or (), got {point!r}")
             return dict(self.params.item().items())
-        coordinate = point if isinstance(point, tuple) else (point,)
+        coordinate = point if isinstance(point, tuple) else np.unravel_index(point, self.shape)
         return dict(self.params[coordinate].items())
 
     def element(self, index: int) -> SolveProblem:
@@ -1536,10 +1978,9 @@ class DriveOp:
     equipment (e.g. ``"charge_0"``). ``target_label`` resolves in the
     chip's device or coupling label space.
 
-    The pulse window ``[start_time, start_time + envelope.duration]``
-    must overlap the solve ``tlist`` with positive measure — a window
-    that only touches a ``tlist`` endpoint contributes no evolution and
-    is rejected (:func:`~quchip.engine.problem.prepare_solve_problem_context`).
+    The pulse window retains its absolute scheduled time. A solve may
+    select a partial interval; a window wholly outside that interval or
+    touching only an endpoint contributes no evolution.
     """
 
     target_label: str
@@ -1548,3 +1989,32 @@ class DriveOp:
     start_time: float = 0.0
     phase_offset: float = 0.0
     drive_label: str = ""
+
+
+@dataclass(frozen=True)
+class CoherentOp:
+    """Coherent field operation scheduled on an external SLH exposure."""
+
+    coherent_input: Any
+    envelope: Envelope
+    freq: float | None = None
+    start_time: float = 0.0
+    phase_offset: float = 0.0
+
+    @property
+    def exposure(self) -> str:
+        """Return the external exposure receiving this incident field."""
+        return self.coherent_input.exposure
+
+    @property
+    def target_label(self) -> str:
+        """Alias the exposure for common solve-window diagnostics."""
+        return self.exposure
+
+    @property
+    def drive_label(self) -> str:
+        """Alias the endpoint label for common scheduling diagnostics."""
+        return self.coherent_input.label
+
+
+ControlOp: TypeAlias = DriveOp | CoherentOp

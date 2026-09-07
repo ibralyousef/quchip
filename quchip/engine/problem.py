@@ -21,17 +21,22 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from quchip.approximations import Approximation
+from quchip.backend import BatchSolveError
+from quchip.chip.states import materialize_state_spec
 from quchip.engine.ir import (
-    DriveOp,
+    ControlOp,
     EngineResult,
     ScalarModulation,
     SolveBatch,
     SolveProblem,
+    StateStorage,
     _aggregate_batch_metadata,
 )
 from quchip.engine.assembly import build_engine_result
+from quchip.engine.frames import resolve_for_operations
 from quchip.engine.observables import decompose_eops
-from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar
+from quchip.engine.sampling import AutomaticTimeGrid, sample_problems
+from quchip.utils.jax_utils import contains_tracer
 
 if TYPE_CHECKING:
     from quchip.chip.chip import Chip
@@ -48,36 +53,15 @@ class SolveProblemContext:
     chip: Chip
     tlist: Any
     e_ops: Any
-    e_ops_meta: Any
     resolved_frame: Any
     approximation: Approximation
     _base_result: EngineResult | None
     solver: str | None
     options: dict[str, Any]
-    default_initial_state: Any
+    states: StateStorage = "all"
+    dissipation: bool = True
+    automatic_sampling: bool = False
 
-    @classmethod
-    def from_problem(cls, ref: SolveProblem) -> "SolveProblemContext":
-        """Reconstruct a shared context from an existing :class:`SolveProblem`.
-
-        Mirrors :meth:`SolveBatch.element`: it lifts a single concrete problem
-        back into the context shape so a homogeneous group of problems can be
-        re-batched. The reference problem's already-built ``initial_state``
-        becomes the default state specification, and ``options`` is
-        defensively copied.
-        """
-        return cls(
-            chip=ref.chip,
-            tlist=ref.tlist,
-            e_ops=ref.e_ops,
-            e_ops_meta=ref.e_ops_meta,
-            resolved_frame=ref.resolved_frame,
-            approximation=ref.engine_result.approximation,
-            _base_result=None,
-            solver=ref.solver,
-            options=dict(ref.options),
-            default_initial_state=ref.initial_state,
-        )
 
 
 def _validate_tlist(tlist: Any) -> None:
@@ -103,36 +87,6 @@ def _validate_tlist(tlist: Any) -> None:
         raise ValueError("tlist must be strictly increasing.")
 
 
-def _validate_drive_op_window(drive_op: DriveOp, tlist: Any) -> None:
-    """Require *drive_op*'s pulse window to overlap ``tlist`` with positive measure.
-
-    Raises ``ValueError`` unless
-    ``start_time + envelope.duration > tlist[0]`` and
-    ``start_time < tlist[-1]`` -- a window that only touches an endpoint
-    contributes no evolution. Concrete-only: skipped when the drive's
-    ``start_time``/``duration`` or either ``tlist`` endpoint is traced.
-    """
-    start = maybe_concrete_scalar(drive_op.start_time)
-    duration = maybe_concrete_scalar(drive_op.envelope.duration)
-    t_start = maybe_concrete_scalar(tlist[0])
-    t_stop = maybe_concrete_scalar(tlist[-1])
-    if start is None or duration is None or t_start is None or t_stop is None:
-        return
-    stop = start + duration
-    if not (stop > t_start and start < t_stop):
-        raise ValueError(
-            f"Drive '{drive_op.drive_label}' on target '{drive_op.target_label}' has pulse window "
-            f"[{start}, {stop}] with no positive-measure overlap with the solve interval "
-            f"[{t_start}, {t_stop}]."
-        )
-
-
-def validate_drive_ops_window(drive_ops: list[DriveOp], tlist: Any) -> None:
-    """Validate every ``DriveOp`` in *drive_ops* against :func:`_validate_drive_op_window`."""
-    for drive_op in drive_ops:
-        _validate_drive_op_window(drive_op, tlist)
-
-
 def prepare_solve_problem_context(
     chip: Chip,
     tlist: Any,
@@ -140,8 +94,11 @@ def prepare_solve_problem_context(
     solver: str | None = None,
     options: dict | None = None,
     e_ops: dict | None = None,
-    drive_ops: list[DriveOp] | None = None,
+    drive_ops: list[ControlOp] | None = None,
     approximation: Approximation | None = None,
+    frame: Any = None,
+    states: StateStorage = "all",
+    dissipation: bool = True,
 ) -> SolveProblemContext:
     """Resolve the frame and retain authored observables and state specifications.
 
@@ -149,49 +106,41 @@ def prepare_solve_problem_context(
     local solver basis. The default ground state remains lazy, so callers that
     provide an explicit state do not pay for unused state construction.
 
-    ``tlist`` is validated by :func:`_validate_tlist`. When *drive_ops* is
-    given, each entry's pulse window is checked against ``tlist`` via
-    :func:`validate_drive_ops_window`; omit it (the default) when the
-    caller validates its own per-variant drive ops elsewhere (see
-    :meth:`~quchip.control.sequence.QuantumSequence.build_batch`).
-    """
-    backend = chip.backend
-    tlist_arr = backend.array_module.asarray(tlist, dtype=float)
-    _validate_tlist(tlist_arr)
-    if drive_ops is not None:
-        validate_drive_ops_window(drive_ops, tlist_arr)
+    ``frame`` overrides the chip's declared frame. For ``"auto"``, the solve
+    window ``tlist[-1] - tlist[0]`` supplies the duration used for weights.
 
-    merged_options: dict[str, Any] = {"store_states": True, "store_final_state": True}
-    if options is not None:
-        merged_options.update(options)
+    ``tlist`` defines the actual interval. Scheduled signals retain their
+    absolute times, including operations partly or wholly outside this interval.
+    """
+    if not isinstance(dissipation, bool):
+        raise TypeError("dissipation must be a boolean calculation choice.")
+    backend = chip.backend
+    automatic = isinstance(tlist, AutomaticTimeGrid)
+    tlist_arr = backend.array_module.asarray(tlist.bounds if automatic else tlist, dtype=float)
+    _validate_tlist(tlist_arr)
 
     if e_ops is not None and not isinstance(e_ops, dict):
         raise TypeError("e_ops must be dict or None")
-    base_result = chip.resolve(approximation=approximation)
+    base_result = resolve_for_operations(
+        chip,
+        drive_ops or [],
+        frame=frame,
+        approximation=approximation,
+        solve_window=(tlist_arr[0], tlist_arr[-1]),
+    )
     return SolveProblemContext(
         chip=chip,
         tlist=tlist_arr,
         e_ops=e_ops,
-        e_ops_meta=None,
         resolved_frame=base_result.resolved_frame,
         approximation=base_result.approximation,
         _base_result=base_result,
         solver=solver,
-        options=merged_options,
-        default_initial_state=None,
+        options={} if options is None else options,
+        automatic_sampling=automatic,
+        states=states,
+        dissipation=dissipation,
     )
-
-
-def _materialize_context_state(
-    context: SolveProblemContext,
-    state_spec: Any,
-    engine_result: EngineResult,
-) -> Any:
-    """Materialize one explicit or default state against its own result bases."""
-    from quchip.chip.states import materialize_state_spec
-
-    selected = context.default_initial_state if state_spec is None else state_spec
-    return materialize_state_spec(context.chip, selected, engine_result.bases)
 
 
 def _prepare_context_eops(
@@ -199,35 +148,20 @@ def _prepare_context_eops(
     engine_result: EngineResult,
 ) -> tuple[Any, Any]:
     """Project raw observable specs once the engine basis maps are available."""
-    if not isinstance(context.e_ops, dict):
-        return context.e_ops, context.e_ops_meta
+    if context.e_ops is None:
+        return None, None
     return decompose_eops(
         context.e_ops,
         context.chip,
         context.chip.backend,
         engine_result.bases,
+        engine_result=engine_result,
     )
 
 
-def build_solve_batch_from_results(
-    context: SolveProblemContext,
-    engine_results: list[EngineResult],
-    *,
-    initial_states: list[Any] | None = None,
-) -> SolveBatch:
-    """Package homogeneous :class:`EngineResult`s as one :class:`SolveBatch`.
-
-    All results must share ``static_terms`` identity, the same number
-    of dynamic terms, and matching operator payloads per slot (by identity
-    or by canonical fingerprint — crosstalk rebuilds equal-by-value
-    operators on every instantiation). ``initial_states=None`` fills every
-    element with ``context.default_initial_state``.
-    """
-    if not engine_results:
-        raise ValueError("build_solve_batch_from_results requires at least one engine result")
-
+def _validate_batch_skeleton(engine_results: list[EngineResult]) -> None:
+    """Require equivalent Hamiltonian skeletons without rebuilding solve inputs."""
     ref = engine_results[0]
-    batch_size = len(engine_results)
     n_dyn = len(ref.dynamic_terms)
     _prefix = "build_solve_batch_from_results: "
 
@@ -288,9 +222,31 @@ def build_solve_batch_from_results(
                     "batched IR requires equivalent operator payloads across the batch."
                 )
 
+
+def build_solve_batch_from_results(
+    context: SolveProblemContext,
+    engine_results: list[EngineResult],
+    *,
+    initial_states: list[Any] | None = None,
+) -> SolveBatch:
+    """Package homogeneous :class:`EngineResult`s as one :class:`SolveBatch`.
+
+    All results must share ``static_terms`` identity, the same number
+    of dynamic terms, and matching operator payloads per slot (by identity
+    or by canonical fingerprint — crosstalk rebuilds equal-by-value
+    operators on every instantiation). ``initial_states=None`` constructs
+    each element's default ground state in its resolved basis.
+    """
+    if not engine_results:
+        raise ValueError("build_solve_batch_from_results requires at least one engine result")
+
+    _validate_batch_skeleton(engine_results)
+    ref = engine_results[0]
+    batch_size = len(engine_results)
+
     if initial_states is None:
         states: tuple[Any, ...] = tuple(
-            _materialize_context_state(context, None, result)
+            materialize_state_spec(context.chip, None, result.bases)
             for result in engine_results
         )
     elif len(initial_states) != batch_size:
@@ -299,7 +255,7 @@ def build_solve_batch_from_results(
         )
     else:
         states = tuple(
-            _materialize_context_state(context, state_spec, result)
+            materialize_state_spec(context.chip, state_spec, result.bases)
             for state_spec, result in zip(initial_states, engine_results)
         )
 
@@ -310,7 +266,7 @@ def build_solve_batch_from_results(
         problems.append(
             SolveProblem(
                 chip=context.chip,
-                engine_result=replace(result, metadata=shared_metadata),
+                engine_result=replace(result, metadata=shared_metadata, dissipation=context.dissipation),
                 initial_state=state,
                 tlist=context.tlist,
                 e_ops=e_ops,
@@ -318,14 +274,17 @@ def build_solve_batch_from_results(
                 resolved_frame=context.resolved_frame,
                 solver=context.solver,
                 options=context.options,
+                states=context.states,
             )
         )
+    if context.automatic_sampling:
+        problems = sample_problems(problems)
     return SolveBatch(chip=context.chip, problems=tuple(problems))
 
 
 def build_solve_problem(
     chip: Chip,
-    drive_ops: list[DriveOp],
+    drive_ops: list[ControlOp],
     tlist: Any,
     *,
     solver: str | None = None,
@@ -333,6 +292,9 @@ def build_solve_problem(
     e_ops: dict | None = None,
     initial_state: Any | None = None,
     approximation: Approximation | None = None,
+    frame: Any = None,
+    states: StateStorage = "all",
+    dissipation: bool = True,
 ) -> SolveProblem:
     """Resolve, assemble, and package a frozen :class:`SolveProblem`.
 
@@ -340,6 +302,10 @@ def build_solve_problem(
     :func:`build_engine_result`. For many variants sharing one
     chip configuration, prefer that two-step form with
     :func:`build_solve_batch_from_results`.
+
+    ``frame`` overrides the chip's declared frame and follows the same
+    operation-aware ``"auto"`` resolution as
+    :func:`prepare_solve_problem_context`.
     """
     context = prepare_solve_problem_context(
         chip,
@@ -349,6 +315,9 @@ def build_solve_problem(
         e_ops=e_ops,
         drive_ops=drive_ops,
         approximation=approximation,
+        frame=frame,
+        states=states,
+        dissipation=dissipation,
     )
     engine_result = build_engine_result(
         chip,
@@ -357,25 +326,51 @@ def build_solve_problem(
         approximation=context.approximation,
         _base_result=context._base_result,
     )
+    engine_result = replace(engine_result, dissipation=context.dissipation)
     e_ops_solver, e_ops_meta = _prepare_context_eops(context, engine_result)
-    return SolveProblem(
+    problem = SolveProblem(
         chip=context.chip,
         engine_result=engine_result,
-        initial_state=_materialize_context_state(context, initial_state, engine_result),
+        initial_state=materialize_state_spec(context.chip, initial_state, engine_result.bases),
         tlist=context.tlist,
         e_ops=e_ops_solver,
         e_ops_meta=e_ops_meta,
         resolved_frame=context.resolved_frame,
         solver=context.solver,
         options=context.options,
+        states=context.states,
     )
+    return sample_problems([problem])[0] if context.automatic_sampling else problem
 
 
-def solve_problem_list(
+def solve_problem_list(problems: list[SolveProblem], *, progress: bool = True,
+                       parameters: tuple[dict[str, Any], ...] | None = None) -> Any:
+    """Dispatch each captured backend's requests and restore original point order."""
+    from quchip.results.results import SimulationBatchResult
+
+    groups: dict[int, list[tuple[int, SolveProblem]]] = {}
+    for index, problem in enumerate(problems):
+        groups.setdefault(id(problem.backend), []).append((index, problem))
+    ordered: list[Any] = [None] * len(problems)
+    for entries in groups.values():
+        try:
+            results = _solve_backend_problems([problem for _, problem in entries],
+                entries[0][1].backend, progress=progress,
+                failure_context=tuple((index, parameters[index] if parameters is not None else {})
+                                      for index, _ in entries))
+        except BatchSolveError as exc:
+            raise BatchSolveError(entries[exc.index][0], exc.detail, exc.parameters) from exc
+        for (index, _), result in zip(entries, results, strict=True):
+            ordered[index] = result
+    return SimulationBatchResult(ordered)
+
+
+def _solve_backend_problems(
     problems: list[SolveProblem],
     backend: Any,
     *,
     progress: bool = True,
+    failure_context: tuple[tuple[int, dict[str, Any]], ...] = (),
 ) -> Any:
     """Group problems by shared operator skeleton and dispatch as :class:`SolveBatch`es.
 
@@ -384,13 +379,9 @@ def solve_problem_list(
     each structural group follows the normal batch path, with incompatible
     results falling back to per-problem ``backend.solve_problem`` calls.
 
-    Grouping uses two filters. The cheap identity-based prefilter here
-    (:func:`_skeleton_prefilter_key`) buckets problems by ``id()`` of their
-    shared operators/metadata so that obviously-incompatible problems are never
-    compared by value. The canonical by-value compatibility check is intentionally
-    a *separate* concern that lives inside
-    :func:`build_solve_batch_from_results` (operator ``fingerprint``):
-    the prefilter is an identity prefilter, the fingerprint is the value check.
+    Grouping first checks shared Hamiltonian/metadata identity and compares
+    captured observable values, grids and options. Canonical operator
+    fingerprints then establish compatibility within each group.
     Returns a :class:`~quchip.results.results.SimulationBatchResult`.
     """
     from quchip.results.results import (
@@ -416,6 +407,8 @@ def solve_problem_list(
         if tlist is None:
             return ("none",)
         obj_id = id(tlist)
+        if contains_tracer(tlist):
+            return ("traced_tlist", obj_id)
         cached = _tlist_cache.get(obj_id)
         if cached is not None:
             return cached
@@ -427,11 +420,16 @@ def solve_problem_list(
     def _op_list_key(ops: Any) -> tuple:
         if ops is None:
             return ("none",)
-        return ("ops", tuple(id(o) for o in ops))
+        from quchip.utils.values import value_fingerprint
+
+        try:
+            return ("ops", tuple(value_fingerprint(backend.to_array(op)) for op in ops))
+        except ValueError:
+            return ("opaque_ops", object())
 
     def _skeleton_prefilter_key(problem: SolveProblem) -> tuple:
         desc = problem.engine_result
-        solver_name = problem.solver or ("mesolve" if desc.collapse_terms else "sesolve")
+        solver_name = problem.solver_name(problem.backend)
         return (
             solver_name,
             id(desc.static_terms),
@@ -442,6 +440,7 @@ def solve_problem_list(
             _op_list_key(problem.e_ops),
             tuple(id(term.operator) for term in desc.collapse_terms),
             _options_key(problem.options),
+            problem.states,
             id(problem.resolved_frame),
         )
 
@@ -469,19 +468,22 @@ def solve_problem_list(
         group_problems = [p for _, p in group]
         ref = group_problems[0]
         try:
-            ctx = SolveProblemContext.from_problem(ref)
-            batch = build_solve_batch_from_results(
-                ctx,
-                [p.engine_result for p in group_problems],
-                initial_states=[p.initial_state for p in group_problems],
-            )
+            _validate_batch_skeleton([problem.engine_result for problem in group_problems])
+            batch = SolveBatch(chip=ref.chip, problems=tuple(group_problems),
+                _failure_context=tuple(failure_context[index] for index in indices) if failure_context else ())
         except ValueError:
             for idx_original, problem in zip(indices, group_problems):
-                result = backend.solve_problem(problem)
+                try:
+                    result = backend.solve_problem(problem)
+                except Exception as exc:
+                    raise BatchSolveError(idx_original, f"{type(exc).__name__}: {exc}") from exc
                 ordered_results[idx_original] = wrap_solver_result(result, problem, backend)
             continue
 
-        solver_results = backend.solve_batch(batch, progress=progress)
+        try:
+            solver_results = backend.solve_batch(batch, progress=progress)
+        except BatchSolveError as exc:
+            raise BatchSolveError(indices[exc.index], exc.detail, exc.parameters) from exc
         for idx_original, wrapped_result in zip(
             indices, wrap_solver_results_from_batch(solver_results, batch, backend)
         ):

@@ -17,7 +17,7 @@ class ObservableReport:
     kind
         Canonical desired-chip kind (``"freq"``, ``"anharmonicity"``,
         ``"cross_kerr"``, ``"exchange_rate"``, or
-        ``"coupling_strength"``), or its deprecated compatibility counterpart.
+        ``"coupling_strength"``).
     label
         Target locator — a device label for single-device observables,
         a ``(label_a, label_b)`` tuple for pair observables, or a
@@ -31,10 +31,9 @@ class ObservableReport:
     evaluator
         ``"full"`` if this target was evaluated on the whole chip or
         ``"local"`` if it was evaluated on a one-hop subsystem (see
-        ``max_hilbert_dim`` in :func:`fit_a_dress`).
+        ``evaluator`` in :func:`fit_a_dress`).
     source
-        ``"component default"`` or ``"explicit"`` for the desired-chip
-        contract; ``"legacy"`` for the deprecated compatibility path.
+        ``"component default"`` or ``"explicit"``.
     """
 
     kind: str
@@ -43,7 +42,7 @@ class ObservableReport:
     initial: float
     final: float
     evaluator: str
-    source: str = "legacy"
+    source: str = "explicit"
 
     @property
     def residual(self) -> float:
@@ -81,7 +80,7 @@ class FitADressResult:
     Attributes
     ----------
     chip
-        Fitted chip: a clone of the desired specification (or compatibility seed)
+        Fitted chip: a clone of the desired specification
         with updated device and coupling parameters. The input chip is never
         mutated. Exposing ``.chip`` makes this satisfy
         :class:`~quchip.chip.transformations.ChipTransform` structurally,
@@ -143,9 +142,20 @@ class FitADressResult:
     solver_info: dict[str, Any]
     parameter_reports: tuple[FitParameterReport, ...] = ()
 
+    @property
+    def converged(self) -> bool | None:
+        """Whether the optimizer converged, or None when status is unavailable."""
+        status = self.solver_info.get("status")
+        return None if status is None else int(status) > 0
+
+    @property
+    def message(self) -> str | None:
+        """The optimizer's termination reason, when recorded."""
+        return self.solver_info.get("message")
+
     def summary(self) -> str:
         """Return a compact target, parameter, and identifiability receipt."""
-        converged = int(self.solver_info.get("status", 0)) > 0
+        status = {True: "converged", False: "stopped", None: "status unavailable"}[self.converged]
         rank = self.solver_info.get("jacobian_rank", "?")
         n_parameters = self.solver_info.get("n_free_parameters", len(self.final_params))
         condition = self.solver_info.get("jacobian_condition_number")
@@ -156,10 +166,12 @@ class FitADressResult:
         else:
             condition_text = f"{float(condition):.3g}"
         lines = [
-            f"fit_a_dress: {'converged' if converged else 'stopped'} | loss {self.loss:.3g} | "
+            f"fit_a_dress: {status} | loss {self.loss:.3g} | "
             f"targets: {len(self.final_targets)} | parameters: {n_parameters}",
             f"identifiability: rank {rank}/{n_parameters} | condition {condition_text}",
         ]
+        if self.message is not None:
+            lines.append(self.message)
         if self.final_targets:
             lines.append("targets (GHz):")
             for target_report in self.final_targets:

@@ -47,6 +47,8 @@ from quchip.backend.containers import (
     EigensystemData,
     PreparedBatch,
     PreparedHamiltonian,
+    PreparedStationary,
+    LinearResponseSolverResult,
     SolverResult,
     SteadyStateSolverResult,
     VmappedBatch,
@@ -150,6 +152,15 @@ class Backend(ABC):
         return self.from_canonical_operator(
             CanonicalOperator.from_dense(data, dims=(n,), basis="fock", subsystem_labels=("0",))
         )
+
+    def eager_operators(self) -> Any:
+        """Return a context manager for operator construction during JAX compile-time evaluation.
+
+        The default implementation leaves backend state unchanged.
+        """
+        from contextlib import nullcontext
+
+        return nullcontext()
 
     def destroy(self, n: int) -> Operator:
         """Build the annihilation operator :math:`\\hat a` for an *n*-level Fock space."""
@@ -358,7 +369,7 @@ class Backend(ABC):
     # ------------------------------------------------------------------
     #
     # A trajectory is ``T`` saved states. The user-facing extractors
-    # (``population_array``, ``populations``, ``overlap_array``,
+    # (``population``, ``populations``, ``overlap``,
     # ``amplitude_array``) need one scalar/vector per save point. Doing that
     # with a Python loop over ``T`` single-state ``expect``/``ptrace`` calls
     # makes per-point dispatch the dominant cost on long ``tlist``s and
@@ -529,13 +540,13 @@ class Backend(ABC):
         """Return a density matrix; pass through if *state* is already one."""
         if not self.is_ket(state):
             return state
-        arr = np.asarray(self.to_array(state), dtype=complex)
+        arr = np.asarray(self.to_array(state), dtype=complex).reshape(-1, 1)
         return self.from_array(arr @ np.conj(arr).T)
 
     def is_ket(self, state: State) -> bool:
-        """Return whether *state* is a column vector (ket) rather than a density matrix."""
+        """Return whether *state* is a ket (flat or column vector) rather than a density matrix."""
         arr = np.asarray(self.to_array(state), dtype=complex)
-        return arr.ndim == 2 and arr.shape[1] == 1
+        return arr.ndim == 1 or (arr.ndim == 2 and arr.shape[1] == 1)
 
     def as_density_matrix(self, state: State) -> State:
         """Promote a ket to its density matrix; pass a density matrix through unchanged."""
@@ -689,14 +700,15 @@ class Backend(ABC):
     def solve_problem(self, problem: "SolveProblem") -> SolverResult:
         """Lower and solve a :class:`SolveProblem` — the single-element entry point.
 
-        Picks ``mesolve`` when collapse operators are present (open system)
-        or ``sesolve`` otherwise, unless ``problem.solver`` forces a choice.
+        Delegates to :meth:`SolveProblem.solver_name`: ``sesolve`` only for a ket
+        with no collapse operators, ``mesolve`` otherwise, unless ``problem.solver``
+        forces a choice.
         """
         prepared = self.prepare_hamiltonian(problem.engine_result, problem.tlist)
         tlist_arr, c_ops, solver, opts, e_ops_arg = self._resolve_solve_config(
             problem, prepared
         )
-        psi0 = self.coerce_state(problem.initial_state, dims=problem.chip.dims)
+        psi0 = self.coerce_state(problem.initial_state, dims=problem.engine_result.dims)
 
         if solver == "sesolve":
             return self.sesolve(prepared.rhs, psi0, tlist_arr,
@@ -704,9 +716,63 @@ class Backend(ABC):
         return self.mesolve(prepared.rhs, psi0, tlist_arr,
                             c_ops=c_ops, e_ops=e_ops_arg, options=opts)
 
-    def steadystate(self, problem: Any) -> SteadyStateSolverResult:
+    def _stationary_liouvillian(self, engine_result: "EngineResult") -> Any:
+        """Lower a static engine description to the backend's native generator."""
+        raise NotImplementedError(f"{type(self).__name__} must implement stationary lowering")
+
+    def prepare_stationary(
+        self, engine_result: "EngineResult", *, prepared: PreparedStationary | None = None,
+    ) -> PreparedStationary:
+        """Prepare once, or reuse the same backend and captured operating point."""
+        if prepared is None:
+            return PreparedStationary(self, engine_result, self._stationary_liouvillian(engine_result))
+        if prepared.backend is not self or prepared.engine_result is not engine_result:
+            raise ValueError("Stationary preparation belongs to a different backend or operating point.")
+        return prepared
+
+    def steadystate(self, problem: Any, *, prepared: PreparedStationary | None = None) -> SteadyStateSolverResult:
         """Solve one static Lindblad problem in the backend's native representation."""
         raise NotImplementedError(f"{type(self).__name__} must implement steadystate()")
+
+    def linear_response(self, problem: Any) -> LinearResponseSolverResult:
+        """Solve one passive-linear input-output problem in the backend's native arrays."""
+        raise NotImplementedError(f"{type(self).__name__} must implement linear_response()")
+
+    def stationary_resolvent(
+        self,
+        engine_result: "EngineResult",
+        sources: tuple[tuple[str, "CanonicalOperator"], ...],
+        observables: tuple[tuple[str, "CanonicalOperator"], ...],
+        frequencies: Any,
+        *,
+        prepared: PreparedStationary | None = None,
+    ) -> dict[tuple[str, str], Any]:
+        """Evaluate trace-zero stationary resolvents in native backend arrays.
+
+        For each ordinary-GHz offset ``f``, form and factor the trace-constrained
+        shifted Liouvillian once, then solve ``(L + i 2π f) X = source`` with
+        ``Tr(X) = 0`` for every named source column. Return ``Tr(observable X)``
+        keyed by ``(source, observable)``. The engine supplies canonical operators;
+        the backend owns Liouvillian construction, factorization, and solves.
+        """
+        raise NotImplementedError(f"{type(self).__name__} must implement stationary_resolvent()")
+
+    def stationary_propagate(
+        self,
+        engine_result: "EngineResult",
+        initial: "CanonicalOperator",
+        observables: tuple[tuple[str, "CanonicalOperator"], ...],
+        times: Any,
+        *,
+        prepared: PreparedStationary | None = None,
+    ) -> dict[str, Any]:
+        """Propagate an operator under a static Liouvillian and evaluate observables.
+
+        ``initial`` need not be a normalized density matrix. This supports
+        quantum-regression queries while keeping the propagation algorithm
+        and numerical Liouvillian backend-owned.
+        """
+        raise NotImplementedError(f"{type(self).__name__} must implement stationary_propagate()")
 
     def parallel_solve_problems(
         self,
@@ -785,7 +851,7 @@ class Backend(ABC):
             rhs = prepared.rhs if isinstance(prepared, VmappedBatch) else prepared.rhs_list[idx]
             tlist_arr = self.array_module.asarray(problem.tlist, dtype=float)
             c_ops = self._collapse_operators(problem.engine_result)
-            solver_name = problem.solver or ("mesolve" if c_ops else "sesolve")
+            solver_name = problem.solver_name(self)
             solver_names.append(solver_name)
             opts = self._resolve_problem_options(
                 problem,
@@ -885,7 +951,12 @@ class Backend(ABC):
         solver_name: str,
     ) -> dict[str, Any]:
         """Merge options and apply one backend-owned automatic-method decision."""
-        resolved = self._merge_options(problem.options, metadata=metadata, tlist=tlist)
+        options = {
+            **problem.options,
+            "store_states": problem.states == "all",
+            "store_final_state": problem.states == "final",
+        }
+        resolved = self._merge_options(options, metadata=metadata, tlist=tlist)
         return self._resolve_automatic_solver_options(
             resolved,
             user_options=problem.options,
@@ -902,8 +973,9 @@ class Backend(ABC):
         """Resolve one problem's backend-independent solve configuration.
 
         Coerces the save grid (via :attr:`array_module`), assembles collapse
-        operators, selects the solver (``mesolve`` when collapse operators are
-        present, unless ``problem.solver`` forces a choice), and merges options
+        operators, selects the solver (``mesolve`` for a density matrix or when
+        collapse operators are present, unless ``problem.solver`` forces a
+        choice), and merges options
         through the single boundary. Returns
         ``(tlist_arr, c_ops, solver_name, opts, e_ops_arg)``; each backend
         contributes only its RHS-sourcing + native-solve dispatch tail.
@@ -914,7 +986,7 @@ class Backend(ABC):
         engine_result = problem.engine_result
         tlist_arr = self.array_module.asarray(problem.tlist, dtype=float)
         c_ops = self._collapse_operators(engine_result)
-        solver_name = problem.solver or ("mesolve" if c_ops else "sesolve")
+        solver_name = problem.solver_name(self)
         opts = self._resolve_problem_options(
             problem,
             metadata=prepared.metadata,

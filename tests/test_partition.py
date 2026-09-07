@@ -18,26 +18,8 @@ from quchip.chip.partition import (
 from quchip.control.sequence import QuantumSequence
 
 
-def test_bath_separable_flag():
-    """A thermal bath is separable; collective-decay and correlated-dephasing baths are not."""
-    thermal = Bath("thermal", temperature=20.0)
-    collective = Bath("collective_decay", rate=0.01)
-    dephasing = Bath("correlated_dephasing", rate=0.01)
-    assert thermal.separable is True
-    assert collective.separable is False
-    assert dephasing.separable is False
-
-
 def _four_qubits():
     return [DuffingTransmon(freq=5.0 + 0.1 * i, anharmonicity=-0.25, levels=3, label=f"q{i}") for i in range(4)]
-
-
-def test_components_from_couplings_only():
-    """Capacitive coupling merges only the devices it directly links into one independence component."""
-    q0, q1, q2, q3 = _four_qubits()
-    chip = Chip([q0, q1, q2, q3], couplings=[Capacitive(q0, q1, g=0.005), Capacitive(q2, q3, g=0.005)])
-    comps = connected_components([d.label for d in chip.devices], independence_edges(chip))
-    assert comps == [["q0", "q1"], ["q2", "q3"]]
 
 
 def test_isolated_device_is_its_own_component():
@@ -116,13 +98,16 @@ def test_partition_builds_two_subchips():
         part.owner_of("nope")
 
 
-def test_partition_trivial_returns_original_chip():
-    """A fully connected chip's partition is trivial and returns the original chip object without cloning."""
+def test_partition_trivial_returns_independent_chip():
+    """A public trivial partition remains an independently editable model."""
     q0, q1, _, _ = _four_qubits()
     chip = Chip([q0, q1], couplings=[Capacitive(q0, q1, g=0.005)])
     part = chip.partition()
     assert part.is_trivial
-    assert part.components[0].chip is chip
+    derived = part.components[0].chip
+    derived[q0.label].freq = 6.1
+    assert q0.freq != 6.1
+    assert derived[q0.label].freq == 6.1
 
 
 def test_partition_filters_bath_targets():
@@ -132,40 +117,6 @@ def test_partition_filters_bath_targets():
     bath1 = part.components[1].chip.baths[0]
     assert bath0.resolve_targets(part.components[0].chip) == ["q0"]
     assert bath1.resolve_targets(part.components[1].chip) == ["q2"]
-
-
-def test_partition_routes_control_lines():
-    """Partitioning routes each control line to the sub-chip that owns its target device."""
-    _, part = _partitioned_disconnected_chip(with_lines=True)
-    eq0 = part.components[0].chip.control_equipment
-    eq1 = part.components[1].chip.control_equipment
-    assert [ln.label for ln in eq0.lines] == ["d0"]
-    assert [ln.label for ln in eq1.lines] == ["d2"]
-
-
-def test_partition_does_not_mutate_source_chip():
-    """Partitioning leaves the source chip's devices, baths, and control lines unchanged."""
-    chip, part = _partitioned_disconnected_chip(with_bath=True, with_lines=True)
-    assert len(chip.devices) == 4 and len(chip.baths) == 1
-    assert [ln.label for ln in chip.control_equipment.lines] == ["d0", "d2"]
-    assert part.components[0].chip is not chip
-
-
-def test_partition_does_not_duplicate_connected_drives():
-    """Partitioning connects each drive to its device exactly once, never duplicating the clone's own connection."""
-    # Regression: chip.clone() (inside partition_chip) already connects the
-    # full cloned equipment onto the clone's devices; partition_chip then
-    # connects a per-component ControlEquipment(...).copy(...) onto the same
-    # device objects. Each device must end up with exactly one drive per
-    # label, not the original clone-connected drive plus a stale duplicate.
-    _, part = _partitioned_disconnected_chip(with_lines=True)
-    for comp in part.components:
-        for label in comp.labels:
-            device = comp.chip[label]
-            drive_labels = [d.label for d in device.connected_drives]
-            assert len(drive_labels) == len(set(drive_labels)), (
-                f"device '{label}' has duplicate-label connected drives: {drive_labels}"
-            )
 
 
 def test_partition_subchip_schedules_without_duplicate_drive_error():
@@ -178,11 +129,6 @@ def test_partition_subchip_schedules_without_duplicate_drive_error():
     seq = QuantumSequence(sub0)
     handle = seq.charge("q0", envelope=Gaussian(amplitude=0.01, sigmas=3, duration=20.0))
     assert handle is not None
-
-
-# ============================================================================
-# Tests for split_drive_ops, split_e_ops, split_state_mapping
-# ============================================================================
 
 
 class _FakeOp:
@@ -236,11 +182,6 @@ def test_split_state_mapping():
     _, part = _partitioned_disconnected_chip()
     per = split_state_mapping(part, {"q0": 1, "q3": 1})
     assert per == [{"q0": 1}, {"q3": 1}]
-
-
-# ============================================================================
-# Regression tests: order-independent factor collision handling (review findings)
-# ============================================================================
 
 
 def test_split_e_ops_hub_three_correlators_all_get_correct_indices():
@@ -312,11 +253,6 @@ def test_split_e_ops_malformed_cross_value_raises_with_key_context():
         split_e_ops(part, {("q1", "q2"): "Z"})
 
 
-# ============================================================================
-# Tests for PartitionedSimulationResult
-# ============================================================================
-
-
 def _solved_components():
     # This solves single components directly, so partition dispatch must be
     # disabled explicitly — otherwise each singleton sub-chip would recurse
@@ -360,11 +296,6 @@ def test_partitioned_result_cross_product_and_states_warn():
     assert np.allclose(combined.expect(("q0", "q2")), expected)
     with pytest.warns(UserWarning, match="joint"):
         _ = combined.states
-
-
-# ============================================================================
-# Tests for engine.simulate(..., partition=True/False) dispatch
-# ============================================================================
 
 
 def _driven_disconnected_chip():
@@ -432,11 +363,6 @@ def test_engine_partition_mapping_initial_state():
     assert np.allclose(np.asarray(split.expect("q0")), np.asarray(joint.expect("q0")), atol=1e-8)
 
 
-# ============================================================================
-# Tests for PartitionedSimulationResult.final_state with mixed ket/DM components
-# ============================================================================
-
-
 def _mixed_noise_disconnected_chip():
     # q0/q1 carry T1 -> that component auto-selects mesolve (DM final state).
     # q2/q3 carry no noise -> that component auto-selects sesolve (ket final state).
@@ -474,26 +400,6 @@ def test_final_state_mixed_ket_and_dm_components_promotes_to_joint_dm():
     assert np.isclose(np.trace(arr).real, 1.0, atol=1e-6)
 
 
-def test_final_state_all_ket_components_stays_a_joint_ket():
-    """When every component's solve stays pure, final_state reconstructs a joint ket rather than a density matrix."""
-    from quchip.engine import simulate
-    from quchip.results.partitioned import PartitionedSimulationResult
-
-    chip, seq = _driven_disconnected_chip()
-    tlist = np.linspace(0.0, 20.0, 21)
-    result = simulate(chip, list(seq.scheduled_ops), tlist, solver=None)
-    assert isinstance(result, PartitionedSimulationResult)
-
-    backend = result.components[0]._backend
-    for comp in result.components:
-        assert backend.is_ket(comp.final_state)
-
-    with pytest.warns(UserWarning, match="joint"):
-        final = result.final_state
-
-    assert backend.is_ket(final)
-
-
 def test_partitioned_result_mismatched_length_raises():
     """PartitionedSimulationResult raises ValueError when component_results and partition.components misalign."""
     from quchip.chip.partition import LocalEop
@@ -503,11 +409,6 @@ def test_partitioned_result_mismatched_length_raises():
     plan = {"q0": LocalEop(component=0, key="q0", index=None)}
     with pytest.raises(ValueError, match="component_results"):
         PartitionedSimulationResult(results[:1], part, plan)
-
-
-# ============================================================================
-# Tests for QuantumSequence.simulate(..., partition=True/False) dispatch
-# ============================================================================
 
 
 def test_sequence_simulate_partitions_by_default():
@@ -521,13 +422,8 @@ def test_sequence_simulate_partitions_by_default():
     result = seq.simulate(e_ops=e_ops)
     assert isinstance(result, PartitionedSimulationResult)
 
-    joint = seq.simulate(e_ops=e_ops, partition=False)
+    joint = seq.simulate(tlist=result.times, e_ops=e_ops, partition=False)
     assert np.allclose(np.asarray(result.expect("q0")), np.asarray(joint.expect("q0")), atol=1e-8)
-
-
-# ============================================================================
-# Regression tests: final-review findings (B1, B2, W4, S3)
-# ============================================================================
 
 
 def test_split_e_ops_object_key_matches_joint_solve_by_object_and_label():

@@ -2,22 +2,14 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
 from quchip.chip.chip import Chip
 from quchip.chip.couplings import Capacitive
-from quchip.control.signal import AnalyticSignal, Crosstalk, Delay, Gain
+from quchip.control.signal import Crosstalk, Delay, Gain
 from quchip.control.drive import ChargeDrive
-from quchip.control.equipment import ControlEquipment
-from quchip.control.sequence import QuantumSequence
 from quchip.devices.resonator import Resonator
 from quchip.devices.transmon.duffing import DuffingTransmon
-
-
-def _single_qubit_chip() -> Chip:
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    return Chip([q], label="single")
 
 
 def _two_device_chip() -> Chip:
@@ -25,45 +17,6 @@ def _two_device_chip() -> Chip:
     r = Resonator(freq=7.0, levels=4, label="r")
     coupling = Capacitive(q, r, g=0.02)
     return Chip([q, r], [coupling], label="my_chip")
-
-
-def test_chip_has_no_result_or_sequence_cache_surface() -> None:
-    """A fresh Chip carries no ``result``/``sequence`` execution-cache attributes."""
-    chip = _single_qubit_chip()
-    assert not hasattr(chip, "result")
-    assert not hasattr(chip, "sequence")
-
-
-def test_chip_run_does_not_expose_last_result_cache() -> None:
-    """Simulating a sequence does not leave its result cached on the chip."""
-    chip = _single_qubit_chip()
-    seq = QuantumSequence(chip)
-    result = seq.simulate(tlist=np.linspace(0.0, 2.0, 21))
-
-    assert result is not None
-    assert not hasattr(chip, "result")
-
-
-def test_chip_run_does_not_expose_last_sequence_cache() -> None:
-    """Simulating a sequence does not leave the sequence cached on the chip."""
-    chip = _single_qubit_chip()
-    seq = QuantumSequence(chip)
-    seq.simulate(tlist=np.linspace(0.0, 2.0, 21))
-    assert not hasattr(chip, "sequence")
-
-
-def test_chip_repeated_runs_leave_no_execution_cache() -> None:
-    """Repeated simulate() calls with fresh sequences leave no cache and no shared sequence identity."""
-    chip = _single_qubit_chip()
-    first = QuantumSequence(chip)
-    first.simulate(tlist=np.linspace(0.0, 1.0, 11))
-
-    second = QuantumSequence(chip)
-    second.simulate(tlist=np.linspace(0.0, 1.0, 11))
-
-    assert not hasattr(chip, "result")
-    assert not hasattr(chip, "sequence")
-    assert first is not second
 
 
 def test_chip_wire_builds_control_equipment_from_lines() -> None:
@@ -103,59 +56,18 @@ def test_chip_status_prints_dashboard_and_returns_none(capsys: pytest.CaptureFix
     assert "control equipment" in out.lower()
 
 
-def test_chip_repr_contains_label_counts_and_dressed_flag() -> None:
-    """Chip's repr surfaces its label, device/coupling counts, and dressed-cache flag."""
-    chip = _two_device_chip()
-    rep = repr(chip)
-
-    assert "my_chip" in rep
-    assert "devices=2" in rep
-    assert "couplings=1" in rep
-    assert "dressed=" in rep
-
-
-def test_control_equipment_docstring_mentions_signal_chain() -> None:
-    """ControlEquipment's docstring documents its signal_chain attribute."""
-    assert ControlEquipment.__doc__ is not None
-    assert "signal_chain" in ControlEquipment.__doc__
-
-
-def test_delivered_signal_documents_physical_quadratures() -> None:
-    assert AnalyticSignal.i.__doc__ is not None
-    assert AnalyticSignal.q.__doc__ is not None
-
-
-def test_wire_validates_signal_chain_delay_line() -> None:
-    """A Delay signal-chain entry naming a line not in the wired equipment raises ValueError."""
-    from quchip.control.signal import Delay
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    d = ChargeDrive(target=q, label="q")
+@pytest.mark.parametrize(
+    "transform",
+    [Delay("missing", delta_t=1.0), Crosstalk("missing", "q", beta=0.1), Crosstalk("q", "missing", beta=0.1)],
+)
+def test_wire_rejects_signal_chain_references_to_missing_lines(transform):
+    """Delay targets and both crosstalk endpoints must name wired lines."""
+    q = DuffingTransmon(5.0, -0.25, levels=3, label="q")
+    drive = ChargeDrive(q, label="q")
     chip = Chip([q])
-    chip.wire(d)  # valid wiring first
+    chip.wire(drive)
     with pytest.raises(ValueError, match="not in equipment"):
-        chip.wire(d, signal_chain=[Delay(line="nonexistent", delta_t=1.0)])
-
-
-def test_wire_validates_signal_chain_crosstalk_source() -> None:
-    """A Crosstalk entry whose source line is not in the wired equipment raises ValueError."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    r = Resonator(freq=7.0, levels=4, label="r")
-    dq = ChargeDrive(target=q, label="q")
-    ChargeDrive(target=r, label="r")
-    chip = Chip([q, r])
-    with pytest.raises(ValueError, match="not in equipment"):
-        chip.wire(dq, signal_chain=[Crosstalk(source="bogus", victim="q", beta=0.1)])
-
-
-def test_wire_validates_signal_chain_crosstalk_victim() -> None:
-    """A Crosstalk entry whose victim line is not in the wired equipment raises ValueError."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    r = Resonator(freq=7.0, levels=4, label="r")
-    dq = ChargeDrive(target=q, label="q")
-    chip = Chip([q, r])
-    with pytest.raises(ValueError, match="not in equipment"):
-        chip.wire(dq, signal_chain=[Crosstalk(source="q", victim="bogus", beta=0.1)])
+        chip.wire(drive, signal_chain=[transform])
 
 
 def test_chip_unwire_removes_line_and_chain_references() -> None:

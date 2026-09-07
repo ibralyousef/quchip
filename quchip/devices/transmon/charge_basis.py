@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from operator import index
 from typing import Any, ClassVar, Literal
 
 from quchip.declarative.expr import PhysicsExpr
@@ -60,7 +61,7 @@ class ChargeBasisTransmon(DeviceModel):
         collapse_rate_threshold: float = 1e-8,
         **noise: Any,
     ) -> None:
-        if num_basis < 3 or num_basis % 2 == 0:
+        if index(num_basis) < 3 or num_basis % 2 == 0:
             raise ValueError(f"num_basis must be an odd integer >= 3, got {num_basis}")
         self._validate_basis_request(
             basis=basis,
@@ -145,7 +146,7 @@ class ChargeBasisTransmon(DeviceModel):
         if name == "coupling_channel" and value not in (None, "charge"):
             raise ValueError("coupling_channel must be 'charge' or None.")
         if name == "num_basis":
-            if value < 3 or value % 2 == 0:
+            if index(value) < 3 or value % 2 == 0:
                 raise ValueError(f"num_basis must be an odd integer >= 3, got {value}")
             if self.projection_levels is not None and self.projection_levels > value:
                 raise ValueError(

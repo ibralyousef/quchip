@@ -2,50 +2,82 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Literal
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+
+from quchip.utils.jax_utils import contains_tracer
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(1,))
-def _lowest_eigenpairs(matrix: Any, levels: int) -> tuple[Any, Any]:
+def _eigenpairs(matrix: Any, levels: int) -> tuple[Any, Any]:
+    """Return the lowest ``levels`` eigenpairs from a plain Hermitian eigensolve."""
     values, vectors = jnp.linalg.eigh(matrix)
     return values[:levels], vectors[:, :levels]
 
 
-def _lowest_eigenpairs_fwd(matrix: Any, levels: int) -> tuple[tuple[Any, Any], tuple[Any, Any]]:
+@partial(jax.custom_jvp, nondiff_argnums=(1,))
+def _differentiable_eigenpairs(matrix: Any, levels: int) -> tuple[Any, Any]:
+    return _eigenpairs(matrix, levels)
+
+
+@_differentiable_eigenpairs.defjvp
+def _eigenpairs_jvp(
+    levels: int, primals: tuple[Any], tangents: tuple[Any]
+) -> tuple[tuple[Any, Any], tuple[Any, Any]]:
+    """Return first-order tangents for the retained Hermitian eigenpairs.
+
+    The rule Hermitianizes ``dH`` and evaluates
+    ``dλ_i = <v_i|dH|v_i>`` and
+    ``dv_i = Σ_{j≠i} v_j <v_j|dH|v_i> / (λ_i − λ_j)`` over the full
+    eigensystem. Gaps at or below ``1e-9·(λ_max − λ_min)`` contribute zero;
+    the tolerance is independent of the energy origin. The nested
+    ``where`` also keeps the reciprocal off the masked branch. The diagonal
+    connection is zero, fixing the parallel-transport gauge
+    ``v_i† dv_i = 0``, and eigenvalue tangents are real.
+
+    The rule is linear in ``dH``, so JAX obtains reverse mode by transposition;
+    ``grad``, ``jacfwd``, and ``hessian`` work through traced device parameters.
+    An exact degeneracy uses a zero eigenvector connection instead of a NaN.
+    Second derivatives at a degeneracy remain undefined because the outer
+    derivative passes through the rule's unmasked ``eigh``.
+    """
+    (matrix,) = primals
+    (dmatrix,) = tangents
     values, vectors = jnp.linalg.eigh(matrix)
-    return (values[:levels], vectors[:, :levels]), (values, vectors)
-
-
-def _lowest_eigenpairs_bwd(
-    levels: int,
-    residuals: tuple[Any, Any],
-    cotangents: tuple[Any, Any],
-) -> tuple[Any]:
-    values, vectors = residuals
-    values_bar, vectors_bar = cotangents
     retained = vectors[:, :levels]
-
-    gradient = (retained * values_bar[None, :]) @ retained.conj().T
+    hermitian = 0.5 * (dmatrix + dmatrix.conj().T)
+    overlaps = vectors.conj().T @ hermitian @ retained
     gaps = values[None, :levels] - values[:, None]
-    tolerance = 1e-9 * jnp.max(jnp.abs(values))
+    tolerance = 1e-9 * (values[-1] - values[0])
     resolved = jnp.abs(gaps) > tolerance
-    inverse_gaps = jnp.where(
-        resolved,
-        1.0 / jnp.where(resolved, gaps, 1.0),
-        0.0,
-    )
-    overlaps = vectors.conj().T @ vectors_bar
-    gradient = gradient + vectors @ (inverse_gaps * overlaps) @ retained.conj().T
-    gradient = 0.5 * (gradient + gradient.conj().T)
-    return (gradient.astype(vectors.dtype),)
+    inverse_gaps = jnp.where(resolved, 1.0 / jnp.where(resolved, gaps, 1.0), 0.0)
+    dvalues = jnp.real(jnp.diagonal(overlaps))
+    dvectors = vectors @ (inverse_gaps * overlaps)
+    return (values[:levels], retained), (dvalues, dvectors)
 
 
-_lowest_eigenpairs.defvjp(_lowest_eigenpairs_fwd, _lowest_eigenpairs_bwd)
+def _lowest_eigenpairs(matrix: Any, levels: int) -> tuple[Any, Any]:
+    """Return the lowest ``levels`` eigenpairs without staging a constant matrix.
+
+    A traced matrix uses :func:`_differentiable_eigenpairs`, which supports
+    forward- and reverse-mode differentiation through device parameters. A
+    constant matrix uses the plain eigensolve so
+    ``jax.ensure_compile_time_eval`` can finish inside ``jit``; a
+    custom-derivative call would always be staged.
+    """
+    if contains_tracer(matrix):
+        values, vectors = _differentiable_eigenpairs(matrix, levels)
+    else:
+        values, vectors = _eigenpairs(matrix, levels)
+    # Fix each phase by its largest authored-basis component (first on ties).
+    # The pivot is locally constant; derivatives include the phase adjustment.
+    pivots = vectors[jnp.argmax(jnp.abs(vectors), axis=0), jnp.arange(levels)]
+    phases = jnp.conj(pivots) / jnp.abs(pivots)
+    return values, vectors * phases
 
 
 @dataclass(frozen=True)
@@ -58,6 +90,23 @@ class BasisRecord:
     energy_vectors: Any
     native_dim: int
     resolved_dim: int
+    authored_hamiltonian: Any = field(default=None, repr=False, compare=False)
+
+    def energy_state(self, level: int) -> Any:
+        """Return one captured isolated energy ket in the solver basis."""
+        if self.kind == "eigen":
+            return jnp.eye(self.resolved_dim, dtype=jnp.complex128)[:, level]
+        return self.energy_vectors[:, level]
+
+    def energy_to_solver(self) -> Any | None:
+        """Return the energy-to-solver map, or None when the bases coincide."""
+        if self.kind == "eigen":
+            return None
+        if not contains_tracer(self.energy_vectors) and np.array_equal(
+            self.energy_vectors, np.eye(self.resolved_dim)
+        ):
+            return None
+        return self.energy_vectors
 
     @property
     def projector(self) -> Any:
@@ -75,10 +124,14 @@ class BasisRecord:
 
     def level_operator(self) -> Any:
         """Return the energy-level index operator in the resolved solver basis."""
-        indices = jnp.diag(jnp.arange(self.energy_vectors.shape[1], dtype=jnp.complex128))
         if self.kind == "eigen":
-            return indices
-        return self.energy_vectors @ indices @ self.energy_vectors.conj().T
+            return jnp.diag(jnp.arange(self.resolved_dim, dtype=jnp.complex128))
+        return self.authored_level_operator()
+
+    def authored_level_operator(self) -> Any:
+        """Energy-level index in the authored basis, on the retained subspace."""
+        indices = jnp.arange(self.energy_vectors.shape[1], dtype=jnp.complex128)
+        return (self.energy_vectors * indices) @ self.energy_vectors.conj().T
 
 
 def resolve_local_basis(
@@ -137,20 +190,7 @@ def resolve_device_basis(
 def semantic_to_solver_transform(device: Any, record: BasisRecord) -> Any | None:
     """Map semantic local levels into the resolved solver basis when needed.
 
-    Fock devices label authored occupation states. Other local spaces label
-    energy-ordered states. ``None`` means those labels already coincide with
+    Local levels label isolated energy states. ``None`` means those labels already coincide with
     solver indices, allowing sparse band decomposition to stay sparse.
     """
-    from quchip.devices.spaces import FockSpace
-
-    if isinstance(device.local_space(), FockSpace):
-        if record.kind == "native":
-            return None
-        local_vectors = jnp.eye(record.native_dim, dtype=jnp.complex128)[
-            :, : record.resolved_dim
-        ]
-    else:
-        if record.kind == "eigen":
-            return None
-        local_vectors = record.energy_vectors[:, : record.resolved_dim]
-    return record.vectors.conj().T @ local_vectors
+    return record.energy_to_solver()

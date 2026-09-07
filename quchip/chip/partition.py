@@ -49,23 +49,16 @@ def _line_device_labels(chip: "Chip", line: Any) -> tuple[str, ...]:
     return (target,)
 
 
-def independence_edges(chip: "Chip") -> list[tuple[str, str]]:
+def independence_edges(chip: "Chip", resolved: Any | None = None) -> list[tuple[str, str]]:
     """Label pairs that must share one solve.
 
     A clique over N labels is emitted as an (N-1)-edge star — identical
     connected components, fewer edges.
     """
+    resolved = chip.resolve() if resolved is None else resolved
     edges: list[tuple[str, str]] = []
-    for coupling in chip.couplings:
-        edges.append((coupling.device_a_label, coupling.device_b_label))
-    for bath in chip.baths:
-        if bath.separable:
-            continue
-        targets = bath.resolve_targets(chip)
-        edges.extend((targets[0], other) for other in targets[1:])
-    for port in chip.ports:
-        port_targets = port.resolve_targets(chip)
-        edges.extend((port_targets[0], other) for other in port_targets[1:])
+    for support in resolved.dynamical_supports:
+        edges.extend((support[0], other) for other in support[1:])
     equipment = chip.control_equipment
     if equipment is not None:
         line_devices = {line.label: _line_device_labels(chip, line) for line in equipment.lines}
@@ -162,13 +155,32 @@ def _component_baths(clone: "Chip", member_set: set[str]) -> list[Any]:
     return kept
 
 
-def _component_ports(clone: "Chip", member_set: set[str]) -> list[Any]:
-    """Return ports whose complete target support belongs to one component."""
-    return [
-        port.copy()
-        for port in clone.ports
-        if set(port.resolve_targets(clone)).issubset(member_set)
-    ]
+def _split_network(chip: "Chip", groups: list[list[str]]) -> list[Any]:
+    """Restrict the chip's field network to each device group, or explain why that changes the physics."""
+    network = chip.port_network
+    if network is None:
+        return [None] * len(groups)
+    per_group: list[Any] = []
+    covered: set[str] = set()
+    for group in groups:
+        members = set(group)
+        labels = [port.label for port in network.ports if set(port.resolve_targets(chip)).issubset(members)]
+        if not labels:
+            per_group.append(None)
+            continue
+        try:
+            restricted = network.restrict(labels)
+        except ValueError as error:
+            raise ValueError(f"{error} Those ports belong to different device groups") from error
+        covered.update(component.label for component in restricted.components)
+        per_group.append(restricted)
+    leftover = sorted({component.label for component in network.components} - covered)
+    if leftover:
+        raise ValueError(
+            f"PortNetwork components {leftover} are not reachable from one device group's ports; "
+            "restricting the field network would change the SLH dynamics"
+        )
+    return per_group
 
 
 def _transform_drive_labels(transform: "SignalTransform") -> tuple[str, ...]:
@@ -194,10 +206,13 @@ def _distribute_control_lines(
     return lines_per, notes
 
 
-def _build_component_chip(chip: "Chip", clone: "Chip", index: int, group: list[str], lines: list[Any]) -> "Chip":
+def _build_component_chip(
+    chip: "Chip", clone: "Chip", index: int, group: list[str], lines: list[Any], network: Any
+) -> "Chip":
     """Assemble one component's solve-ready sub-chip: its devices, internal couplings, baths, frame, equipment."""
     from quchip.chip.chip import Chip as _Chip
     from quchip.control.equipment import ControlEquipment
+    from quchip.utils.values import copy_value
 
     member_set = set(group)
     devices = [clone[label] for label in group]
@@ -205,10 +220,6 @@ def _build_component_chip(chip: "Chip", clone: "Chip", index: int, group: list[s
         c for c in clone.couplings
         if c.device_a_label in member_set and c.device_b_label in member_set
     ]
-    # `clone.frame` is typed `FrameSpec` (Literal | ScalarLike | dict[str | BaseDevice, ...]);
-    # the filtered comprehension below is a plain dict[str, ...], which dict's key-type
-    # invariance won't accept back into that union member — `Any` sidesteps the mismatch
-    # without misrepresenting the runtime value (still a dict, or the scalar/literal passthrough).
     frame: Any = (
         {k: v for k, v in clone.frame.items() if k in member_set}
         if isinstance(clone.frame, dict) else clone.frame
@@ -217,11 +228,13 @@ def _build_component_chip(chip: "Chip", clone: "Chip", index: int, group: list[s
         devices=devices,
         couplings=couplings or None,
         label=f"{chip.label}[{index}]" if chip.label else None,
-        frame=frame,
+        frame=copy_value(frame),
         approximation=clone.approximation,
+        basis=clone.basis,
         backend=clone._backend,
         baths=_component_baths(clone, member_set) or None,
-        ports=_component_ports(clone, member_set) or None,
+        port_network=network,
+        effective_terms=[terms for terms in clone.effective_terms if set(terms.labels) <= member_set],
     )
     equipment = clone.control_equipment
     if equipment is not None and lines:
@@ -231,25 +244,46 @@ def _build_component_chip(chip: "Chip", clone: "Chip", index: int, group: list[s
             if all(lbl in line_labels for lbl in _transform_drive_labels(t))
         ]
         sub.connect(ControlEquipment(lines=lines, signal_chain=chain).copy(sub.device_map, sub.coupling_map))
+    from quchip.chip.states import copy_state_configuration
+
+    copy_state_configuration(chip, sub)
     return sub
 
 
-def partition_chip(chip: "Chip") -> PartitionResult:
+def partition_chip(
+    chip: "Chip",
+    *,
+    resolved: Any | None = None,
+    extra_supports: tuple[tuple[str, ...], ...] = (),
+    clone_trivial: bool = True,
+) -> PartitionResult:
     """Split a chip into independent sub-chips along its independence graph.
 
     Exact: the joint solve of the original chip factorizes as the tensor
-    product of the component solves. With one component, the original chip
-    is returned uncloned inside a trivial result.
+    product of the component solves. Public results contain independent
+    models even with one component. Internal dispatch can reuse a trivial
+    component when it will immediately return to the joint solve.
     """
-    from quchip.chip.transformations.plumbing import detach_intermediate_clone
 
     labels = [d.label for d in chip.devices]
     chip_order = tuple(labels)
-    groups = connected_components(labels, independence_edges(chip))
+    resolved = chip.resolve() if resolved is None else resolved
+    edges = independence_edges(chip, resolved)
+    for support in extra_supports:
+        edges.extend((support[0], other) for other in support[1:])
+    groups = connected_components(labels, edges)
     if len(groups) == 1:
         return PartitionResult(
-            components=(PartitionComponent(labels=chip_order, chip=chip),),
+            components=(PartitionComponent(labels=chip_order, chip=chip.clone() if clone_trivial else chip),),
             chip_order=chip_order,
+        )
+    try:
+        networks = _split_network(chip, groups)
+    except ValueError as error:
+        return PartitionResult(
+            components=(PartitionComponent(labels=chip_order, chip=chip.clone() if clone_trivial else chip),),
+            chip_order=chip_order,
+            notes=(f"Kept a joint solve because {error}.",),
         )
 
     clone = chip.clone()
@@ -260,11 +294,12 @@ def partition_chip(chip: "Chip") -> PartitionResult:
 
     lines_per, notes = _distribute_control_lines(clone, groups, owner)
     components = tuple(
-        PartitionComponent(labels=tuple(group), chip=_build_component_chip(chip, clone, i, group, lines_per[i]))
+        PartitionComponent(
+            labels=tuple(group), chip=_build_component_chip(chip, clone, i, group, lines_per[i], networks[i])
+        )
         for i, group in enumerate(groups)
     )
 
-    detach_intermediate_clone(list(clone.devices), clone)
     return PartitionResult(components=components, chip_order=chip_order, notes=tuple(notes))
 
 

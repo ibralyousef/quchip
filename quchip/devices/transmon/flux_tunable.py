@@ -210,21 +210,12 @@ class FluxTunableTransmon(FockDevice):
 
     def set_parameter_values(self, values: Mapping[str, Any]) -> None:
         """Apply flux and calibration overrides without mapping-order effects."""
-        remaining = dict(values)
-        if "flux_bias" not in remaining:
-            super().set_parameter_values(remaining)
-            return
-
-        flux_bias = remaining.pop("flux_bias")
-        if "freq" in remaining:
-            frequency = remaining.pop("freq")
-            super().set_parameter_values(remaining)
-            super().__setattr__("flux_bias", flux_bias)
-            super().__setattr__("freq", frequency)
-            return
-
-        super().set_parameter_values(remaining)
-        self.flux_bias = flux_bias
+        updates = dict(values)
+        if "flux_bias" in updates and "freq" not in updates:
+            calibration = self.copy()
+            calibration.set_parameter_values({name: value for name, value in updates.items() if name != "flux_bias"})
+            updates["freq"] = calibration.frequency_at(updates["flux_bias"])
+        super().set_parameter_values(updates)
 
     def tunable_param_bounds(self, name: str, value: float) -> tuple[float, float]:
         """Use one SQUID period as the default bound for explicit flux fitting."""
