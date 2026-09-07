@@ -1,28 +1,8 @@
-"""State factories for :class:`~quchip.chip.chip.Chip`.
+"""Bare states, dressed eigenstates, and normalized superpositions for chips.
 
-These helpers build bare tensor-product kets, dressed eigenstates, and
-normalized superpositions, plus the ``chip.set_state_order(...)`` +
-string-shorthand machinery where ``"eg1"``-style specs name one
-level per device. The chip forwards its public state surface
-(:meth:`Chip.state`, :meth:`Chip.bare_state`, :meth:`Chip.superposition`,
-:meth:`Chip.set_state_order`) here; users normally call the chip methods,
-not these functions directly.
-
-Module-level functions (taking ``chip`` as the first argument) mirror
-:mod:`quchip.chip.serialization`. The only per-chip state involved — the
-declared device order and level symbols — lives on the chip itself
-(``chip._state_order`` / ``chip._level_symbols``), set by
-:func:`set_state_order`.
-
-All spec inputs route through :func:`normalize_device_state_mapping`,
-which is the single place the ``str`` shorthand is parsed into a
-``{label: value}`` dict, so the public factories never repeat the
-``isinstance(..., str)`` guard.
-
-The dressed :func:`state` path stays JAX-traceable: it forwards to
-:meth:`ChipAnalysis.state`, which selects the assigned eigenvector
-column through the :func:`~quchip.chip.dressing.label_eigensystem`
-array kernel.
+String shorthand such as ``"eg1"`` uses the device order and level symbols
+set by :func:`set_state_order`. Dressed-state selection uses the assigned
+eigenvector column and remains JAX-traceable on a fixed assignment.
 """
 
 from __future__ import annotations
@@ -90,6 +70,15 @@ def set_state_order(
         chip._level_symbols = dict(levels)
 
 
+def copy_state_configuration(source: "Chip", target: "Chip") -> None:
+    """Retain the relative string-state order and symbols on surviving devices."""
+    if source._state_order is not None:
+        target.set_state_order(
+            *(label for label in source._state_order if label in target.device_map),
+            levels=source._level_symbols,
+        )
+
+
 def parse_state_string(chip: "Chip", s: str) -> dict[str, int]:
     """Parse ``chip.bare_state("eg1")`` style strings into ``{label: index}``."""
     if chip._state_order is None:
@@ -122,15 +111,10 @@ def normalize_device_state_mapping(
     device_states: Mapping[str | "BaseDevice", Any] | str | None,
     keyword_states: dict[str, Any],
 ) -> dict[str, Any]:
-    """Merge a mapping (or string shorthand) and kwargs into ``{label: value}``.
+    """Normalize a mapping or string state specification to device-label keys.
 
-    A ``str`` *device_states* is the single place the ``"eg1"`` shorthand
-    is parsed (via :func:`parse_state_string`), so every public state
-    factory routes through here instead of repeating the guard. After the
-    string shorthand and the mapping type-check, the resolve-and-dedup step
-    is delegated to :func:`~quchip.utils.labeling.merge_labeled_values` — the
-    same primitive the bare-tuple builder uses, so a duplicate device
-    specification means the same thing here and in spectroscopy sweeps.
+    Parse strings using the chip's declared state order. Reject unsupported input
+    types and duplicate device specifications across the mapping and keywords.
     """
     mapping: Mapping[Any, Any] | None
     mapping = parse_state_string(chip, device_states) if isinstance(device_states, str) else device_states
@@ -334,25 +318,8 @@ def _bare_state_from_bases(
             )
             continue
 
-        from quchip.devices.spaces import FockSpace
-
-        if isinstance(dev.local_space(), FockSpace):
-            authored = backend.array_module.zeros(
-                (basis.native_dim, 1), dtype=complex
-            )
-            if hasattr(authored, "at"):
-                authored = authored.at[level, 0].set(1.0)
-            else:
-                authored[level, 0] = 1.0
-            projected = basis.vectors.conj().T @ authored
-            kets.append(
-                backend.from_array(projected, dims=[[basis.resolved_dim], [1]])
-            )
-        elif basis.kind == "eigen":
-            kets.append(backend.basis(basis.resolved_dim, level))
-        else:
-            vector = basis.energy_vectors[:, level].reshape(basis.native_dim, 1)
-            kets.append(backend.from_array(vector, dims=[[basis.native_dim], [1]]))
+        vector = basis.energy_state(level).reshape(basis.resolved_dim, 1)
+        kets.append(backend.from_array(vector, dims=[[basis.resolved_dim], [1]]))
 
     if len(kets) == 1:
         return kets[0]

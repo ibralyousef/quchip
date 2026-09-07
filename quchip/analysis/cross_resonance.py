@@ -218,7 +218,7 @@ def _generate_guesses(t, dx, dy, dz):
 
 
 def _fit_bloch(t, dx, dy, dz, sx=None, sy=None, sz=None):
-    """Fit one control-state Bloch trajectory. Returns (params_7, cov, cost).
+    """Fit one control-state Bloch trajectory and retain optimizer status.
 
     Parameters
     ----------
@@ -231,8 +231,9 @@ def _fit_bloch(t, dx, dy, dz, sx=None, sy=None, sz=None):
 
     Returns
     -------
-    (params, cov, cost) : ((7,), (7,7) or None, float)
-        Fitted [px, py, pz, td, bx, by, bz], covariance matrix, residual cost.
+    tuple
+        Native optimizer result and covariance, or ``None`` when uncertainty
+        is unavailable. The fitted vector is [px, py, pz, td, bx, by, bz].
     """
     idx = np.argsort(t)
     t, dx, dy, dz = t[idx], dx[idx], dy[idx], dz[idx]
@@ -246,6 +247,7 @@ def _fit_bloch(t, dx, dy, dz, sx=None, sy=None, sz=None):
     ub = [np.inf, np.inf, np.inf, np.inf, 2, 2, 2]
 
     best, best_cost = None, np.inf
+    last_error = None
     for p0 in guesses:
         try:
             r = least_squares(
@@ -255,23 +257,33 @@ def _fit_bloch(t, dx, dy, dz, sx=None, sy=None, sz=None):
             )
             if r.cost < best_cost:
                 best, best_cost = r, r.cost
-        except Exception:
-            continue
+        except (ValueError, FloatingPointError) as error:
+            last_error = error
 
     if best is None:
-        raise RuntimeError("All initial guesses failed to converge in _fit_bloch")
+        raise RuntimeError("No initial guess produced a finite CR fit candidate.") from last_error
 
-    n_data = 3 * len(t)
-    dof = max(n_data - 7, 1)
+    return best, _fit_covariance(best)
+
+
+def _fit_covariance(result):
+    """Local residual-scaled covariance, unavailable without rank and convergence."""
+    jac = np.asarray(result.jac)
+    dof = jac.shape[0] - jac.shape[1]
+    if not result.success or dof <= 0 or not np.all(np.isfinite(jac)):
+        return None
+    scales = np.linalg.norm(jac, axis=0)
+    if np.any(scales == 0):
+        return None
     try:
-        JTJ = best.jac.T @ best.jac
-        cov = np.linalg.inv(JTJ) * (2 * best.cost / dof)
-        if np.any(np.diag(cov) < 0):
-            cov = None
+        _, singular, vt = np.linalg.svd(jac / scales, full_matrices=False)
     except np.linalg.LinAlgError:
-        cov = None
-
-    return best.x, cov, best.cost
+        return None
+    if singular[-1] <= np.finfo(float).eps * max(jac.shape) * singular[0]:
+        return None
+    inverse = vt.T / singular / scales[:, None]
+    covariance = (inverse @ inverse.T) * (2 * result.cost / dof)
+    return covariance if np.all(np.isfinite(covariance)) else None
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +293,11 @@ def _fit_bloch(t, dx, dy, dz, sx=None, sy=None, sz=None):
 
 @dataclass
 class CRHamiltonianResult:
-    """Store the six CR effective Hamiltonian coefficients in GHz, with uncertainties.
+    """Store CR Hamiltonian coefficients in GHz and local uncertainty estimates.
+
+    Uncertainties use local, residual-scaled covariance, including when
+    per-point standard deviations supply weights. Unavailable estimates are
+    ``None``; convergence alone does not establish identifiability.
 
     All six quantities are *ordinary* frequency (not angular); multiply by
     2π to convert to rad/ns.  The convention matches Sheldon et al.
@@ -302,20 +318,22 @@ class CRHamiltonianResult:
     ZX: float
     ZY: float
     ZZ: float
-    IX_err: float
-    IY_err: float
-    IZ_err: float
-    ZX_err: float
-    ZY_err: float
-    ZZ_err: float
+    IX_err: float | None
+    IY_err: float | None
+    IZ_err: float | None
+    ZX_err: float | None
+    ZY_err: float | None
+    ZZ_err: float | None
     params_ctrl0: np.ndarray | None = None
     params_ctrl1: np.ndarray | None = None
     cov_ctrl0: np.ndarray | None = None
     cov_ctrl1: np.ndarray | None = None
-    cost_ctrl0: float = 0.0
-    cost_ctrl1: float = 0.0
+    cost_ctrl0: float | None = None
+    cost_ctrl1: float | None = None
+    converged: bool | None = None
+    message: str = ""
 
-    def coeffs(self) -> dict[str, tuple[float, float]]:
+    def coeffs(self) -> dict[str, tuple[float, float | None]]:
         """Return ``{name: (value_ghz, err_ghz)}`` for all six coefficients."""
         return {k: (getattr(self, k), getattr(self, k + "_err"))
                 for k in ("IX", "IY", "IZ", "ZX", "ZY", "ZZ")}
@@ -324,7 +342,10 @@ class CRHamiltonianResult:
         """Build the per-coefficient MHz summary text under the given header."""
         lines = [f"{header} (MHz):"]
         for k, (v, e) in self.coeffs().items():
-            lines.append(f"  {k} = {v * 1e3:+.4f} +/- {e * 1e3:.4f}")
+            uncertainty = "uncertainty unavailable" if e is None else f"+/- {e * 1e3:.4f}"
+            lines.append(f"  {k} = {v * 1e3:+.4f} {uncertainty}")
+        status = "unavailable" if self.converged is None else ("converged" if self.converged else "not converged")
+        lines.append(f"Fit status: {status}. {self.message}".rstrip())
         return "\n".join(lines)
 
     def summary(self) -> str:
@@ -551,12 +572,16 @@ def analyze_cross_resonance(
     CRHamiltonianResult
         Six coefficients in **GHz** (package units contract; durations are
         taken in ns and the Hz-valued fit internals are converted exactly
-        once at this boundary), each with a one-sigma uncertainty.
+        once at this boundary). Uncertainties are local, residual-scaled covariance
+        estimates, including when per-point standard deviations supply weights.
+        Unavailable one-sigma uncertainties are ``None``.
+        ``converged`` and ``message`` report the optimizer outcome separately
+        from fit quality and local uncertainty; nonconverged candidates remain inspectable.
 
     Raises
     ------
     RuntimeError
-        If all initial guesses fail to converge for either control state.
+        If no initial guess produces a finite candidate for either control state.
 
     Examples
     --------
@@ -579,31 +604,35 @@ def analyze_cross_resonance(
     s0 = sigma_ctrl0 or {}
     s1 = sigma_ctrl1 or {}
 
-    p0, cov0, c0 = _fit_bloch(te, x0, y0, z0, s0.get("x"), s0.get("y"), s0.get("z"))
-    p1, cov1, c1 = _fit_bloch(te, x1, y1, z1, s1.get("x"), s1.get("y"), s1.get("z"))
+    fit0, cov0 = _fit_bloch(te, x0, y0, z0, s0.get("x"), s0.get("y"), s0.get("z"))
+    fit1, cov1 = _fit_bloch(te, x1, y1, z1, s1.get("x"), s1.get("y"), s1.get("z"))
+
+    p0, p1 = fit0.x, fit1.x
+    hz_to_ghz = 1e-9
 
     def _coeff(i):
         return (p0[i] - p1[i]) / 2, (p0[i] + p1[i]) / 2
 
     def _err(i):
-        e0 = np.sqrt(cov0[i, i]) if cov0 is not None else 0.0
-        e1 = np.sqrt(cov1[i, i]) if cov1 is not None else 0.0
-        return np.hypot(e0, e1) / 2
+        if cov0 is None or cov1 is None:
+            return None
+        return np.sqrt(cov0[i, i] + cov1[i, i]) / 2 * hz_to_ghz
 
     ZX, IX = _coeff(0)
     ZY, IY = _coeff(1)
     ZZ, IZ = _coeff(2)
 
-    hz_to_ghz = 1e-9  # single boundary conversion out of the fit's internal Hz
     return CRHamiltonianResult(
         IX=IX * hz_to_ghz, IY=IY * hz_to_ghz, IZ=IZ * hz_to_ghz,
         ZX=ZX * hz_to_ghz, ZY=ZY * hz_to_ghz, ZZ=ZZ * hz_to_ghz,
-        IX_err=_err(0) * hz_to_ghz, IY_err=_err(1) * hz_to_ghz, IZ_err=_err(2) * hz_to_ghz,
-        ZX_err=_err(0) * hz_to_ghz, ZY_err=_err(1) * hz_to_ghz, ZZ_err=_err(2) * hz_to_ghz,
+        IX_err=_err(0), IY_err=_err(1), IZ_err=_err(2),
+        ZX_err=_err(0), ZY_err=_err(1), ZZ_err=_err(2),
         params_ctrl0=p0,
         params_ctrl1=p1,
         cov_ctrl0=cov0,
         cov_ctrl1=cov1,
-        cost_ctrl0=c0,
-        cost_ctrl1=c1,
+        cost_ctrl0=fit0.cost,
+        cost_ctrl1=fit1.cost,
+        converged=bool(fit0.success and fit1.success),
+        message=f"Control 0: {fit0.message}; control 1: {fit1.message}",
     )

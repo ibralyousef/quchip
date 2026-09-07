@@ -17,7 +17,7 @@ from quchip.chip.transformations.dispatch import (
     register_elimination_target,
 )
 from quchip.chip.transformations.methods import register_reduction_method
-from quchip.chip.transformations.result import ChipTransform, EliminationResult
+from quchip.chip.transformations.result import ChipTransform, EliminationResult, ReductionMap
 
 # Import handler modules for their registration side effects. Coupling first so it
 # claims the coupling namespace before the device handler is consulted (the two
@@ -30,6 +30,7 @@ __all__ = [
     "active_patch",
     "ChipTransform",
     "EliminationResult",
+    "ReductionMap",
     "eliminate",
     "EliminationTarget",
     "register_elimination_target",

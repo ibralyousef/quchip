@@ -1,7 +1,7 @@
 """Ladder rung 3 grad check (spec Sec. 9): jax.grad flows through eliminate(method="exact")'s zz.
 
 Mirrors ``tests/extended/test_effective_hamiltonian_traceable.py``'s pattern:
-the dressed-spectrum eigendecomposition inside ``exact_reduction``
+the dressed-spectrum eigendecomposition inside the exact retained subspace
 (``quchip/chip/sw.py``) needs the JAX-native dynamiqs backend to stay traced
 end-to-end. Companion to ``tests/physics_sentinel/test_sw_vs_exact.py``,
 which checks the same bridge fixture's sw-vs-exact agreement without a

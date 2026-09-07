@@ -1,12 +1,7 @@
-"""Sentinel: active_patch + automatic partitioning reproduce a full multiplexed-readout solve.
+"""Active-patch replay preserves a multiplexed readout trajectory.
 
-Geometry: two driven qubit-resonator pairs (q0-r0, q1-r1) bridged through a
-bus resonator to a spectator transmon (r0-bus-spec). ``hops=1`` from the
-driven pair {q0, q1} only reaches their own resonators {r0, r1} — bus sits
-two hops out and spec three, so both stay spectators and active_patch()
-folds them away (farthest-first: spec, then bus). With bus gone, the patch
-chip has no edge left between the two pairs, so QuantumSequence.simulate's
-automatic partitioning splits the patch into two independent components.
+Dense retained corrections may keep the reduced solve joint even when the
+remaining pairwise graph is disconnected.
 """
 
 from __future__ import annotations
@@ -16,7 +11,6 @@ from quchip.approximations import RWA
 import numpy as np
 
 from quchip import Capacitive, ChargeDrive, Chip, DuffingTransmon, Gaussian, QuantumSequence, Resonator
-from quchip.results.partitioned import PartitionedSimulationResult
 
 
 def test_patch_plus_partition_reproduces_full_readout_bank():
@@ -61,8 +55,8 @@ def test_patch_plus_partition_reproduces_full_readout_bank():
     # the patch chip has its own local Hilbert space so the operators must
     # be built against patch.chip, not chip.
     reduced = patch.simulate(tlist=tlist, e_ops=patch.chip.e_ops(q0="Z", q1="Z"))
-    # After eliminating bus+spec the patch splits into the two pairs.
-    assert isinstance(reduced, PartitionedSimulationResult)
+    # Dense retained corrections conservatively keep this solve joint.
+    assert patch.mapping.target_dims == patch.chip.dims
     # Dispersive SW error at the active/spectator boundary (rb: r0-bus) scales as
     # (g/Delta)^2 = (0.004/1.5)^2 = 7.1e-6; 50x gives comfortable headroom over
     # that leading-order estimate (observed deviation is ~7e-6, well inside it).

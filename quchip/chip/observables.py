@@ -25,7 +25,6 @@ from quchip.declarative.expr import (
     materialize_expr,
 )
 from quchip.devices.base import BaseDevice
-from quchip.devices.spaces import FockSpace
 
 if TYPE_CHECKING:
     from quchip.chip.chip import Chip
@@ -39,23 +38,16 @@ def prepare_local_op(
     backend: Any,
 ) -> Any:
     """Return one observable in the resolved local solver basis."""
-    names = {
-        "X": "sigma_x",
-        "Y": "sigma_y",
-        "Z": "sigma_z",
-        "n": "n",
-        "a": "a",
-        "a_dag": "adag",
-        "I": "I",
-    }
-    if isinstance(spec, str) and spec in names:
-        return FockSpace(basis.resolved_dim).operator(names[spec], backend)
-    if isinstance(spec, str) and spec == "charge" and hasattr(dev, "charge_coupling_operator"):
-        authored = dev.charge_coupling_operator()
-    elif isinstance(spec, str) and spec in ("phase", "flux") and hasattr(dev, "phase_coupling_operator"):
-        authored = dev.phase_coupling_operator()
-    else:
-        authored = dev.local_operator(spec) if isinstance(spec, str) else spec
+    with _backend_context(backend):
+        default_pauli = {"X": "sigma_x", "Y": "sigma_y", "Z": "sigma_z"}.get(spec) if isinstance(spec, str) else None
+        if (
+            default_pauli is not None
+            and type(dev).local_operator is BaseDevice.local_operator
+            and getattr(type(dev), default_pauli) is getattr(BaseDevice, default_pauli)
+        ):
+            authored = dev._pauli_operator(default_pauli, basis=basis)
+        else:
+            authored = dev.local_operator(spec) if isinstance(spec, str) else spec
     authored = as_operator_expr(
         authored,
         labels=(dev.label,),

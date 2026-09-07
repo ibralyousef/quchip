@@ -11,7 +11,6 @@ validation from the declared fields.
 from __future__ import annotations
 
 import inspect
-import weakref
 from typing import Any, ClassVar, cast
 
 import jax.tree_util as jtu
@@ -144,15 +143,10 @@ def _tunable_param_names_explicit_in_lineage(cls: type[DeviceModel]) -> bool:
 
 
 def _resolve_tunable_param_names(cls: type[DeviceModel], param_fields: dict[str, Parameter]) -> None:
-    """Resolve ``cls.tunable_param_names``: keep an explicit declaration, else derive from declared fields.
+    """Keep explicit tunable-field curation, or derive it in declaration order.
 
-    An explicit declaration on *cls* itself (present in ``cls.__dict__``
-    before this hook touches it) is validated here, at class-definition
-    time. An explicit declaration inherited from an ancestor — including an
-    empty tuple — remains authoritative and is *not* re-derived, so a
-    subclass of an explicitly-curated parent inherits that exact curation
-    unless it redeclares. Otherwise ``tunable_param_names`` is set to every
-    declared ``parameter()`` field, in declaration order.
+    An explicit tuple, including an empty one, remains authoritative when inherited.
+    Validate declarations on the class before installing the resolved tuple.
     """
     if "tunable_param_names" in cls.__dict__:
         _validate_explicit_tunable_param_names(cls, cls.__dict__["tunable_param_names"], param_fields)
@@ -164,14 +158,10 @@ def _resolve_tunable_param_names(cls: type[DeviceModel], param_fields: dict[str,
 
 
 def _synthesize_device_init(cls: Any) -> Any:
-    """Build a positional ``__init__`` for a declarative device subclass.
+    """Build the device constructor from its declared fields.
 
-    Declared parameters become positional-or-keyword arguments in
-    declaration order (with their declared defaults); ``levels`` (default
-    from ``cls._default_levels``), ``label`` and the noise kwargs follow as
-    keyword-only. The body forwards to :meth:`DeviceModel.__init__`,
-    which resolves and validates the parameters, so authors get a clean
-    signature without hand-writing one.
+    Parameters accept positional or keyword arguments; settings, levels, label,
+    and noise fields are keyword-only. ``DeviceModel.__init__`` validates values.
     """
     fields = cls.__quchip_param_fields__
     param_fields = {
@@ -181,7 +171,8 @@ def _synthesize_device_init(cls: Any) -> Any:
         name: spec for name, spec in fields.items() if spec.noise
     }
     setting_parameters = tuple(
-        inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=spec.default)
+        inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY,
+                          default=inspect.Parameter.empty if spec.required else spec.default)
         for name, spec in setting_fields(cls).items()
     )
     trailing = setting_parameters + (
@@ -233,7 +224,7 @@ def _synthesize_coupling_init(cls: Any) -> Any:
         inspect.Parameter(
             name,
             inspect.Parameter.KEYWORD_ONLY,
-            default=spec.default,
+            default=inspect.Parameter.empty if spec.required else spec.default,
         )
         for name, spec in setting_fields(cls).items()
     )
@@ -377,7 +368,6 @@ class DeviceModel(BaseDevice, metaclass=DeclarativeMeta):
             object.__setattr__(obj, "_tracking_enabled", False)
             object.__setattr__(obj, "levels", levels)
             object.__setattr__(obj, "label", label)
-            object.__setattr__(obj, "_owner_chips", weakref.WeakSet())
             object.__setattr__(obj, "_connected_drives", [])
             for name, value in zip(names_of_settings, settings):
                 object.__setattr__(obj, name, value)
@@ -425,16 +415,6 @@ class DeviceModel(BaseDevice, metaclass=DeclarativeMeta):
         self.validate()
         # Mutation tracking is switched on automatically by the StateVersioned
         # init wrapper once the outermost __init__ returns.
-
-    def validate(self) -> None:
-        """Cross-field validation hook, run at the end of construction.
-
-        Default is a no-op. Subclasses override to enforce constraints that
-        span multiple declared parameters (e.g. ``2 * edge <= duration``).
-        Checks must be gated on *concrete* scalars via
-        :func:`quchip.utils.jax_utils.maybe_concrete_scalar` so traced
-        parameters never force concretization.
-        """
 
     def _validate_param_write(self, name: str, value: Any) -> None:
         """Extend the base noise-field checks with declared sign constraints.
@@ -548,7 +528,7 @@ class DeviceModel(BaseDevice, metaclass=DeclarativeMeta):
             if spec.serialize and name in d
         }
         return cls(
-            levels=int(d.get("levels", 2)),
+            levels=d.get("levels", 2),
             label=d.get("label"),
             **params,
             **settings,

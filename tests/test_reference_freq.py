@@ -26,11 +26,11 @@ def _plus(chip: Chip, q: DuffingTransmon) -> object:
 
 
 class TestReferenceFreqAttribute:
-    def test_defaults_to_drive_freq(self) -> None:
-        """An unset reference_freq inherits the dressed drive frequency."""
+    def test_default_remains_unset(self) -> None:
+        """Reading an unset reference does not resolve a chip frequency."""
         q = DuffingTransmon(freq=5.01, anharmonicity=-0.30, levels=3, label="q")
         Chip([q], couplings=[])
-        assert float(q.reference_freq) == pytest.approx(float(q.drive_freq))
+        assert q.reference_freq is None
 
     def test_setter_bumps_state_version_and_none_restores(self) -> None:
         """Setting reference_freq invalidates caches; None restores the default."""
@@ -41,7 +41,7 @@ class TestReferenceFreqAttribute:
         assert q.state_version > v0, "setting reference_freq must bump state_version"
         assert float(q.reference_freq) == pytest.approx(4.99)
         q.reference_freq = None
-        assert float(q.reference_freq) == pytest.approx(float(q.drive_freq))
+        assert q.reference_freq is None
 
     def test_override_survives_serialization_round_trip(self) -> None:
         """A set reference_freq round-trips through to_dict/from_dict; unset stays default."""
@@ -52,7 +52,7 @@ class TestReferenceFreqAttribute:
 
         plain = DuffingTransmon(freq=5.0, anharmonicity=-0.30, levels=3, label="q")
         d = plain.to_dict()
-        assert "reference_freq" not in d, "the drive_freq default must not be serialized as an override"
+        assert "reference_freq" not in d, "the automatic default must not be serialized as an override"
         restored_plain = DuffingTransmon.from_dict(d)
         assert restored_plain._reference_freq_override is None
 
@@ -92,7 +92,7 @@ class TestCoRotatingReadout:
 
         t = np.linspace(0.0, 100.0, 101)
         res = simulate(chip, [], t, initial_state=_plus(chip, q),
-                       e_ops={q: [q.sigma_x]}, options={"store_states": True})
+                       e_ops={q: [q.sigma_x]}, states="all")
         sx_eop = np.real(np.asarray(res.expect(q, index=0)))
         sx_op = np.asarray(q.sigma_x.full())
         sx_manual = np.array([np.real(np.trace(sx_op @ np.asarray(res.dm_at(tt).full()))) for tt in t])
@@ -103,7 +103,7 @@ class TestCoRotatingReadout:
     def test_calibrated_lowering_operator_is_non_oscillatory(self) -> None:
         """<a> is stationary when the device sits at its reference (calibrated)."""
         q = DuffingTransmon(freq=5.0, anharmonicity=self.ALPHA, levels=self.LEVELS, label="q")
-        chip = Chip([q], couplings=[])  # reference_freq defaults to drive_freq = 5.0
+        chip = Chip([q], couplings=[])  # resolved reference defaults to the chip transition at 5.0 GHz
         chip.set_frame("rotating")
 
         t = np.linspace(0.0, 200.0, 201)

@@ -5,13 +5,16 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from quchip import Chip, Port, Resonator, VNA
+from quchip import Chip, Port, PortNetwork, Resonator, VNA
 
 
 def test_coherent_resonator_output_has_unit_g1_and_g2() -> None:
     resonator = Resonator(freq=6.0, levels=8, label="r")
     port = Port(resonator, rate=0.04, label="p")
-    vna = VNA(Chip([resonator], ports=[port]), input=port, outputs=[port])
+    vna = VNA(
+        Chip([resonator], port_network=PortNetwork.from_ports([port])),
+        ports=[port],
+    )
     vna.pump(port, freq=6.0, amplitude=0.02)
     delays = np.array([0.0, 2.0, 7.0])
 
@@ -30,9 +33,11 @@ def test_cross_port_correlations_retain_both_field_labels() -> None:
     input_port = Port(resonator, rate=0.03, label="in")
     output_port = Port(resonator, rate=0.04, label="out")
     vna = VNA(
-        Chip([resonator], ports=[input_port, output_port]),
-        input=input_port,
-        outputs=[input_port, output_port],
+        Chip(
+            [resonator],
+            port_network=PortNetwork.from_ports([input_port, output_port]),
+        ),
+        ports=[input_port, output_port],
     )
     vna.pump(input_port, freq=6.0, amplitude=0.02)
     delays = np.array([0.0, 2.0, 7.0])
@@ -49,14 +54,17 @@ def test_cross_port_correlations_retain_both_field_labels() -> None:
 def test_vacuum_output_has_zero_fluctuation_spectrum() -> None:
     resonator = Resonator(freq=6.0, levels=5, label="r")
     port = Port(resonator, rate=0.04, label="p")
-    vna = VNA(Chip([resonator], ports=[port]), input=port, outputs=[port])
+    vna = VNA(
+        Chip([resonator], port_network=PortNetwork.from_ports([port])),
+        ports=[port],
+    )
     frequencies = np.array([-0.1, 0.0, 0.1])
 
     result = vna.output_spectrum(port, frequencies=frequencies)
 
-    np.testing.assert_allclose(result.fluctuation_spectrum, 0.0, atol=1e-10)
-    np.testing.assert_allclose(result.coherent_flux, 0.0, atol=1e-12)
-    np.testing.assert_allclose(result.output_photon_flux, 0.0, atol=1e-12)
+    np.testing.assert_allclose(result.total_fluctuation_spectrum, 0.0, atol=1e-10)
+    np.testing.assert_allclose(result.signal_coherent_flux, 0.0, atol=1e-12)
+    np.testing.assert_allclose(result.signal_photon_flux, 0.0, atol=1e-12)
     assert result.fourier_convention == "2 Re integral_0^inf d tau exp(+i 2 pi f tau) C(tau)"
 
 
@@ -69,18 +77,56 @@ def test_thermal_output_has_g2_zero_near_two() -> None:
         thermal_population=0.2,
     )
     port = Port(resonator, rate=0.03, label="p")
-    vna = VNA(Chip([resonator], ports=[port]), input=port, outputs=[port])
+    vna = VNA(
+        Chip([resonator], port_network=PortNetwork.from_ports([port])),
+        ports=[port],
+    )
 
     result = vna.g2(port, [0.0])
 
     np.testing.assert_allclose(result.values, [2.0], atol=2e-5)
 
 
-def test_dense_output_analysis_reports_its_dimension_cap() -> None:
-    """Dense correlation algebra rejects Hilbert spaces above its explicit cap."""
+def test_qutip_and_dynamiqs_stationary_output_analysis_agree() -> None:
+    """Both backends lower the same spectrum and regression queries independently."""
+    pytest.importorskip("dynamiqs")
+
+    def outputs(backend: str):
+        resonator = Resonator(
+            freq=6.0,
+            levels=6,
+            label="r",
+            T1=20.0,
+            thermal_population=0.15,
+        )
+        port = Port(resonator, rate=0.03, label="p")
+        vna = VNA(
+            Chip(
+                [resonator],
+                port_network=PortNetwork.from_ports([port]),
+                backend=backend,
+            ),
+            ports=[port],
+        )
+        spectrum = vna.output_spectrum(port, frequencies=[-0.05, 0.0, 0.05])
+        return spectrum.total_fluctuation_spectrum, vna.g1(port, [0.0, 2.0]).values, vna.g2(port, [0.0, 2.0]).values
+
+    qutip_values = outputs("qutip")
+    dynamiqs_values = outputs("dynamiqs")
+
+    for qutip_value, dynamiqs_value in zip(qutip_values, dynamiqs_values):
+        np.testing.assert_allclose(np.asarray(dynamiqs_value), qutip_value, atol=2e-7)
+
+
+def test_qutip_output_analysis_is_not_capped_by_engine_dense_dimension() -> None:
+    """QuTiP output analysis uses its native stationary lowering beyond the old dense cap."""
     resonator = Resonator(freq=6.0, levels=17, label="r", T1=20.0)
     port = Port(resonator, rate=0.04, label="p")
-    vna = VNA(Chip([resonator], ports=[port]), input=port, outputs=[port])
+    vna = VNA(
+        Chip([resonator], port_network=PortNetwork.from_ports([port])),
+        ports=[port],
+    )
 
-    with pytest.raises(ValueError, match="Hilbert dimension <= 16"):
-        vna.output_spectrum(port, frequencies=[0.0])
+    result = vna.output_spectrum(port, frequencies=[0.0])
+
+    np.testing.assert_allclose(result.total_fluctuation_spectrum, 0.0, atol=1e-10)

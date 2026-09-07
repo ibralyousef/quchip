@@ -41,6 +41,7 @@ def _build_control_chip() -> tuple[Chip, DuffingTransmon, Resonator, ChargeDrive
 
 def _build_sequence() -> QuantumSequence:
     chip, q, r, q_charge, r_charge, q_flux = _build_control_chip()
+    chip.connect(ControlEquipment(lines=[q_charge, r_charge, q_flux]))
     seq = QuantumSequence(chip)
     seq.charge(q, envelope=Square(duration=10.0, amplitude=0.02))
     seq.charge(q, envelope=Square(duration=6.0, amplitude=0.01), phase=0.2)

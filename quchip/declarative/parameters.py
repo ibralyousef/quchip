@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any, TypeAlias, TypeVar, dataclass_transform
 
 from quchip.utils.jax_utils import maybe_concrete_scalar
+from quchip.utils.values import copy_value
 
 Scalar: TypeAlias = Any
 
@@ -27,6 +28,9 @@ class _Unbound:
     def __repr__(self) -> str:
         return "unbound"
 
+    def __deepcopy__(self, memo: dict[int, Any]) -> _Unbound:
+        return self
+
 
 UNBOUND = _Unbound()
 _DEFAULT_OMITTED = object()
@@ -34,12 +38,9 @@ _DEFAULT_OMITTED = object()
 
 @dataclass(frozen=True)
 class Parameter:
-    """Metadata for a declarative model parameter field.
+    """Metadata for a declared parameter's validation and serialization.
 
-    The metadata is intentionally lightweight: it records validation and
-    serialization intent while leaving the runtime value fully traceable.
-    Sign constraints (``positive`` / ``nonnegative``) are enforced only on
-    concrete scalars, so traced values flow through unchecked.
+    Sign constraints apply to concrete scalars; traced values pass unchecked.
     """
 
     default: Any = UNBOUND
@@ -60,6 +61,10 @@ class Setting:
     default: Any = UNBOUND
     serialize: bool = True
     kw_only: bool = True
+
+    @property
+    def required(self) -> bool:
+        return self.default is UNBOUND
 
 
 @dataclass(frozen=True)
@@ -100,8 +105,8 @@ def parameter(
     Parameters
     ----------
     default : Any, optional
-        Declared default value. When omitted the parameter remains unbound
-        until numerical materialization.
+        Declared default value. Omission makes the constructor argument required.
+        Use ``default=UNBOUND`` to defer its value until numerical materialization.
     positive : bool, optional
         Reject concrete values ``<= 0``. Traced values pass unchecked.
     nonnegative : bool, optional
@@ -172,8 +177,8 @@ class DeclarativeMeta(ABCMeta):
     field_specifiers=(Parameter, parameter, Setting, setting, constructor_field),
     kw_only_default=True,
 )
-class DriveDeclarativeMeta(DeclarativeMeta):
-    """Expose drive parameters as keyword-only synthesized arguments."""
+class KeywordOnlyDeclarativeMeta(DeclarativeMeta):
+    """Expose keyword-only synthesized constructors for control declarations."""
 
 
 def serializable_value(value: Any) -> Any:
@@ -185,12 +190,9 @@ def serializable_value(value: Any) -> Any:
 
 
 def validate_sign(name: str, spec: Parameter, value: Any) -> None:
-    """Enforce a field's declared sign constraint on concrete scalars only.
+    """Enforce declared sign constraints on concrete scalars.
 
-    Shared by construction (:func:`resolve_declared_params`) and
-    post-construction writes (``DeviceModel._validate_param_write``) so the
-    two paths cannot drift. Traced values flow through unchecked;
-    ``None`` means "unset" and always passes.
+    Tracers and ``None`` (unset) pass unchecked.
     """
     if value is UNBOUND:
         return
@@ -246,7 +248,7 @@ def resolve_declared_params(
     for name, spec in resolved_fields.items():
         if name not in params and spec.required:
             raise TypeError(f"Missing required parameter: {name}")
-        value = params.pop(name, spec.default)
+        value = _resolve_declared_value(name, spec, params)
         validate_sign(name, spec, value)
         values[name] = value
     if params:
@@ -258,9 +260,17 @@ def resolve_declared_params(
 def resolve_declared_settings(cls: type, values: dict[str, Any]) -> dict[str, Any]:
     """Pop declared structural settings from *values* and apply defaults."""
     return {
-        name: values.pop(name, spec.default)
+        name: _resolve_declared_value(name, spec, values)
         for name, spec in setting_fields(cls).items()
     }
+
+
+def _resolve_declared_value(name: str, spec: Parameter | Setting, values: dict[str, Any]) -> Any:
+    """Resolve one field, giving each instance its own mutable default."""
+    value = values.pop(name, spec.default)
+    if isinstance(spec, Setting) and value is UNBOUND:
+        raise TypeError(f"Missing required setting: {name}")
+    return copy_value(value) if value is spec.default else value
 
 
 _Field = TypeVar("_Field", Parameter, Setting)
@@ -293,6 +303,37 @@ def parameter_fields(cls: type) -> dict[str, Parameter]:
 def setting_fields(cls: type) -> dict[str, Setting]:
     """Resolve structural setting fields for *cls*, walking the MRO."""
     return _declared_fields(cls, Setting)
+
+
+def authored_component_values(component: Any) -> dict[str, Any]:
+    """Declared numerical and structural values used by copying and cache keys."""
+    names = dict.fromkeys((
+        *component.parameter_values(),
+        *parameter_fields(type(component)),
+        *setting_fields(type(component)),
+        *getattr(type(component), "structural_setting_names", ()),
+    ))
+    return {name: getattr(component, name) for name in names}
+
+
+def copy_authored_fields(source: Any, target: Any) -> None:
+    """Give a derived component independent writable authored values."""
+    from quchip.utils.values import copy_value
+
+    for name, value in copy_value(authored_component_values(source)).items():
+        object.__setattr__(target, name, value)
+
+
+def component_fingerprint(component: Any) -> Any:
+    """Track authored buffer edits as well as ordinary versioned assignments."""
+    from quchip.utils.values import value_fingerprint
+
+    try:
+        values = value_fingerprint(authored_component_values(component))
+    except (ValueError, RecursionError):
+        # A fresh key prevents reuse when the payload cannot be inspected.
+        values = object()
+    return type(component), component.label, component.state_version, values
 
 
 def validate_declared_fields(cls: type) -> None:

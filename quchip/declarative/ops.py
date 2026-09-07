@@ -62,16 +62,14 @@ class LocalOps:
     @property
     def level(self) -> PhysicsExpr:
         """Energy-level index operator in the authored local basis."""
-        if isinstance(self.space, FockSpace):
-            return self.n
         if self.device is None:
             raise ValueError("The energy-level operator requires a resolved device endpoint.")
-        return PhysicsExpr.from_matrix(
-            self.device.energy_level_operator(),
-            labels=(self.label,),
-            dims=(self.space.dimension,),
-            name=rf"\hat \ell_{{{self.label}}}",
-        )
+        from quchip.utils.values import copy_value
+
+        hamiltonian = self.device.unresolved_hamiltonian()
+        if not isinstance(hamiltonian, PhysicsExpr):
+            hamiltonian = copy_value(hamiltonian, readonly=True)
+        return PhysicsExpr("level", (hamiltonian,), (self.label,))
 
     @property
     def n2(self) -> PhysicsExpr:

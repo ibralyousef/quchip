@@ -204,10 +204,14 @@ def test_unwire_restricts_matrix_to_remaining_lines() -> None:
 
 
 def test_crosstalk_matrix_rejects_wrong_shape() -> None:
-    """``set_crosstalk_matrix`` guards against shape mismatches."""
+    """Construction and rebinding reject incompatible crosstalk dimensions."""
     _, equip, *_ = _build_two_drive_chip()
     with pytest.raises(ValueError):
         equip.set_crosstalk_matrix(np.zeros((3, 3)))
+    equip.set_crosstalk_matrix(np.zeros((2, 2)))
+    for name in ("beta", "theta", "delay"):
+        with pytest.raises(ValueError, match="shape"):
+            equip.signal_chain[0].with_parameter_value(name, np.zeros((1, 1)))
 
 
 def test_set_crosstalk_matrix_accepts_nested_lists():

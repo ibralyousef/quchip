@@ -53,7 +53,7 @@ def resolve_drive_program(
     filter_signal_bands: bool | None = None,
 ) -> SignalProgram:
     """Combine one authored signal with its operator-frame phase."""
-    frame = Carrier(freq=TWO_PI * weight * frame_frequency, sign=-1)
+    frame = Carrier(freq=TWO_PI * frame_frequency, sign=-1)
     filters_signal = approximation.filters_terms if filter_signal_bands is None else filter_signal_bands
     if not filters_signal or not has_carrier:
         return Multiply((program, frame))

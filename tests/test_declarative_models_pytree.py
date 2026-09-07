@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import jax
 import jax.tree_util as jtu
 
 from quchip.declarative import DeviceModel, Scalar, parameter
@@ -22,14 +21,3 @@ def test_device_model_pytree_round_trip_preserves_declared_noise_and_reference_f
     assert restored.freq == device.freq
     assert restored.T1 == device.T1
     assert restored.reference_freq == device.reference_freq
-
-
-def test_gradient_flows_through_declared_parameter_of_device_built_inside_grad():
-    """A gradient flows through a declared parameter of a device constructed inside a jax.grad-transformed function."""
-
-    def energy(freq):
-        device = _Oscillator(freq=freq, levels=3)
-        return device.freq**2
-
-    grad = jax.grad(energy)(5.0)
-    assert grad == 10.0

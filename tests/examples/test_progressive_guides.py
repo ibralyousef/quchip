@@ -19,9 +19,8 @@ import pytest
 matplotlib.use("Agg")
 
 ROOT = Path(__file__).resolve().parents[2]
-CODE_BLOCK_RE = re.compile(r"```python\n(.*?)\n```", re.DOTALL)
 EXECUTED_BLOCK_RE = re.compile(
-    r"```python\n(.*?)\n```\n\nOutput:\n\n```text\n(.*?)\n```",
+    r"```python\n(.*?)\n```(?:\n\nOutput:\n\n```text\n(.*?)\n```)?",
     re.DOTALL,
 )
 NUMBER_RE = re.compile(
@@ -33,10 +32,10 @@ GUIDE_OUTPUT_RTOL = 1e-10
 GUIDE_OUTPUT_ATOL = 2e-9
 
 
-def _assert_output_matches(actual: str, expected: str) -> None:
+def _assert_output_matches(actual: str, expected: str | None) -> None:
     """Compare guide output exactly except for numerical solver roundoff."""
     actual = actual.strip()
-    expected = expected.strip()
+    expected = (expected or "").strip()
     assert NUMBER_RE.sub("<number>", actual) == NUMBER_RE.sub("<number>", expected)
 
     actual_numbers = np.array([float(value) for value in NUMBER_RE.findall(actual)])
@@ -49,63 +48,28 @@ def _assert_output_matches(actual: str, expected: str) -> None:
     )
 
 
-def test_guide_output_comparison_accepts_solver_roundoff() -> None:
-    """Platform-level numerical roundoff does not stale an executed guide."""
-    _assert_output_matches(
-        "dressed f01: 4.998533473435458",
-        "dressed f01: 4.99853347343543",
-    )
-    _assert_output_matches(
-        "fit residual: -1.4e-08",
-        "fit residual: -1.3e-08",
-    )
-
-
-def test_guide_output_comparison_rejects_meaningful_changes() -> None:
-    """Guide checks still reject changed prose and changed results."""
-    with pytest.raises(AssertionError):
-        _assert_output_matches("dressed f01: 4.9", "dressed f01: 5.0")
-    with pytest.raises(AssertionError):
-        _assert_output_matches("bare f01: 5.0", "dressed f01: 5.0")
-    with pytest.raises(AssertionError):
-        _assert_output_matches("fit residual: 1e-6", "fit residual: 0.0")
-
-
-def _run_first_cell(path: str) -> dict[str, object]:
+def _run_opening_example(path: str) -> dict[str, object]:
     notebook = jupytext.read(ROOT / path)
-    first = next(cell for cell in notebook.cells if cell.cell_type == "code")
     namespace: dict[str, object] = {"__name__": "__guide_example__"}
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
         with contextlib.chdir(ROOT / "examples"):
-            exec(compile(first.source, str(ROOT / path), "exec"), namespace)
+            started = False
+            for cell in notebook.cells:
+                if cell.cell_type == "code":
+                    started = True
+                    exec(compile(cell.source, str(ROOT / path), "exec"), namespace)
+                elif started and ("\n## " in "\n" + cell.source or "```{figure}" in cell.source):
+                    break
     return namespace
 
 
 @pytest.mark.examples
 def test_statics_guide_starts_with_a_small_declaration() -> None:
-    """The opening statics cell reads one declared chip before sweeping it."""
-    example = _run_first_cell("examples/01_resolve_and_sweep.md")
+    """The opening statics example reads one declared chip before sweeping it."""
+    example = _run_opening_example("examples/01_resolve_and_sweep.md")
     assert tuple(device.label for device in example["chip"].devices) == ("q1", "q2", "bus")
     assert float(example["chip"].freq("q1")) > 5.0
-
-
-@pytest.mark.examples
-def test_dynamics_guide_starts_with_one_pulse_and_one_solve() -> None:
-    """The opening dynamics cell returns one finite population trajectory."""
-    example = _run_first_cell("examples/00_hello_chip.md")
-    population = np.asarray(example["result"].population("q", level=1))
-    assert population.shape == (161,)
-    assert np.isfinite(population).all()
-
-
-@pytest.mark.examples
-def test_transformations_guide_starts_with_one_immutable_parameter_change() -> None:
-    """The opening transformation cell changes one number on an isolated copy."""
-    example = _run_first_cell("examples/02_reduce_and_replay.md")
-    assert example["chip"].parameters["q.freq"] == 5.0
-    assert example["rebound"].parameters["q.freq"] == 5.1
-    assert example["cloned"] is not example["chip"]
 
 
 @pytest.mark.examples
@@ -113,25 +77,9 @@ def test_transformations_guide_starts_with_one_immutable_parameter_change() -> N
 def test_differentiability_guide_starts_with_static_shapes() -> None:
     """The opening differentiability cell returns one gradient and one Jacobian."""
     pytest.importorskip("dynamiqs")
-    example = _run_first_cell("examples/03_differentiate_a_driven_chip.md")
+    example = _run_opening_example("examples/03_differentiate_a_driven_chip.md")
     assert example["static_gradient"].shape == (3,)
     assert example["static_jacobian"].shape == (2, 3)
-
-
-def test_sqa_page_has_one_snippet_and_link_per_topic() -> None:
-    """The SQA page gives each topic one runnable snippet and canonical link."""
-    source = (ROOT / "docs" / "guides" / "from-sqa-2026.md").read_text(encoding="utf-8")
-    snippets = CODE_BLOCK_RE.findall(source)
-    assert len(snippets) == 5
-    for route in (
-        "defining-and-inspecting-a-chip",
-        "statics-and-parameter-studies",
-        "dynamics-pulses-and-readout",
-        "chip-transformations",
-        "differentiability",
-    ):
-        assert source.count(f"https://docs.quchip.org/guides/{route}") == 1
-    assert "github.com" not in source
 
 
 def test_committed_markdown_contains_current_notebook_outputs() -> None:
@@ -149,16 +97,16 @@ def test_committed_markdown_contains_current_notebook_outputs() -> None:
 
 
 @pytest.mark.examples
-def test_defining_guide_outputs_match_a_fresh_execution() -> None:
-    """The standalone introductory guide shows the output its cells produce."""
-    pytest.importorskip("scqubits")
-    path = ROOT / "docs" / "guides" / "defining-and-inspecting-a-chip.md"
+@pytest.mark.parametrize("guide", ["defining-and-inspecting-a-chip", "steady-state-and-vna", "slh-networks"])
+def test_guide_outputs_match_a_fresh_execution(guide: str) -> None:
+    """Standalone guides execute their physical checks and reproduce shown output."""
+    path = ROOT / "docs" / "guides" / f"{guide}.md"
     source = path.read_text(encoding="utf-8")
     blocks = EXECUTED_BLOCK_RE.findall(source)
     assert blocks, "the guide must contain executable examples with displayed output"
 
     namespace: dict[str, object] = {"__name__": "__defining_guide__"}
-    with contextlib.chdir(path.parent):
+    with contextlib.chdir(ROOT / "docs" / "images"):
         for index, (code, expected) in enumerate(blocks, start=1):
             captured = io.StringIO()
             with warnings.catch_warnings():

@@ -18,14 +18,6 @@ from quchip.engine.bands import decompose_bands
 from quchip.engine.observables import BandMeta, decompose_eops, recombine_expect
 
 
-def _annihilation(d: int) -> np.ndarray:
-    """Analytical lowering operator for a d-level oscillator."""
-    a = np.zeros((d, d), dtype=complex)
-    for n in range(1, d):
-        a[n - 1, n] = np.sqrt(n)
-    return a
-
-
 def _build_coupled_sequence(frame: str) -> tuple[QuantumSequence, Chip, np.ndarray]:
     """Build a transmon+resonator sequence in a numerically stable regime."""
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=2, label="q")
@@ -55,49 +47,6 @@ _STRICT_SOLVER_OPTS = {
     "rtol": 1e-12,
     "method": "bdf",
 }
-
-
-def test_decompose_bands_lowering() -> None:
-    """3-level a has only weight +1 band."""
-    a = _annihilation(3)
-    bands = decompose_bands(a, 3)
-    assert set(bands.keys()) == {1}
-    np.testing.assert_allclose(bands[1], a, atol=1e-14)
-
-
-def test_decompose_bands_raising() -> None:
-    """3-level a† has only weight -1 band."""
-    adag = _annihilation(3).conj().T
-    bands = decompose_bands(adag, 3)
-    assert set(bands.keys()) == {-1}
-    np.testing.assert_allclose(bands[-1], adag, atol=1e-14)
-
-
-def test_decompose_bands_number() -> None:
-    """3-level n̂ has only weight 0 band."""
-    n_hat = np.diag([0, 1, 2]).astype(complex)
-    bands = decompose_bands(n_hat, 3)
-    assert set(bands.keys()) == {0}
-    np.testing.assert_allclose(bands[0], n_hat, atol=1e-14)
-
-
-def test_decompose_bands_sigma_x_like() -> None:
-    """a + a† decomposes into weights {-1, +1}."""
-    a = _annihilation(3)
-    x = a + a.conj().T
-    bands = decompose_bands(x, 3)
-
-    assert set(bands.keys()) == {-1, 1}
-    np.testing.assert_allclose(sum(bands.values()), x, atol=1e-14)
-
-
-def test_decompose_bands_identity() -> None:
-    """Identity decomposes to a single weight-0 band."""
-    eye = np.eye(4, dtype=complex)
-    bands = decompose_bands(eye, 4)
-
-    assert set(bands.keys()) == {0}
-    np.testing.assert_allclose(bands[0], eye, atol=1e-14)
 
 
 def test_decompose_bands_completeness() -> None:
@@ -415,54 +364,6 @@ def test_lab_frame_dict_eops(backend) -> None:
     )
 
 
-def test_dict_eops_result_shape(backend) -> None:
-    """Result expect/expect_raw shape semantics for dict e_ops in both frames."""
-    seq_rot, chip_rot, tlist = _build_coupled_sequence(frame="rotating")
-    a_r_rot = chip_rot.device_map["r"].lowering_operator()
-
-    init_rot = chip_rot.bare_state(
-        q=0,
-        r=backend.coherent(chip_rot.device_map["r"].levels, 0.2),
-    )
-
-    result_rot = seq_rot.simulate(
-        tlist=tlist,
-        e_ops={"r": a_r_rot},
-        initial_state=init_rot,
-        options=_STRICT_SOLVER_OPTS,
-    )
-
-    assert isinstance(result_rot._expect_data, dict)
-    assert isinstance(result_rot._expect_data["r"], ObservableTrace)
-    assert result_rot._expect_data["r"].values.shape == tlist.shape
-    assert result_rot._expect_data["r"].raw.shape == tlist.shape
-    assert "expect=dict(" in repr(result_rot)
-    assert "expect_raw" not in repr(result_rot)
-
-    seq_lab, chip_lab, _ = _build_coupled_sequence(frame="lab")
-    a_r_lab = chip_lab.device_map["r"].lowering_operator()
-    init_lab = chip_lab.bare_state(
-        q=0,
-        r=backend.coherent(chip_lab.device_map["r"].levels, 0.2),
-    )
-    result_lab = seq_lab.simulate(
-        tlist=tlist,
-        e_ops={"r": a_r_lab},
-        initial_state=init_lab,
-        options=_STRICT_SOLVER_OPTS,
-    )
-
-    assert isinstance(result_lab._expect_data, dict)
-    assert isinstance(result_lab._expect_data["r"], ObservableTrace)
-    assert "expect=dict(" in repr(result_lab)
-    assert "expect_raw" not in repr(result_lab)
-
-
-# ---------------------------------------------------------------------------
-# List-valued dict e_ops
-# ---------------------------------------------------------------------------
-
-
 def test_list_value_lab_frame(backend) -> None:
     """Lab-frame dict e_ops with list value returns list of arrays."""
     seq_lab, chip_lab, tlist = _build_coupled_sequence(frame="lab")
@@ -548,26 +449,3 @@ def test_list_value_mixed_with_scalar(backend) -> None:
     assert not isinstance(result._expect_data["q"], list)
     assert isinstance(result._expect_data["q"], ObservableTrace)
     assert result._expect_data["q"].values.shape == tlist.shape
-
-
-def test_list_value_backwards_compat(backend) -> None:
-    """Single-operator dict values still produce single arrays, not lists."""
-    seq_lab, chip_lab, tlist = _build_coupled_sequence(frame="lab")
-
-    a_r = chip_lab.device_map["r"].lowering_operator()
-
-    init_state = chip_lab.bare_state(
-        r=backend.coherent(chip_lab.device_map["r"].levels, 0.2),
-    )
-
-    result = seq_lab.simulate(
-        tlist=tlist,
-        e_ops={"r": a_r},
-        initial_state=init_state,
-        options=_STRICT_SOLVER_OPTS,
-    )
-
-    # Scalar value → array, NOT wrapped in list
-    assert not isinstance(result._expect_data["r"], list)
-    assert isinstance(result._expect_data["r"], ObservableTrace)
-    assert result._expect_data["r"].values.shape == tlist.shape

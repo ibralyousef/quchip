@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from math import prod
 from typing import Any, Mapping
 
 import jax.numpy as jnp
+
+from quchip.utils.values import copy_value, value_fingerprint
 
 
 class UnboundParameterError(ValueError):
@@ -44,7 +46,7 @@ class PhysicsExpr:
     @classmethod
     def literal(cls, value: Any) -> "PhysicsExpr":
         """Create a literal scalar leaf."""
-        return cls("literal", (value,))
+        return cls("literal", (copy_value(value, readonly=True),))
 
     @classmethod
     def from_matrix(
@@ -58,7 +60,7 @@ class PhysicsExpr:
         """Create a named backend-neutral matrix contribution."""
         if len(labels) != len(dims):
             raise ValueError("Matrix labels and dimensions must have the same length.")
-        return cls("matrix", (value, tuple(dims), name), tuple(labels))
+        return cls("matrix", (copy_value(value, readonly=True), tuple(dims), name), tuple(labels))
 
     @classmethod
     def from_function(
@@ -98,7 +100,7 @@ class PhysicsExpr:
         name: str,
     ) -> "PhysicsExpr":
         """Create a named authored ket contribution."""
-        return cls("state", (value, tuple(dims), name), tuple(labels))
+        return cls("state", (copy_value(value, readonly=True), tuple(dims), name), tuple(labels))
 
     @classmethod
     def from_state_function(
@@ -134,7 +136,7 @@ class PhysicsExpr:
 
     def with_bindings(self, bindings: Mapping[str, Any]) -> "PhysicsExpr":
         """Attach default values used only by direct numerical inspection."""
-        return replace(self, _bindings=dict(bindings))
+        return replace(self, _bindings=copy_value(dict(bindings), readonly=True))
 
     def parameter_paths(self) -> tuple[str, ...]:
         """Return referenced dotted parameter paths in authored order."""
@@ -149,6 +151,8 @@ class PhysicsExpr:
             values.extend(node._bindings.values())
             if node.kind in ("literal", "matrix", "state", "signal"):
                 values.append(node.args[0])
+            if node.kind == "level" and not isinstance(node.args[0], PhysicsExpr):
+                values.append(node.args[0])
         return tuple(values)
 
     @property
@@ -156,6 +160,8 @@ class PhysicsExpr:
         """Matrix shape implied by this operator expression's static support."""
         if not self.labels:
             raise AttributeError("Scalar expressions do not have a matrix shape.")
+        if self.kind == "level":
+            return self.args[0].shape
         if self.kind == "op":
             dimension = self.args[1].dimension
             return (dimension, dimension)
@@ -526,9 +532,7 @@ def scalar_signal_program(expr: PhysicsExpr) -> Any:
     """Lower scalar signal algebra into the backend-neutral signal program."""
     from quchip.engine.ir import Add, Constant, Multiply, Scale, SignalPower
 
-    values: dict[str, Any] = {}
-    for node in _walk_expr(expr):
-        values.update(node._bindings)
+    values = _bound_values(expr)
 
     def lower(node: PhysicsExpr) -> Any:
         if node.labels:
@@ -560,21 +564,85 @@ def scalar_signal_program(expr: PhysicsExpr) -> Any:
     return lower(expr)
 
 
+def _bound_values(expr: PhysicsExpr, bindings: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for node in _walk_expr(expr):
+        values.update(node._bindings)
+    if bindings is not None:
+        values.update(bindings)
+    return values
+
+
+def _same_authored_value(first: Any, second: Any) -> bool:
+    """Compare known authored structure and values, using identity for tracers."""
+    from quchip.utils.jax_utils import contains_tracer
+
+    if first is second:
+        return True
+    if type(first) is not type(second):
+        return False
+    if is_dataclass(first) and not isinstance(first, type):
+        return all(_same_authored_value(getattr(first, item.name), getattr(second, item.name))
+                   for item in fields(first) if not (isinstance(first, PhysicsExpr) and item.name == "_bindings"))
+    if isinstance(first, (tuple, list)):
+        return len(first) == len(second) and all(_same_authored_value(a, b) for a, b in zip(first, second))
+    if contains_tracer((first, second)):
+        return False
+    try:
+        return value_fingerprint(first) == value_fingerprint(second)
+    except (ValueError, RecursionError):
+        return False
+
+
+def _matching_local_basis(
+    level: PhysicsExpr, bases: Mapping[str, Any] | None, bindings: Mapping[str, Any],
+) -> Any | None:
+    record = None if bases is None else bases.get(level.labels[0])
+    if record is None or not _same_authored_value(level.args[0], record.authored_hamiltonian):
+        return None
+    hamiltonian = record.authored_hamiltonian
+    if isinstance(hamiltonian, PhysicsExpr):
+        expected = _bound_values(hamiltonian)
+        if not all(path in bindings and path in expected and _same_authored_value(bindings[path], expected[path])
+                   for path in hamiltonian.parameter_paths()):
+            return None
+    return record
+
+
+def is_energy_diagonal(expr: Any, bases: Mapping[str, Any]) -> bool:
+    """Whether authored algebra guarantees zero energy-change weight in captured bases."""
+    from quchip.devices.spaces import ChargeSpace, FockSpace, PhaseGridSpace
+
+    if not isinstance(expr, PhysicsExpr):
+        return False
+    bindings = _bound_values(expr)
+
+    def diagonal(node: PhysicsExpr) -> bool:
+        if not node.labels:
+            return True
+        if node.kind == "level":
+            return _matching_local_basis(node, bases, bindings) is not None
+        if node.kind == "op":
+            return node.args[0] == "I" and type(node.args[1]) in (FockSpace, ChargeSpace, PhaseGridSpace)
+        if node.kind in ("add", "sub", "scale", "tensor", "matmul", "embed"):
+            return all(diagonal(arg) for arg in node.args if isinstance(arg, PhysicsExpr))
+        return False
+
+    return diagonal(expr)
+
+
 def materialize_expr(
     expr: Any,
     backend: Any,
     *,
     bindings: Mapping[str, Any] | None = None,
     t: Any | None = None,
+    local_bases: Mapping[str, Any] | None = None,
 ) -> Any:
     """Lower symbolic physics, passing an already-native contribution through."""
     if not isinstance(expr, PhysicsExpr):
         return expr
-    values: dict[str, Any] = {}
-    for node in _walk_expr(expr):
-        values.update(node._bindings)
-    if bindings is not None:
-        values.update(bindings)
+    values = _bound_values(expr, bindings)
     missing = [path for path in expr.parameter_paths() if path not in values]
     if missing:
         raise UnboundParameterError("Missing numerical bindings: " + ", ".join(missing))
@@ -593,13 +661,13 @@ def materialize_expr(
         if node.kind == "matrix":
             value, dims, _name = node.args
             return backend.from_array(
-                backend.to_array(value),
+                value,
                 dims=[list(dims), list(dims)],
             )
         if node.kind == "state":
             value, dims, _name = node.args
             return backend.from_array(
-                backend.to_array(value),
+                value,
                 dims=[list(dims), [1]],
             )
         if node.kind == "function":
@@ -615,6 +683,16 @@ def materialize_expr(
         if node.kind == "op":
             name, space = node.args
             return space.operator(name, backend)
+        if node.kind == "level":
+            from quchip.engine.basis import resolve_local_basis
+
+            record = _matching_local_basis(node, local_bases, values)
+            if record is None:
+                record = resolve_local_basis(materialize_array(node.args[0], bindings=values))
+            if record.kind == "native" and record.energy_to_solver() is None:
+                return backend.number(record.native_dim)
+            return backend.from_array(record.authored_level_operator(),
+                                      dims=[[record.native_dim], [record.native_dim]])
         if node.kind == "embed":
             local = lower(node.args[0])
             labels, dims = node.args[1:]
@@ -639,6 +717,9 @@ def materialize_expr(
         if node.kind in ("scale", "mul"):
             return left * right
         if node.kind == "pow":
+            exponent = node.args[1]
+            if exponent.kind == "literal" and exponent.args[0] == -1:
+                return 1.0 / left
             return left ** right
         raise TypeError(f"Unknown PhysicsExpr kind {node.kind!r}.")
 
@@ -744,6 +825,8 @@ def materialize_scalar(
 
 
 def _latex(expr: PhysicsExpr, parent_precedence: int = 0) -> str:
+    if expr.kind == "level":
+        return rf"\hat \ell_{{{expr.labels[0]}}}"
     if expr.kind == "literal":
         value = expr.args[0]
         return f"{value:g}" if isinstance(value, (int, float, complex)) else str(value)

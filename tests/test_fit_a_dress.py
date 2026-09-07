@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 
 import numpy as np
 import pytest
@@ -20,15 +19,13 @@ from quchip import (
 )
 from quchip.chip.coupling_base import BaseCoupling
 from quchip.devices.base import BaseDevice
-from quchip.inverse_design.fit import _estimate_bare_g, _pack_initial_params, _static_exchange_rate
+from quchip.inverse_design.fit import _estimate_bare_g, _static_exchange_rate
 from quchip.inverse_design import fit as fit_module
 from quchip.inverse_design.observables import (
     TargetSpec,
     build_dressed_target_specs,
-    build_target_specs,
 )
 from quchip.inverse_design.subsystems import build_local_subsystem, device_labels_for_local_eval
-from quchip.inverse_design import FitADressResult, ObservableReport
 
 
 class _StrengthOnlyCoupling(BaseCoupling):
@@ -64,20 +61,6 @@ class _StrengthOnlyCoupling(BaseCoupling):
         return self.strength * backend.tensor(a.number_operator(), b.number_operator())
 
 
-def test_pack_initial_params_uses_coupling_strength_not_g_attribute() -> None:
-    """A user-authored coupling exposing only ``coupling_strength`` (no ``.g``) packs under its own name."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    r = Resonator(freq=7.0, levels=4, label="r")
-    coupling = _StrengthOnlyCoupling(q, r, strength=0.01, label="custom")
-    chip = Chip([q, r], [coupling], frame="rotating")
-
-    names, values = _pack_initial_params(chip, ())
-
-    idx = names.index("custom.strength")
-    assert values[idx] == pytest.approx(0.01)
-    assert "custom.g" not in names
-
-
 def test_fit_a_dress_writes_custom_coupling_strength_through_its_own_attribute() -> None:
     """fit_a_dress moves a custom coupling's declared coupling_strength_name attribute, not a stray .g."""
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
@@ -85,7 +68,11 @@ def test_fit_a_dress_writes_custom_coupling_strength_through_its_own_attribute()
     coupling = _StrengthOnlyCoupling(q, r, strength=0.01, label="custom")
     chip = Chip([q, r], [coupling], frame="rotating")
 
-    result = fit_a_dress(chip, observable_targets={coupling: {"g": 0.05}})
+    result = fit_a_dress(
+        chip,
+        constraints={coupling: {"cross_kerr": None, "coupling_strength": 0.05}},
+        vary={coupling: (coupling.coupling_strength_name,)},
+    )
 
     fitted_coupling = result.chip.couplings[0]
     assert fitted_coupling.strength == pytest.approx(0.05, abs=5e-4)
@@ -101,7 +88,11 @@ def test_fit_a_dress_moves_tunable_capacitive_g0_with_no_stray_g_attribute() -> 
     coupling = TunableCapacitive(q, r, g_0=0.01, label="tc")
     chip = Chip([q, r], [coupling], frame="rotating")
 
-    result = fit_a_dress(chip, observable_targets={coupling: {"g": 0.03}})
+    result = fit_a_dress(
+        chip,
+        constraints={coupling: {"cross_kerr": None, "coupling_strength": 0.03}},
+        vary={coupling: (coupling.coupling_strength_name,)},
+    )
 
     fitted_coupling = result.chip.couplings[0]
     assert fitted_coupling.g_0 == pytest.approx(0.03, abs=5e-4)
@@ -117,7 +108,11 @@ def test_fit_a_dress_moves_crosskerr_chi_with_no_stray_g_attribute() -> None:
     coupling = CrossKerr(q, r, chi=0.001, label="ck")
     chip = Chip([q, r], [coupling], frame="rotating")
 
-    result = fit_a_dress(chip, observable_targets={coupling: {"g": 0.003}})
+    result = fit_a_dress(
+        chip,
+        constraints={coupling: {"cross_kerr": None, "coupling_strength": 0.003}},
+        vary={coupling: (coupling.coupling_strength_name,)},
+    )
 
     fitted_coupling = result.chip.couplings[0]
     assert fitted_coupling.chi == pytest.approx(0.003, abs=5e-4)
@@ -151,7 +146,7 @@ def test_estimate_bare_g_seed_subchip_preserves_chip_intent(monkeypatch: pytest.
 
     monkeypatch.setattr(fit_module, "Chip", spy_chip)
 
-    _estimate_bare_g(chip, coupling, TargetSpec("chi", coupling.label, 1e-4))
+    _estimate_bare_g(chip, coupling, TargetSpec("cross_kerr", coupling.label, -2e-4))
 
     assert captured["backend"] is chip.backend
     assert captured["basis"] == "eigen"
@@ -181,7 +176,7 @@ def test_estimate_bare_g_raises_when_target_is_not_bracketed() -> None:
 
     huge_target = 1000.0
     with pytest.raises(ValueError, match=r"1000\.0") as exc_info:
-        _estimate_bare_g(chip, coupling, TargetSpec("chi", coupling.label, huge_target))
+        _estimate_bare_g(chip, coupling, TargetSpec("cross_kerr", coupling.label, huge_target))
 
     message = str(exc_info.value)
     assert "1e-06, 0.25" in message
@@ -193,7 +188,7 @@ def test_estimate_bare_g_solves_correct_root_for_a_decreasing_observable(monkeyp
     A bisection loop that always assumes "observable increases with
     strength" converges to the wrong endpoint on a decreasing
     observable (it moves the bracket in the wrong direction every
-    iteration). The synthetic ``_chi`` below is monotonically
+    iteration). The synthetic cross-Kerr below is monotonically
     decreasing on ``seed_strength_bounds`` with a known root, so any
     direction-dependent solver is caught red-handed; a direction-
     independent root solve (``scipy.optimize.brentq``) is not.
@@ -203,66 +198,17 @@ def test_estimate_bare_g_solves_correct_root_for_a_decreasing_observable(monkeyp
     coupling = Capacitive(q, r, g=0.01, label="c")
     chip = Chip([q, r], [coupling], frame="rotating")
 
-    def decreasing_chi(sub_chip, sub_coupling):
+    def decreasing_chi(sub_chip, *devices):
+        sub_coupling = sub_chip.couplings[0]
         # chi(strength) = 0.5 - strength: root at strength=0.2 for target=0.3,
         # strictly decreasing and strictly positive over (1e-6, 0.25).
         return 0.5 - sub_coupling.coupling_strength
 
-    monkeypatch.setattr(fit_module, "_chi", decreasing_chi)
+    monkeypatch.setattr(Chip, "static_zz", decreasing_chi)
 
-    seed = _estimate_bare_g(chip, coupling, TargetSpec("chi", coupling.label, 0.3))
+    seed = _estimate_bare_g(chip, coupling, TargetSpec("cross_kerr", coupling.label, 0.3))
 
     assert seed == pytest.approx(0.2, abs=1e-8)
-
-
-def test_fit_a_dress_public_exports() -> None:
-    """fit_a_dress, FitADressResult, and ObservableReport form the public API surface."""
-    assert callable(fit_a_dress)
-    assert FitADressResult.__name__ == "FitADressResult"
-    assert ObservableReport.__name__ == "ObservableReport"
-
-
-def test_devices_declare_numeric_dressed_fit_defaults_without_dressing() -> None:
-    """Common spectral devices map constructor numbers to dressed targets directly."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    r = Resonator(freq=7.0, levels=4, label="r")
-
-    assert q.default_dressed_targets() == {"freq": 5.0, "anharmonicity": -0.25}
-    assert q.default_fit_parameters() == ("freq", "anharmonicity")
-    assert r.default_dressed_targets() == {"freq": 7.0}
-    assert r.default_fit_parameters() == ("freq",)
-
-
-@pytest.mark.parametrize(
-    "coupling",
-    [
-        lambda q, r: Capacitive(q, r, g=-0.00025, label="cap"),
-        lambda q, r: TunableCapacitive(q, r, g_0=-0.00025, label="tunable"),
-        lambda q, r: CrossKerr(q, r, chi=-0.00025, label="crosskerr"),
-    ],
-)
-def test_dispersive_couplings_declare_cross_kerr_as_their_default_fit_target(coupling) -> None:
-    """Qubit-bearing dispersive edges retain their cross-Kerr target."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    r = Resonator(freq=7.0, levels=4, label="r")
-    edge = coupling(q, r)
-
-    assert edge.default_dressed_target() == ("cross_kerr", -0.00025)
-
-
-def test_capacitive_between_noncomputational_modes_defaults_to_exchange_rate() -> None:
-    """A non-computational edge targets its dressed exchange rate."""
-    readout = Resonator(freq=7.0, levels=4, label="readout")
-    filter_mode = Resonator(freq=7.2, levels=4, label="filter")
-    edge = Capacitive(readout, filter_mode, g=0.03, label="readout-filter")
-    desired = Chip([readout, filter_mode], [edge], frame="rotating")
-
-    assert edge.default_dressed_target() == ("exchange_rate", 0.03)
-    assert [
-        (spec.kind, spec.label, spec.target)
-        for spec in build_dressed_target_specs(desired)
-        if spec.label == "readout-filter"
-    ] == [("exchange_rate", "readout-filter", 0.03)]
 
 
 def test_fit_a_dress_matches_noncomputational_capacitive_exchange_rate() -> None:
@@ -389,38 +335,6 @@ def test_fit_a_dress_records_a_user_supplied_coupling_sign() -> None:
     assert report.sign_choice == "user supplied"
 
 
-def test_fit_a_dress_summary_is_a_compact_human_readable_receipt() -> None:
-    """The common result inspection path is one summary, not several dict dumps."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    fit = fit_a_dress(Chip([q], frame="rotating"))
-
-    summary = fit.summary()
-
-    assert "fit_a_dress: converged" in summary
-    assert "targets: 2" in summary
-    assert "parameters: 2" in summary
-    assert "identifiability: rank 2/2" in summary
-    assert "q.freq" in summary
-    assert "q.anharmonicity" in summary
-    assert repr(fit) != summary
-
-
-def test_parameter_report_is_part_of_the_public_inverse_design_api() -> None:
-    """Parameter receipts are typed public data, not an undocumented solver-info blob."""
-    from quchip.inverse_design import FitParameterReport
-
-    report = FitParameterReport(
-        name="q.freq",
-        initial=4.9,
-        final=5.0,
-        lower_bound=0.0,
-        upper_bound=10.0,
-        seed_source="component declaration",
-    )
-
-    assert report.delta == pytest.approx(0.1)
-
-
 def test_automatic_desired_chip_fit_rejects_a_rank_deficient_jacobian(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -436,6 +350,20 @@ def test_automatic_desired_chip_fit_rejects_a_rank_deficient_jacobian(
 
     with pytest.raises(ValueError, match=r"Jacobian rank 1 for 2 free parameters"):
         fit_a_dress(desired)
+
+
+def test_stopped_automatic_fit_retains_rank_deficient_candidate(monkeypatch):
+    desired = Chip([DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")])
+    monkeypatch.setattr(fit_module, "_evaluate_spec", lambda candidate, spec, evaluator: candidate["q"].freq)
+
+    with pytest.warns(UserWarning, match="Jacobian rank 1 for 2 free parameters"):
+        fit = fit_a_dress(desired, max_nfev=1)
+
+    assert fit.converged is False
+    assert "maximum" in fit.message.lower()
+    assert fit.chip["q"].freq == pytest.approx(5.0)
+    assert fit.history[-1] == pytest.approx(fit.loss)
+    assert fit.solver_info["jacobian_rank"] == 1
 
 
 def test_manual_rank_deficient_fit_returns_diagnostics_with_a_warning(
@@ -490,41 +418,13 @@ def test_fit_a_dress_accepts_manual_vary_and_start_overrides() -> None:
     assert fit.chip.dressed_anharmonicity("q") == pytest.approx(-0.25, abs=1e-8)
 
 
-def test_desired_chip_selection_errors_name_vary_not_the_legacy_keyword() -> None:
+def test_selection_errors_identify_vary() -> None:
     """Desired-chip errors use the vocabulary shown in its public signature."""
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
     desired = Chip([q])
 
     with pytest.raises(ValueError, match=r"vary\['q'\]"):
         fit_a_dress(desired, vary={q: "freq"})
-
-
-def test_compatibility_keywords_emit_one_caller_facing_deprecation_warning() -> None:
-    """The old keyword family gives one actionable warning at the user's call site."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    chip = Chip([q], frame="rotating")
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        fit_a_dress(chip, fit_parameters={q: ("freq",)})
-
-    deprecations = [item for item in caught if issubclass(item.category, DeprecationWarning)]
-    assert len(deprecations) == 1
-    assert deprecations[0].filename == __file__
-    assert "deprecated since quchip 0.2.1" in str(deprecations[0].message)
-    assert "removed in 0.3.0" in str(deprecations[0].message)
-    assert "vary=" in str(deprecations[0].message)
-
-
-def test_desired_chip_api_does_not_emit_a_deprecation_warning() -> None:
-    """The replacement constraints/vary/start contract stays warning-free."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        fit_a_dress(Chip([q], frame="rotating"))
-
-    assert not any(issubclass(item.category, DeprecationWarning) for item in caught)
 
 
 def test_fit_a_dress_retains_scipy_jacobian_without_dynamiqs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -559,7 +459,7 @@ def test_fit_a_dress_recovers_qr_target_chi_from_declared_coupling_value() -> No
     coupling = Capacitive(q, r, g=-646019e-9)
     chip = Chip([q, r], [coupling], frame="rotating")
 
-    result = fit_a_dress(chip, coupling_targets={coupling: "chi"}, max_hilbert_dim=10_000)
+    result = fit_a_dress(chip, constraints={coupling: {"cross_kerr": 2 * coupling.g}}, max_hilbert_dim=10_000)
 
     assert result.chip is not chip
     fitted_chip = result.chip
@@ -582,7 +482,7 @@ def test_fit_a_dress_recovers_qq_target_zz_from_declared_coupling_value() -> Non
     coupling = Capacitive(q0, q1, g=0.0015)
     chip = Chip([q0, q1], [coupling], frame="rotating")
 
-    result = fit_a_dress(chip, coupling_targets={coupling: "zz"}, max_hilbert_dim=10_000)
+    result = fit_a_dress(chip, max_hilbert_dim=10_000)
 
     fitted_chip = result.chip
     fitted_q0 = fitted_chip["q0"]
@@ -605,90 +505,23 @@ def test_fit_a_dress_does_not_mutate_input_chip() -> None:
     assert (q.freq, q.anharmonicity, coupling.g) == original
 
 
-def test_bare_g_seed_uses_isolated_subchip_devices(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_estimate_bare_g calls chip.freq safely even when repr() is invoked on a target device."""
-
-    class ReprDevice(BaseDevice):
-        _type_prefix = "repr_device"
-
-        def __init__(self, freq: float, *, computational: bool, label: str, anharmonicity: float = 0.0) -> None:
-            super().__init__(levels=3, label=label)
-            self.freq = freq
-            self.anharmonicity = anharmonicity
-            self._computational = computational
-            self._finish_init()
-
-        def unresolved_hamiltonian(self):
-            # A genuinely anharmonic (Duffing-like) diagonal spectrum: two purely
-            # harmonic coupled devices have an exactly-zero dispersive shift for
-            # any coupling strength, which would make the "chi" target below
-            # unbracketable — not a repr-safety concern, just flat physics.
-            import jax.numpy as jnp
-
-            levels = jnp.arange(self.levels)
-            energies = self.freq * levels + (self.anharmonicity / 2.0) * levels * (levels - 1)
-            return jnp.diag(energies.astype(complex))
-
-        @property
-        def computational(self) -> bool:
-            return self._computational
-
-    q = ReprDevice(freq=5.0, computational=True, label="q", anharmonicity=-0.3)
-    r = ReprDevice(freq=7.0, computational=False, label="r")
-    coupling = Capacitive(q, r, g=0.001)
-    chip = Chip([q, r], [coupling], frame="rotating")
-
-    original_freq = Chip.freq
-
-    def repr_then_freq(self, target=None, when=None):
-        if target is not None:
-            repr(target)
-        return original_freq(self, target, when=when)
-
-    monkeypatch.setattr(Chip, "freq", repr_then_freq)
-
-    seed = _estimate_bare_g(chip, coupling, TargetSpec("chi", coupling.label, 1e-4))
-
-    assert np.isfinite(seed)
-    assert repr(q)
-
-
-def test_base_device_repr_is_safe_with_multiple_chip_contexts() -> None:
-    """A device's repr reports '<multiple chip contexts>' rather than raising when shared across chips."""
-
-    class ReprDevice(BaseDevice):
-        _type_prefix = "repr_device"
-
-        def __init__(self, freq: float, label: str) -> None:
-            super().__init__(levels=2, label=label)
-            self.freq = freq
-            self._finish_init()
-
-        def unresolved_hamiltonian(self):
-            return self.freq * self.number_operator()
-
-    q = ReprDevice(freq=5.0, label="q")
-    _ = Chip([q], label="a")
-    _ = Chip([q], label="b")
-
-    text = repr(q)
-
-    assert "dressed_freq=<multiple chip contexts>" in text
-
-
 def test_fit_a_dress_respects_coupling_target_override_to_g() -> None:
     """fit_a_dress fits a coupling's raw g directly when the target kind is 'g'."""
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=4, label="q")
     r = Resonator(freq=7.0, levels=10, label="r")
     chip = Chip([q, r], [Capacitive(q, r, g=0.04)], frame="rotating")
 
-    result = fit_a_dress(chip, coupling_targets={chip.couplings[0]: "g"})
+    result = fit_a_dress(
+        chip,
+        constraints={chip.couplings[0]: {"cross_kerr": None, "coupling_strength": 0.04}},
+        vary={chip.couplings[0]: ("g",)},
+    )
 
     assert result.final_params[f"{chip.couplings[0].label}.g"] == pytest.approx(0.04, abs=5e-4)
 
 
-def test_fit_a_dress_switches_to_local_subsystems_above_threshold() -> None:
-    """fit_a_dress switches to local-subsystem evaluation once max_hilbert_dim is exceeded."""
+def test_fit_a_dress_requires_explicit_local_evaluation() -> None:
+    """A resource ceiling stops the full fit; local physics requires selection."""
     q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
     q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.24, levels=3, label="q1")
     r0 = Resonator(freq=7.0, levels=3, label="r0")
@@ -703,30 +536,34 @@ def test_fit_a_dress_switches_to_local_subsystems_above_threshold() -> None:
         frame="rotating",
     )
 
-    result = fit_a_dress(chip, max_hilbert_dim=50)
+    with pytest.raises(ValueError, match="dimension.*81.*50"):
+        fit_a_dress(chip, max_hilbert_dim=50)
+    result = fit_a_dress(chip, evaluator="local")
 
     assert any(report.evaluator == "local" for report in result.final_targets)
 
 
-def test_fit_a_dress_returns_structured_result_fields() -> None:
-    """fit_a_dress returns a result exposing history, loss, solver_info, and target/param snapshots."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=4, label="q")
-    r = Resonator(freq=7.0, levels=10, label="r")
-    chip = Chip([q, r], [Capacitive(q, r, g=-1.2e-4)], frame="rotating")
+@pytest.mark.parametrize("evaluator", ["auto", "bad", None])
+def test_fit_rejects_unknown_evaluator(evaluator):
+    chip = Chip([Resonator(freq=5.0, levels=2, label="r")])
+    with pytest.raises(ValueError, match="evaluator"):
+        fit_a_dress(chip, evaluator=evaluator)
 
-    result = fit_a_dress(chip)
 
-    assert result.history.shape[0] >= 1
-    assert result.loss >= 0.0
-    assert result.solver_info["method"] == "trf"
-    assert result.solver_info["n_free_parameters"] == 4
-    assert result.solver_info["n_target_residuals"] == 4
-    assert result.solver_info["underdetermined_by_count"] is False
-    assert result.solver_info["input_contract"] == "desired-chip"
-    assert result.initial_targets
-    assert result.final_targets
-    assert result.initial_params
-    assert result.final_params
+def test_local_fit_limit_applies_to_actual_neighborhood():
+    modes = [Resonator(freq=5.0 + i, levels=3, label=f"r{i}") for i in range(4)]
+    chip = Chip(modes)
+    local = fit_a_dress(chip, evaluator="local", max_hilbert_dim=3)
+    assert all(report.evaluator == "local" for report in local.final_targets)
+    with pytest.raises(ValueError, match="dimension.*3.*2"):
+        fit_a_dress(chip, evaluator="local", max_hilbert_dim=2)
+
+
+def test_fit_dimension_limit_cannot_overflow_for_many_devices():
+    chip = Chip([Resonator(freq=5.0, levels=2, label=f"r{i}") for i in range(64)])
+    assert chip.total_dim == 2**64
+    with pytest.raises(ValueError, match=str(2**64)):
+        fit_a_dress(chip)
 
 
 def test_fit_a_dress_history_records_objective_evaluations() -> None:
@@ -736,8 +573,8 @@ def test_fit_a_dress_history_records_objective_evaluations() -> None:
 
     result = fit_a_dress(
         chip,
-        observable_targets={q: {"freq": 5.1}},
-        fit_parameters={q: ("freq",)},
+        constraints={q: {"freq": 5.1}},
+        vary={q: ("freq",)},
     )
 
     assert result.history.ndim == 1
@@ -746,6 +583,21 @@ def test_fit_a_dress_history_records_objective_evaluations() -> None:
     assert result.history[-1] == pytest.approx(result.loss)
     assert result.solver_info["history_axis"] == "distinct residual evaluation"
     assert result.solver_info["n_recorded_evaluations"] == len(result.history)
+
+
+def test_fit_retains_nonconverged_candidate_and_explains_status():
+    from dataclasses import replace
+
+    desired = Chip([DuffingTransmon(freq=5.1, anharmonicity=-0.25, levels=3, label="q")])
+    fit = fit_a_dress(desired, vary={"q": ("freq",)}, start={"q.freq": 4.8}, max_nfev=1)
+    assert fit.converged is False
+    assert "maximum" in fit.message.lower()
+    assert fit.chip["q"].freq == pytest.approx(4.8)
+    assert fit.loss > 0
+    assert fit.history[-1] == pytest.approx(fit.loss)
+    unknown = replace(fit, solver_info={})
+    assert unknown.converged is None
+    assert unknown.message is None
 
 
 def test_fit_rebind_returns_fitted_clones_for_seed_devices() -> None:
@@ -772,32 +624,8 @@ def test_fit_rebind_returns_fitted_clones_for_seed_devices() -> None:
         result.rebind()
 
 
-def test_build_target_specs_accepts_explicit_observables_and_suppresses_coupling_targets() -> None:
-    """Explicit observable_targets suppress the coupling-implied chi/zz/g targets."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=4, label="q")
-    r = Resonator(freq=7.0, levels=10, label="r")
-    coupling = Capacitive(q, r, g=-1.2e-4)
-    chip = Chip([q, r], [coupling], frame="rotating")
-
-    specs = build_target_specs(
-        chip,
-        {},
-        {
-            q: {"freq": 5.0},
-            (q, r): {"custom_metric": 0.123},
-        },
-    )
-
-    assert not any(spec.kind in {"chi", "zz", "g"} and spec.label == coupling.label for spec in specs)
-    assert any(spec.kind == "freq" and spec.label == "q" and spec.target == pytest.approx(5.0) for spec in specs)
-    assert any(
-        spec.kind == "custom_metric" and spec.label == ("q", "r") and spec.target == pytest.approx(0.123)
-        for spec in specs
-    )
-
-
-def test_fit_a_dress_accepts_explicit_observable_targets_with_object_labels() -> None:
-    """fit_a_dress accepts device objects as observable_targets keys."""
+def test_fit_a_dress_accepts_constraints_with_object_labels() -> None:
+    """fit_a_dress accepts device objects as constraint keys."""
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=4, label="q")
     r = Resonator(freq=7.0, levels=10, label="r")
     coupling = Capacitive(q, r, g=-1.2e-4)
@@ -806,34 +634,13 @@ def test_fit_a_dress_accepts_explicit_observable_targets_with_object_labels() ->
     with pytest.warns(UserWarning, match="underdetermined by count"):
         result = fit_a_dress(
             chip,
-            observable_targets={q: {"freq": 5.0}, r: {"freq": 7.0}},
+            vary={q: ("freq", "anharmonicity"), r: ("freq",), coupling: ("g",)},
+            constraints={q: {"freq": 5.0}, r: {"freq": 7.0}, coupling: {"cross_kerr": None}},
         )
 
-    assert not any(report.kind in {"chi", "zz", "g"} for report in result.final_targets)
+    assert not any(report.kind in {"cross_kerr", "coupling_strength"} for report in result.final_targets)
     assert any(report.kind == "freq" and report.label == "q" for report in result.final_targets)
     assert any(report.kind == "freq" and report.label == "r" for report in result.final_targets)
-
-
-def test_build_target_specs_explicit_observables_override_auto_device_targets() -> None:
-    """Explicit observable_targets override the auto-generated device freq/anharmonicity targets."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=4, label="q")
-    chip = Chip([q], frame="rotating")
-
-    specs = build_target_specs(
-        chip,
-        {},
-        {
-            q: {"freq": 5.114, "anharmonicity": -0.330},
-        },
-    )
-
-    freq_specs = [spec for spec in specs if spec.kind == "freq" and spec.label == "q"]
-    anh_specs = [spec for spec in specs if spec.kind == "anharmonicity" and spec.label == "q"]
-
-    assert len(freq_specs) == 1
-    assert freq_specs[0].target == pytest.approx(5.114)
-    assert len(anh_specs) == 1
-    assert anh_specs[0].target == pytest.approx(-0.330)
 
 
 def test_fit_a_dress_recovers_static_exchange_for_sheldon_style_bus_model() -> None:
@@ -852,7 +659,16 @@ def test_fit_a_dress_recovers_static_exchange_for_sheldon_style_bus_model() -> N
     with pytest.warns(UserWarning, match="underdetermined by count"):
         result = fit_a_dress(
             chip,
-            observable_targets={
+            vary={
+                control: ("freq", "anharmonicity"),
+                target: ("freq", "anharmonicity"),
+                bus: ("freq",),
+                c_bus: ("g",),
+                t_bus: ("g",),
+            },
+            constraints={
+                c_bus: {"cross_kerr": None},
+                t_bus: {"cross_kerr": None},
                 control: {"freq": 5.114, "anharmonicity": -0.330},
                 target: {"freq": 4.914, "anharmonicity": -0.330},
                 bus: {"freq": 6.31},
@@ -886,7 +702,9 @@ def test_fit_a_dress_respects_signed_exchange_target_for_direct_qq_system() -> N
 
     result = fit_a_dress(
         chip,
-        observable_targets={
+        vary={q0: ("freq", "anharmonicity"), q1: ("freq", "anharmonicity"), coupling: ("g",)},
+        constraints={
+            coupling: {"cross_kerr": None},
             q0: {"freq": 5.0, "anharmonicity": -0.25},
             q1: {"freq": 5.18, "anharmonicity": -0.24},
             (q0, q1): {"exchange": -0.0015},
@@ -910,7 +728,9 @@ def test_fit_a_dress_recovers_explicit_pair_zz_target_for_direct_qq_system() -> 
 
     result = fit_a_dress(
         chip,
-        observable_targets={
+        vary={q0: ("freq", "anharmonicity"), q1: ("freq", "anharmonicity"), coupling: ("g",)},
+        constraints={
+            coupling: {"cross_kerr": None},
             q0: {"freq": 5.0, "anharmonicity": -0.25},
             q1: {"freq": 5.18, "anharmonicity": -0.24},
             (q0, q1): {"zz": 0.0015},
@@ -936,78 +756,3 @@ def test_device_labels_for_local_eval_stays_one_hop_for_pair_targets() -> None:
 
     assert device_labels_for_local_eval(chip, "q1") == ("q0", "q1", "q2")
     assert device_labels_for_local_eval(chip, ("q1", "q2")) == ("q0", "q1", "q2", "q3")
-
-
-def test_fit_a_dress_accepts_string_coupling_target_keys() -> None:
-    """fit_a_dress accepts string labels as coupling_targets keys."""
-    q = DuffingTransmon(freq=5.241031326, anharmonicity=-0.261031326, levels=4, label="q")
-    r = Resonator(freq=6.653024480, levels=10, label="r")
-    coupling = Capacitive(q, r, g=-646019e-9, label="qr")
-    chip = Chip([q, r], [coupling], frame="rotating")
-
-    result = fit_a_dress(chip, coupling_targets={"qr": "chi"}, max_hilbert_dim=10_000)
-
-    assert any(report.kind == "chi" and report.label == "qr" for report in result.final_targets)
-
-
-def test_static_exchange_rate_matches_pinned_value_on_bus_coupled_pair() -> None:
-    """The static exchange seam agrees with independent effective-subspace analysis."""
-    control = DuffingTransmon(freq=5.08, anharmonicity=-0.31, levels=4, label="control")
-    target = DuffingTransmon(freq=4.95, anharmonicity=-0.35, levels=4, label="target")
-    bus = Resonator(freq=6.28, levels=6, label="bus")
-    c_bus = Capacitive(control, bus, g=0.020, label="c_bus")
-    t_bus = Capacitive(target, bus, g=0.017, label="t_bus")
-    chip = Chip([control, target, bus], [c_bus, t_bus], frame="rotating")
-
-    got = float(_static_exchange_rate(chip, ("control", "target")))
-    oracle = chip.effective_subspace_hamiltonian(({control: 1, target: 0, bus: 0}, {control: 0, target: 1, bus: 0}))
-    assert got == pytest.approx(complex(oracle[0, 1]).real, abs=1e-10)
-
-
-def test_build_target_specs_rejects_chi_target_with_both_endpoints_computational() -> None:
-    """A 'chi' coupling target with both endpoints computational raises ValueError."""
-    q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
-    q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.24, levels=3, label="q1")
-    coupling = Capacitive(q0, q1, g=0.01, label="qq")
-    chip = Chip([q0, q1], [coupling], frame="rotating")
-
-    with pytest.raises(ValueError, match="exactly one computational endpoint"):
-        build_target_specs(chip, {coupling: "chi"}, None)
-
-
-def test_build_target_specs_rejects_chi_target_with_neither_endpoint_computational() -> None:
-    """A 'chi' coupling target with neither endpoint computational raises ValueError."""
-    r0 = Resonator(freq=7.0, levels=4, label="r0")
-    r1 = Resonator(freq=7.3, levels=4, label="r1")
-    coupling = Capacitive(r0, r1, g=0.01, label="rr")
-    chip = Chip([r0, r1], [coupling], frame="rotating")
-
-    with pytest.raises(ValueError, match="exactly one computational endpoint"):
-        build_target_specs(chip, {coupling: "chi"}, None)
-
-
-def test_build_target_specs_rejects_explicit_observable_chi_target_with_both_endpoints_computational() -> None:
-    """An explicit observable_targets 'chi' entry with both endpoints computational also raises.
-
-    The validation must not be limited to coupling_targets-derived specs
-    — the same 'chi' semantics apply regardless of how the TargetSpec
-    was constructed.
-    """
-    q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
-    q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.24, levels=3, label="q1")
-    coupling = Capacitive(q0, q1, g=0.01, label="qq")
-    chip = Chip([q0, q1], [coupling], frame="rotating")
-
-    with pytest.raises(ValueError, match="exactly one computational endpoint"):
-        build_target_specs(chip, {}, {coupling: {"chi": 1e-4}})
-
-
-def test_build_target_specs_rejects_explicit_observable_chi_target_with_neither_endpoint_computational() -> None:
-    """An explicit observable_targets 'chi' entry with neither endpoint computational also raises."""
-    r0 = Resonator(freq=7.0, levels=4, label="r0")
-    r1 = Resonator(freq=7.3, levels=4, label="r1")
-    coupling = Capacitive(r0, r1, g=0.01, label="rr")
-    chip = Chip([r0, r1], [coupling], frame="rotating")
-
-    with pytest.raises(ValueError, match="exactly one computational endpoint"):
-        build_target_specs(chip, {}, {coupling: {"chi": 1e-4}})

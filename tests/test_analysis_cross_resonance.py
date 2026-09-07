@@ -1,5 +1,4 @@
-"""Tests for quchip.analysis.cross_resonance: CR coefficient recovery, bloch_model behavior,
-and CRHamiltonianResult structure and re-exports."""
+"""Cross-resonance coefficient recovery, uncertainty, and dressed susceptibility."""
 
 from __future__ import annotations
 
@@ -8,13 +7,13 @@ from quchip.approximations import RWA
 import numpy as np
 import pytest
 
-from quchip.analysis.cross_resonance import (
+from quchip import (
     CRHamiltonianResult,
     CRSusceptibilityResult,
     analyze_cross_resonance,
     analyze_cr_susceptibility,
-    bloch_model,
 )
+from quchip.analysis.cross_resonance import bloch_model
 from quchip.chip import Capacitive, Chip
 from quchip.control import ChargeDrive, ControlEquipment
 from quchip.devices.transmon.duffing import DuffingTransmon
@@ -204,30 +203,6 @@ def test_zero_amplitude_returns_near_zero():
         assert abs(val) < 0.1e6 * 1e-9, f"{name} = {val * 1e3:.3f} MHz should be ~0 for near-zero drive"
 
 
-def test_result_container_structure():
-    """CRHamiltonianResult has the right fields and coeffs() method."""
-    r = CRHamiltonianResult(
-        IX=1e6,
-        IY=2e6,
-        IZ=3e6,
-        ZX=4e6,
-        ZY=5e6,
-        ZZ=6e6,
-        IX_err=0.1e6,
-        IY_err=0.1e6,
-        IZ_err=0.1e6,
-        ZX_err=0.1e6,
-        ZY_err=0.1e6,
-        ZZ_err=0.1e6,
-    )
-    coeffs = r.coeffs()
-    assert set(coeffs.keys()) == {"IX", "IY", "IZ", "ZX", "ZY", "ZZ"}
-    for name, (val, err) in coeffs.items():
-        assert isinstance(val, float)
-        assert isinstance(err, float)
-        assert err >= 0
-
-
 def test_coeffs_summary_prints(capsys):
     """summary() prints and returns a string."""
     r = CRHamiltonianResult(
@@ -249,22 +224,6 @@ def test_coeffs_summary_prints(capsys):
     assert "MHz" in text
     captured = capsys.readouterr()
     assert "MHz" in captured.out
-
-
-def test_public_reexport():
-    """analyze_cross_resonance and CRHamiltonianResult are importable from quchip."""
-    from quchip import CRHamiltonianResult as R2
-    from quchip import analyze_cross_resonance as acr2
-
-    assert acr2 is analyze_cross_resonance
-    assert R2 is CRHamiltonianResult
-
-
-def test_analyze_from_quchip_analysis():
-    """analyze_cross_resonance is importable from quchip.analysis."""
-    from quchip.analysis import analyze_cross_resonance as acr3
-
-    assert acr3 is analyze_cross_resonance
 
 
 # ---------------------------------------------------------------------------
@@ -388,14 +347,51 @@ def test_cr_susceptibility_rejects_same_device_and_wrong_target_drive() -> None:
         analyze_cr_susceptibility(chip, control, target, drive=target_drive)
 
 
-def test_cr_susceptibility_public_reexports() -> None:
-    """The susceptibility result and analysis are available from both public surfaces."""
-    from quchip import CRSusceptibilityResult as TopResult
-    from quchip import analyze_cr_susceptibility as top_analysis
-    from quchip.analysis import CRSusceptibilityResult as AnalysisResult
-    from quchip.analysis import analyze_cr_susceptibility as analysis_function
+@pytest.mark.parametrize("failure", ["rank", "nonfinite", "nonconverged", "no_dof"])
+def test_cr_fit_reports_unavailable_uncertainty_and_real_status(monkeypatch, failure):
+    """An inspectable candidate is not evidence of convergence or finite uncertainty."""
+    from scipy.optimize import OptimizeResult
+    import quchip.analysis.cross_resonance as cr
 
-    assert TopResult is CRSusceptibilityResult
-    assert AnalysisResult is CRSusceptibilityResult
-    assert top_analysis is analyze_cr_susceptibility
-    assert analysis_function is analyze_cr_susceptibility
+    count = 2 if failure == "no_dof" else 5
+    jac = np.eye(3 * count, 7)
+    if failure == "rank":
+        jac[:, -1] = jac[:, 0]
+    elif failure == "nonfinite":
+        jac[0, 0] = np.nan
+    candidate = OptimizeResult(
+        x=np.array([1e6, 0, 0, 1e-6, 0, 0, 0]), jac=jac, cost=0.1,
+        success=failure != "nonconverged", message="budget exhausted" if failure == "nonconverged" else "converged",
+    )
+    monkeypatch.setattr(cr, "least_squares", lambda *args, **kwargs: candidate)
+    times = np.linspace(0, 100, count)
+    xyz = {"x": np.zeros(count), "y": np.zeros(count), "z": np.ones(count)}
+    result = analyze_cross_resonance(times, xyz, xyz)
+    assert result.converged is (failure != "nonconverged")
+    assert candidate.message in result.message
+    assert result.cov_ctrl0 is None
+    assert result.cov_ctrl1 is None
+    assert all(error is None for _, error in result.coeffs().values())
+    assert "unavailable" in repr(result)
+    assert np.isfinite(result.IX)
+
+
+def test_cr_covariance_respects_parameter_units(monkeypatch):
+    """Frequency and decay-time units cannot create artificial rank deficiency."""
+    from scipy.optimize import OptimizeResult
+    import quchip.analysis.cross_resonance as cr
+
+    count = 5
+    scales = np.array([1e-6, 2e-6, 3e-6, 1e12, 1, 1, 1])
+    candidate = OptimizeResult(
+        x=np.array([1e6, 0, 0, 1e-6, 0, 0, 0]),
+        jac=np.eye(3 * count, 7) * scales, cost=0.1,
+        success=True, message="converged",
+    )
+    monkeypatch.setattr(cr, "least_squares", lambda *args, **kwargs: candidate)
+    xyz = {"x": np.zeros(count), "y": np.zeros(count), "z": np.ones(count)}
+    result = analyze_cross_resonance(np.linspace(0, 100, count), xyz, xyz)
+    expected_variances = 0.2 / (3 * count - 7) / scales**2
+    np.testing.assert_allclose(result.cov_ctrl0, np.diag(expected_variances), rtol=1e-12)
+    for name, index in (("IX", 0), ("IY", 1), ("IZ", 2), ("ZX", 0), ("ZY", 1), ("ZZ", 2)):
+        assert result.coeffs()[name][1] == pytest.approx(np.sqrt(expected_variances[index] / 2) * 1e-9)

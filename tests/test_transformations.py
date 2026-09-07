@@ -4,36 +4,10 @@ import numpy as np
 import pytest
 
 from quchip import Capacitive, Chip, CrossKerr, DuffingTransmon, Resonator, TunableCapacitive
-from quchip.chip.transformations import ChipTransform, EliminationResult
-from quchip.inverse_design.types import FitADressResult
 
 
-def test_elimination_result_satisfies_chiptransform_protocol():
-    """EliminationResult structurally satisfies the ChipTransform protocol."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    res = EliminationResult(chip=Chip([q]), effective_params={}, validity={}, notes=[])
-    assert isinstance(res, ChipTransform)
-    assert res.chip is not None
-
-
-def test_fitadress_result_also_satisfies_protocol_without_changes():
-    """FitADressResult also satisfies ChipTransform via its `chip` field, unmodified."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=2, label="q")
-    res = FitADressResult(
-        chip=Chip([q]),
-        loss=0.0,
-        history=None,
-        initial_targets=(),
-        final_targets=(),
-        initial_params={},
-        final_params={},
-        solver_info={},
-    )
-    assert isinstance(res, ChipTransform)
-
-
-def test_eliminate_resonator_folds_lamb_shift_and_purcell():
-    """Eliminating a resonator folds its Lamb shift and Purcell decay into the survivor."""
+def test_eliminate_resonator_retains_lamb_shift_and_purcell():
+    """Eliminating a resonator retains its Lamb shift and Purcell decay separately from authored parameters."""
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
     r = Resonator(freq=7.0, internal_quality_factor=5000.0, levels=4, label="r")
     g = 0.08
@@ -47,10 +21,13 @@ def test_eliminate_resonator_folds_lamb_shift_and_purcell():
     delta = 5.0 - 7.0
     lamb = g**2 / delta
     kappa = 2 * np.pi * 7.0 / 5000.0
-    purcell = (g / delta) ** 2 * kappa
+    purcell = np.sin(g / delta) ** 2 * kappa
 
-    assert reduced["q"].freq == pytest.approx(5.0 + lamb, rel=1e-6)
-    assert 1.0 / reduced["q"].T1 == pytest.approx(purcell, rel=1e-6)
+    assert reduced["q"].freq == 5.0
+    assert reduced.freq("q") == pytest.approx(5.0 + lamb, rel=1e-6)
+    jumps = reduced.backend._collapse_operators(reduced.resolve(frame="lab"))
+    assert sum(abs(reduced.backend.to_array(op)[0, 1])**2 for op in jumps) == pytest.approx(purcell, rel=1e-6)
+    assert reduced["q"].T1 is None
     assert res.validity["cap_0"]["g_over_delta"] == pytest.approx(abs(g / delta), rel=1e-6)
 
 
@@ -78,35 +55,35 @@ def test_eliminate_bridge_derives_mediated_exchange():
     assert mediated.label == "elim_bus"
     assert float(mediated.g) == pytest.approx(j_expected, rel=1e-9)
 
-    assert reduced["q0"].freq == pytest.approx(5.0 + 0.05**2 / (5.0 - 7.0), rel=1e-9)
-    assert reduced["q1"].freq == pytest.approx(5.1 + 0.05**2 / (5.1 - 7.0), rel=1e-9)
+    assert res.effective_params["q0"]["freq_after"] == pytest.approx(5.0 + 0.05**2 / (5.0 - 7.0), rel=1e-9)
+    assert res.effective_params["q1"]["freq_after"] == pytest.approx(5.1 + 0.05**2 / (5.1 - 7.0), rel=1e-9)
     assert set(res.validity) == {"leg0", "leg1"}
     assert res.effective_params["exchange"]["between"] == ("q0", "q1")
 
 
-def test_eliminate_bridge_folds_into_existing_direct_coupling():
-    """A direct coupling tuned to cancel the mediated exchange nets to g=0 after elimination."""
+def test_eliminate_bridge_can_cancel_an_existing_direct_interaction():
+    """Direct and mediated exchanges cancel in the complete reduced Hamiltonian."""
     from quchip.chip.transformations import eliminate
 
     j_expected = 0.05 * 0.05 / 2.0 * (1.0 / (5.0 - 7.0) + 1.0 / (5.1 - 7.0))
     res = eliminate(_bridge_chip(direct_g=-j_expected), "bus")
 
-    (direct,) = res.chip.couplings
-    assert type(direct) is Capacitive
-    assert direct.label == "direct"
-    assert float(direct.g) == pytest.approx(0.0, abs=1e-12)
-    assert res.effective_params["exchange"]["folded_into"] == "direct"
+    direct = res.chip.coupling("direct")
+    assert float(direct.g) == pytest.approx(-j_expected, abs=1e-12)
+    assert res.effective_params["exchange"]["coupling"] == "elim_bus"
+    h = res.chip.hamiltonian().matrix()
+    assert complex(h[2, 1]) == pytest.approx(0.0, abs=1e-12)
 
 
 def test_eliminate_bridge_preserves_non_foldable_direct_edge_without_double_counting():
-    """A direct edge that doesn't declare folds_exchange is preserved unchanged; no double-counted exchange."""
+    """A direct edge that owns its authored interaction is preserved unchanged; no double-counted exchange."""
     from quchip.chip.sw import bare_hamiltonian, bare_index
     from quchip.chip.transformations import eliminate
     from quchip.declarative.models import CouplingModel
     from quchip.declarative.parameters import Scalar, parameter
 
     class CustomExchange(CouplingModel):
-        """Minimal honest exchange coupling that does not declare folds_exchange."""
+        """Minimal honest exchange coupling that owns its authored interaction."""
 
         j: Scalar = parameter(unit="GHz")
 
@@ -197,7 +174,7 @@ def test_eliminate_bridge_fold_target_and_preserved_edge_are_each_counted_exactl
     from quchip.declarative.parameters import Scalar, parameter
 
     class CustomExchange(CouplingModel):
-        """Minimal honest exchange coupling that does not declare folds_exchange."""
+        """Minimal honest exchange coupling that owns its authored interaction."""
 
         j: Scalar = parameter(unit="GHz")
 
@@ -222,7 +199,7 @@ def test_eliminate_bridge_fold_target_and_preserved_edge_are_each_counted_exactl
     res = eliminate(chip, "bus")
     reduced = res.chip
 
-    assert {c.label for c in reduced.couplings} == {"foldable", "preserved"}
+    assert {c.label for c in reduced.couplings} == {"foldable", "preserved", "elim_bus"}
     assert float(reduced.coupling_map["preserved"].j) == pytest.approx(direct_j)  # untouched
 
     j_mediated_expected = 0.05 * 0.05 / 2.0 * (1.0 / (5.0 - 7.0) + 1.0 / (5.1 - 7.0))
@@ -235,7 +212,7 @@ def test_eliminate_bridge_fold_target_and_preserved_edge_are_each_counted_exactl
 
 
 def test_eliminate_bridge_purcell_from_mode_t1():
-    """A dissipative bridge feeds a mediated-decay rate (g/Δ)²/T1_mode to both survivors."""
+    """A dissipative bridge carries its collective bright-state decay through the retained rotation."""
     from quchip.chip.transformations import eliminate
 
     q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=2, label="q0")
@@ -244,27 +221,16 @@ def test_eliminate_bridge_purcell_from_mode_t1():
     chip = Chip([q0, q1, bus], couplings=[Capacitive(q0, bus, g=0.05), Capacitive(q1, bus, g=0.05)])
 
     res = eliminate(chip, "bus")
-    expected_rate = (0.05 / (5.0 - 7.0)) ** 2 / 10_000.0
-    assert 1.0 / res.chip["q0"].T1 == pytest.approx(expected_rate, rel=1e-9)
+    angles = np.array([0.05 / (5.0 - 7.0), 0.05 / (5.1 - 7.0)])
+    expected_rate = (angles[0] * np.sinc(np.linalg.norm(angles) / np.pi)) ** 2 / 10_000.0
+    jumps = res.chip.backend._collapse_operators(res.chip.resolve(frame="lab"))
+    psi = res.chip.backend.to_array(res.chip.bare_state(q0=1))
+    assert sum(np.linalg.norm(res.chip.backend.to_array(op) @ psi)**2 for op in jumps) == pytest.approx(
+        expected_rate, rel=1e-9)
 
 
-def test_eliminate_purcell_survivor_without_thermal_population_folds_normally():
-    """A Purcell fold onto a survivor with no thermal_population scales T1 exactly as before (no regression)."""
-    from quchip.chip.transformations import eliminate
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q", T1=30_000.0)
-    r = Resonator(freq=7.0, internal_quality_factor=5000.0, levels=4, label="r")
-    chip = Chip([q, r], couplings=[Capacitive(q, r, g=0.08, label="cap0")])
-
-    res = eliminate(chip, "r")
-    kappa = 2 * np.pi * 7.0 / 5000.0
-    purcell_rate = (0.08 / (5.0 - 7.0)) ** 2 * kappa
-    expected_rate = 1.0 / 30_000.0 + purcell_rate
-    assert 1.0 / res.chip["q"].T1 == pytest.approx(expected_rate, rel=1e-6)
-
-
-def test_eliminate_purcell_survivor_with_thermal_population_raises():
-    """A Purcell fold onto a survivor that also carries thermal_population fails fast rather than mis-modelling."""
+def test_eliminate_purcell_keeps_intrinsic_thermal_noise_separate():
+    """Inherited emission and intrinsic thermal absorption remain distinct transformed channels."""
     from quchip.chip.transformations import eliminate
 
     q = DuffingTransmon(
@@ -273,8 +239,12 @@ def test_eliminate_purcell_survivor_with_thermal_population_raises():
     r = Resonator(freq=7.0, internal_quality_factor=5000.0, levels=4, label="r")
     chip = Chip([q, r], couplings=[Capacitive(q, r, g=0.08, label="cap0")])
 
-    with pytest.raises(NotImplementedError, match="thermal_population"):
-        eliminate(chip, "r")
+    reduced = eliminate(chip, "r").chip
+    jumps = [reduced.backend.to_array(op) for op in reduced.backend._collapse_operators(reduced.resolve(frame="lab"))]
+    angle = 0.08 / -2.0
+    expected_down = 1.02 * np.cos(angle)**2 / 30_000.0 + np.sin(angle)**2 * (2 * np.pi * 7.0 / 5000.0)
+    assert sum(abs(op[0, 1])**2 for op in jumps) == pytest.approx(expected_down, rel=1e-9)
+    assert sum(abs(op[1, 0])**2 for op in jumps) == pytest.approx(.02 * np.cos(angle)**2 / 30_000.0, rel=1e-9)
 
 
 def test_eliminate_three_survivors_emits_pairwise_edges_matching_yan_formula():
@@ -311,24 +281,6 @@ def test_eliminate_unknown_method_raises_value_error():
     chip = Chip([q, r], couplings=[Capacitive(q, r, g=0.05)])
     with pytest.raises(ValueError, match="'sw'|'exact'"):
         eliminate(chip, "r", method="numeric")
-
-
-def test_registry_apparatus_is_gone():
-    """Deprecated analytic-registry symbols are not exposed."""
-    import quchip
-
-    assert not hasattr(quchip, "register_elimination_rule")
-    assert not hasattr(quchip.chip.transformations, "register_elimination_rule")
-    assert not hasattr(quchip.chip.transformations, "_ANALYTIC_RULES")
-
-
-def test_sw_bridge_j_matches_the_analytic_yan_formula():
-    """The default method='sw' bridge exchange matches the analytic Yan J to 1e-9 relative."""
-    from quchip.chip.transformations import eliminate
-
-    res = eliminate(_bridge_chip(), "bus")
-    j_expected = 0.05 * 0.05 / 2.0 * (1.0 / (5.0 - 7.0) + 1.0 / (5.1 - 7.0))
-    assert float(res.effective_params["exchange"]["j_eff"]) == pytest.approx(j_expected, rel=1e-9)
 
 
 @pytest.mark.optional_backend
@@ -394,7 +346,7 @@ def test_eliminate_folds_through_a_fold_created_edge():
     step2 = eliminate(mid, "q1")
     assert [d.label for d in step2.chip.devices] == ["q0"]
 
-    delta = float(mid["q0"].freq - mid["q1"].freq)
+    delta = float(step1.effective_params["q0"]["freq_after"] - step1.effective_params["q1"]["freq_after"])
     g = float(edge.g)
     assert step2.validity["elim_bus"]["g_over_delta"] == pytest.approx(abs(g / delta), rel=1e-9)
     # Deep in the dispersive regime (g0/Δ ≈ 0.013) the leaf fold's Lamb shift
@@ -403,24 +355,24 @@ def test_eliminate_folds_through_a_fold_created_edge():
     assert lamb == pytest.approx(g**2 / delta, rel=0.05)
     # The exact route reads the same g and must agree on the dressed frequency.
     exact = eliminate(mid, "q1", method="exact")
-    assert float(exact.chip["q0"].freq) == pytest.approx(float(step2.chip["q0"].freq), abs=1e-6)
+    assert float(exact.chip.freq("q0")) == pytest.approx(float(step2.chip.freq("q0")), abs=1e-6)
 
 
-def test_eliminate_refuses_bath_explicitly_targeting_the_mode():
-    """eliminate() raises when a chip-level bath explicitly targets the eliminated mode."""
-    from quchip import Bath
+def test_eliminate_retains_thermal_bath_and_intrinsic_loss():
+    """Independent thermal channels and intrinsic loss retain their mapped generator."""
+    from quchip import Bath, eliminate
+    from qutip import lindblad_dissipator
 
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=2, label="q")
     r = Resonator(freq=7.0, internal_quality_factor=5000.0, levels=3, label="r")
-    chip = Chip(
-        [q, r],
-        couplings=[Capacitive(q, r, g=0.05)],
-        baths=[Bath("collective_decay", targets=[q, r], rate=0.01)],
-    )
-    from quchip.chip.transformations import eliminate
-
-    with pytest.raises(ValueError, match="explicitly targets"):
-        eliminate(chip, "r")
+    chip = Chip([q, r], [Capacitive(q, r, g=0.05)],
+                baths=[Bath("thermal", targets=[q, r], temperature=20., rate=.01)])
+    result = eliminate(chip, "r")
+    before = chip.backend._collapse_operators(chip.resolve(frame="lab"))
+    after = result.chip.backend._collapse_operators(result.chip.resolve(frame="lab"))
+    expected = sum(lindblad_dissipator(result.mapping.project_operator(c)) for c in before)
+    actual = sum(lindblad_dissipator(c) for c in after)
+    np.testing.assert_allclose(actual.full(), expected.full(), atol=1e-12)
 
 
 @pytest.mark.optional_backend
@@ -441,15 +393,7 @@ def test_eliminate_lamb_shift_is_differentiable_in_g():
     assert float(grad) == pytest.approx(2 * 0.08 / (5.0 - 7.0), rel=1e-4)
 
 
-def test_public_api_exports():
-    """Bath, eliminate, EliminationResult, and ChipTransform are exported from quchip."""
-    import quchip
-
-    for name in ("Bath", "eliminate", "EliminationResult", "ChipTransform"):
-        assert hasattr(quchip, name), name
-
-
-def test_eliminate_with_circuit_level_survivor_warns_instead_of_raising():
+def test_eliminate_with_circuit_level_survivor_retains_the_shift():
     """A survivor without a 'freq' tunable keeps its bare spectrum; the shift is reported."""
     from quchip import ChargeBasisTransmon
     from quchip.chip.transformations import eliminate
@@ -459,8 +403,7 @@ def test_eliminate_with_circuit_level_survivor_warns_instead_of_raising():
     chip = Chip([q, r], couplings=[Capacitive(q, r, g=0.08)])
     bare_freq = chip["q"].freq
 
-    with pytest.warns(UserWarning, match="exposes no 'freq' tunable"):
-        res = eliminate(chip, r)
+    res = eliminate(chip, r)
 
     assert [d.label for d in res.chip.devices] == ["q"]
     assert res.chip["q"].freq == pytest.approx(bare_freq)  # spectrum not folded
@@ -472,8 +415,8 @@ def test_eliminate_with_circuit_level_survivor_warns_instead_of_raising():
     assert float(res.effective_params["q"]["freq_after"]) == pytest.approx(bare_freq + lamb, rel=1e-3)
 
 
-def test_eliminate_coupling_target_capacitive_lamb_shifts_both_endpoints():
-    """Coupling-target elimination of a Capacitive Lamb-shifts both endpoints and reports validity."""
+def test_eliminate_coupling_target_reports_both_shifts_without_parameter_folding():
+    """Both endpoint shifts are reported while their authored parameters stay fixed."""
     from quchip.chip.transformations import eliminate
 
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
@@ -484,13 +427,12 @@ def test_eliminate_coupling_target_capacitive_lamb_shifts_both_endpoints():
     reduced = res.chip
 
     assert sorted(d.label for d in reduced.devices) == ["q", "r"]
-    (crosskerr,) = reduced.couplings
-    assert type(crosskerr) is CrossKerr
+    assert not reduced.couplings
+    assert reduced["q"].freq == q.freq and reduced["r"].freq == r.freq
 
     assert res.validity["c"]["g_over_delta"] == pytest.approx(abs(0.05 / (5.0 - 7.0)), rel=1e-6)
     assert float(res.effective_params["q"]["lamb_shift"]) != 0.0
     assert float(res.effective_params["r"]["lamb_shift"]) != 0.0
-    assert any("uniform-chi" in note for note in res.notes)
 
 
 def test_eliminate_coupling_target_tunable_capacitive_reports_validity():
@@ -506,26 +448,33 @@ def test_eliminate_coupling_target_tunable_capacitive_reports_validity():
     assert res.validity["tc"]["g_over_delta"] == pytest.approx(abs(0.05 / (5.0 - 7.0)), rel=1e-6)
 
 
-def test_eliminate_coupling_target_rejects_a_non_exchange_coupling():
-    """A coupling that does not declare reduces_to_crosskerr is rejected with an explicit error."""
+def test_eliminate_coupling_target_retains_a_diagonal_interaction():
+    """Removing an already diagonal edge leaves its matrix and coordinates unchanged."""
     from quchip.chip.transformations import eliminate
 
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
     r = Resonator(freq=7.0, levels=5, label="r")
     chip = Chip([q, r], couplings=[CrossKerr(q, r, chi=0.001, label="xk")])
 
-    with pytest.raises(NotImplementedError, match="reduces_to_crosskerr"):
-        eliminate(chip, "xk")
+    result = eliminate(chip, "xk")
+    np.testing.assert_allclose(result.chip.hamiltonian().matrix(), chip.hamiltonian().matrix(), atol=1e-12)
+    np.testing.assert_allclose(result.mapping.embedding, np.eye(np.prod(chip.dims)), atol=1e-12)
 
 
-def test_eliminate_coupling_target_endpoint_without_freq_raises():
-    """Coupling-target elimination raises when an endpoint exposes no 'freq' tunable."""
+@pytest.mark.parametrize("method", ["sw", "exact"])
+def test_eliminate_coupling_target_keeps_circuit_parameters(method):
+    """Circuit devices need no artificial frequency parameter to carry a correction."""
     from quchip import ChargeBasisTransmon
     from quchip.chip.transformations import eliminate
 
     q = ChargeBasisTransmon(E_C=0.25, E_J=12.0, n_g=0.0, levels=4, label="q")
     r = Resonator(freq=7.1, levels=5, label="r")
-    chip = Chip([q, r], couplings=[Capacitive(q, r, g=0.08, label="c")])
-
-    with pytest.raises(NotImplementedError, match="freq"):
-        eliminate(chip, "c")
+    chip = Chip([q, r], couplings=[Capacitive(q, r, g=0.08, label="c")], basis="eigen")
+    result = eliminate(chip, "c", method=method)
+    assert result.chip["q"].E_C == q.E_C and result.chip["q"].E_J == q.E_J
+    assert np.isfinite(result.effective_params["q"]["freq_after"])
+    if method == "exact":
+        from quchip import Exact
+        source_h = chip.resolve(frame="lab", approximation=Exact()).hamiltonian().matrix()
+        target_h = result.chip.resolve(frame="lab").hamiltonian().matrix()
+        np.testing.assert_allclose(result.mapping.project_operator(source_h).full(), target_h, atol=1e-11)

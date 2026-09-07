@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from quchip.chip.chip import Chip
     from quchip.chip.transformations import EliminationResult
     from quchip.control.sequence import QuantumSequence
+    from quchip.engine.frames import FramePlan
 
 
 def format_value(value: Any) -> str:
@@ -72,6 +73,11 @@ def describe_chip(chip: "Chip") -> str:
     lines += _section(title, "═")
     frame = chip.frame if isinstance(chip.frame, str) else format_value(chip.frame)
     lines.append(f"Frame    : {frame}")
+    if frame == "auto":
+        from quchip.engine.frames import plan_frame
+
+        plan = plan_frame(chip, (), approximation=chip.approximation, strict=False)
+        lines += [f"           {line}" for line in _format_frame_plan(plan)]
     lines.append(f"Approx.  : {type(chip.approximation).__name__}")
     lines.append(f"Dressed  : {'cached' if chip.is_dressed else 'not computed'}")
     dims = [d.levels for d in chip.devices]
@@ -194,6 +200,9 @@ def describe_sequence(seq: "QuantumSequence") -> str:
         for row in rows:
             lines.append("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
 
+    if isinstance(seq._chip.frame, str) and seq._chip.frame == "auto":
+        lines += ["", *_section("Frame"), *_format_frame_plan(seq.resolve().resolved_frame.plan)]
+
     other = [entry for entry in seq._entries if not hasattr(entry, "envelope")]
     if other:
         counts: dict[str, int] = {}
@@ -204,6 +213,26 @@ def describe_sequence(seq: "QuantumSequence") -> str:
         lines.append(f"(plus {summary})")
 
     return "\n".join(lines)
+
+
+def _format_frame_plan(plan: "FramePlan | None") -> list[str]:
+    """Render device frequencies, accepted tones, pins, and residual oscillations."""
+    if plan is None:
+        return []
+    lines = [f"{label:<8} : {format_value(freq)} GHz" for label, freq in plan.frequencies.items()]
+    for tone in plan.tones:
+        devices = ", ".join(label for label, _ in tone.coefficients)
+        lines.append(f"tone     : {tone.source} on {devices} at {format_value(tone.freq)} GHz")
+    if plan.pins:
+        pinned = ", ".join(f"{label} @ {format_value(freq)} GHz" for label, freq in plan.pins)
+        lines.append(f"pins     : {pinned}")
+    for residual in plan.residuals:
+        weight = "" if residual.weight is None else f", weight {format_value(residual.weight)}"
+        lines.append(
+            f"residual : {residual.source} on {', '.join(residual.devices)} "
+            f"oscillates at {format_value(residual.frequency)} GHz{weight}"
+        )
+    return lines
 
 
 def _concrete(value: Any) -> float | None:
@@ -226,24 +255,19 @@ def _survivor_lines(label: str, entry: Any, reduced_device: Any) -> list[str]:
         ]
 
     t1_after_raw = getattr(reduced_device, "T1", None)
-    if t1_after_raw is None:
-        return lines
-    t1_after = _concrete(t1_after_raw)
-    purcell_rate = _concrete(entry.get("purcell_rate", 0.0))
-    if t1_after is None or purcell_rate is None:
-        lines.append("    T1   <traced> → <traced> µs")
-        return lines
-    rate_before = 1.0 / t1_after - purcell_rate
-    t1_before = 1.0 / rate_before if rate_before > 1e-30 else float("inf")
-    tag = f"   (Purcell, mediated rate 1/{(1.0 / purcell_rate) / 1e3:.4g} µs)" if purcell_rate > 0 else ""
-    lines.append(f"    T1   {t1_before / 1e3:.4g} → {t1_after / 1e3:.4g} µs{tag}")
+    if t1_after_raw is not None:
+        lines.append(f"    intrinsic T1: {format_value(t1_after_raw / 1e3)} µs")
+    rate = entry.get("purcell_rate", 0.0)
+    concrete_rate = _concrete(rate)
+    if concrete_rate is None or concrete_rate > 0:
+        lines.append(f"    Purcell contribution to 1→0 lowering: {format_value(rate)} 1/ns (separate channel)")
     return lines
 
 
 def _exchange_lines(chip: "Chip", entry: Any) -> list[str]:
     """Emitted-edge and Yan-formula details, including ZZ when available."""
     lines: list[str] = []
-    edge_label = entry.get("folded_into")
+    edge_label = entry.get("coupling")
     if edge_label is not None:
         edge = chip.coupling_map.get(edge_label)
         strength = _concrete(edge.coupling_strength) if edge is not None else None

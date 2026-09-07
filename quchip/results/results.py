@@ -3,27 +3,22 @@
 The engine wraps each backend's solver output here so callers use the same
 state, expectation, partial-trace, population, and batch interfaces.
 
-All helpers that return arrays stay inside the backend's array module
-(JAX / NumPy) to preserve differentiability. The convenience wrappers
-:meth:`SimulationResult.overlap` and :meth:`SimulationResult.population`
-additionally materialize to a concrete :class:`numpy.ndarray` when the
-underlying values are concrete (e.g. the QuTiP backend, or an eager
-dynamiqs call) — but return the backend-native array unchanged when
-concretization would break differentiability (a traced value under
-``jax.jit``/``grad`` on the dynamiqs backend).
+Numerical population and overlap accessors return NumPy arrays for QuTiP and
+JAX arrays for Dynamiqs, including eager calls. Host conversion is explicit.
 """
 
 from __future__ import annotations
 
 import itertools
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
 from quchip.backend import Backend, SolverResult
 from quchip.devices.base import BaseDevice
+from quchip.results._batch import BatchResult
 from quchip.utils.labeling import resolve_label
 
 DEFAULT_TRUNCATION_THRESHOLD = 1e-3
@@ -33,7 +28,7 @@ DEFAULT_TRUNCATION_THRESHOLD = 1e-3
 StateMode = Literal["population", "dm"]
 
 if TYPE_CHECKING:
-    from quchip.engine.ir import SolveBatch, SolveProblem
+    from quchip.engine.ir import SLHChannel, SolveBatch, SolveProblem
 
 
 @dataclass(frozen=True)
@@ -55,7 +50,42 @@ class ObservableTrace:
     raw: Any
 
 
-_NO_STATES_MSG = "No states stored — pass options={'store_states': True} to the solver."
+@dataclass(frozen=True)
+class OutputFieldTrace:
+    """Complete transient field reported at one external reference plane.
+
+    ``amplitude`` is the complex mean field ``<b_out>`` and ``photon_flux``
+    is the normally ordered ``<b_out dagger b_out>`` in photons/ns.
+    ``raw_*`` retain the same moments at the Markov boundary, before propagation
+    through the outbound reference run.
+    """
+
+    exposure: str
+    times: Any
+    amplitude: Any
+    photon_flux: Any
+    raw_amplitude: Any
+    raw_photon_flux: Any
+
+    def quadrature(self, phase: Any = 0.0) -> Any:
+        r"""Return ``Re[exp(-i phase) <b_out>]`` without another solve."""
+        from quchip.utils.jax_utils import array_namespace
+
+        xp = array_namespace(self.amplitude)
+        return xp.real(xp.exp(-1j * xp.asarray(phase)) * self.amplitude)
+
+    @property
+    def final_amplitude(self) -> Any:
+        """Return the final complex output amplitude."""
+        return self.amplitude[..., -1]
+
+    @property
+    def final_photon_flux(self) -> Any:
+        """Return the final normally ordered photon flux."""
+        return self.photon_flux[..., -1]
+
+
+_NO_STATES_MSG = 'Full state history is unavailable; run with states="all" to retain it.'
 
 
 class SimulationResult:
@@ -66,7 +96,7 @@ class SimulationResult:
 
     - ``times`` — the time grid the solver stored (ns).
     - ``states`` — the list of stored states (kets or density matrices),
-      or ``None`` if ``store_states`` was off.
+      available when the request used ``states="all"``.
     - ``solver`` — the name reported by the backend.
     - ``stats`` — a plain ``dict`` of solver statistics.
     - ``dims`` — the per-device Hilbert-space dimensions, in chip order.
@@ -82,15 +112,26 @@ class SimulationResult:
         self,
         solver_result: SolverResult,
         backend: Backend,
-        dims: list[int],
+        dims: list[int] | tuple[int, ...],
         *,
-        device_info: list[tuple[str, bool]] | None = None,
+        device_info: list[tuple[str, bool]] | tuple[tuple[str, bool], ...] | None = None,
         observable_traces: dict[Any, ObservableTrace | list[ObservableTrace]] | None = None,
+        output_traces: dict[Any, OutputFieldTrace] | None = None,
+        channels: tuple[SLHChannel, ...] = (),
+        bases: dict[str, Any] | None = None,
+        dissipation: bool = True,
     ) -> None:
         self._backend = backend
+        self._truncation: Any = None
+        self._boundary_traces: tuple[Any, ...] | None = None
+        self.dissipation = dissipation
+        self._bases = {} if bases is None else dict(bases)
+        self._channels: dict[str, SLHChannel] = {channel.key: channel for channel in channels}
+        self._collapse_flux_cache: dict[str, Any] = {}
         self.times = backend.array_module.asarray(solver_result.times, dtype=float)
-        self.states = solver_result.states
+        self._states = solver_result.states
         self._expect_data: dict[Any, ObservableTrace | list[ObservableTrace]] | None = observable_traces
+        self._output_data = {} if output_traces is None else dict(output_traces)
         self.solver = solver_result.solver
         self.stats = dict(solver_result.stats) if solver_result.stats else {}
         self.dims = list(dims)
@@ -139,6 +180,18 @@ class SimulationResult:
         """Return the full expectation-value array for observable *key* over ``self.times``."""
         return self._resolve_trace(key, index).values
 
+    def observable_at(self, t: Any, values: Any, *, method: str = "exact") -> Any:
+        """Select saved observable values at scalar or array times.
+
+        Values have time on their last axis. The result has their leading
+        axes followed by the query shape. ``nearest`` selects the earlier
+        sample on a tie; ``interpolate`` is linear, including complex values.
+        Out-of-interval queries raise. No solve or state interpolation occurs.
+        """
+        from quchip.results._time import observable_at
+
+        return observable_at(self.times, t, values, method, self._backend.array_module)
+
     def expect_final(self, key: Any, index: int | None = None) -> Any:
         """Return the final expectation value for observable *key* (``self.expect(key)[-1]``)."""
         return self._resolve_trace(key, index).values[-1]
@@ -147,13 +200,97 @@ class SimulationResult:
     expect_values = expect
 
     # ------------------------------------------------------------------
+    # External fields
+    # ------------------------------------------------------------------
+
+    @property
+    def outputs(self) -> dict[Any, OutputFieldTrace]:
+        """Return complete output-field traces keyed by exposure label."""
+        return dict(self._output_data)
+
+    def output(self, exposure: Any) -> OutputFieldTrace:
+        """Return one field trace by exposure object or label."""
+        label = resolve_label(exposure)
+        try:
+            return self._output_data[label]
+        except KeyError as exc:
+            raise KeyError(
+                f"No output for {label!r}. Available exposures: {sorted(self._output_data)}"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # Collapse channels
+    # ------------------------------------------------------------------
+
+    @property
+    def collapse_channels(self) -> tuple[str, ...]:
+        """Return the resolved SLH channel keys accepted by :meth:`collapse_flux`.
+
+        Hidden channels use keys such as ``"hidden.q.thermal_emission"`` and
+        ``"hidden.r.internal_photon_loss"``. Channels exposed at external
+        planes use their exposure labels.
+        """
+        return tuple(self._channels)
+
+    def _channel_key(self, key: Any) -> str:
+        label = resolve_label(key)
+        if label in self._channels:
+            return label
+        matches = [name for name in self._channels if name.split("#")[0].partition(".")[2] == label]
+        if len(matches) == 1:
+            return matches[0]
+        detail = "matches several channels" if matches else "matches no channel"
+        raise KeyError(f"{label!r} {detail}. Available channels: {list(self._channels)}")
+
+    def collapse_flux(self, key: Any) -> Any:
+        """Return the cached jump rate ``<L†L>(t)`` for one resolved channel.
+
+        The rate is evaluated post-solve from stored states and has units of
+        ``1/ns``. ``key`` may be a resolved key from
+        :attr:`collapse_channels`, an exposure, or a
+        ``"<device>.<channel>"`` label that identifies one channel. Address a
+        port composed into a network through its exposure.
+
+        For an exposed plane, this rate equals ``raw_photon_flux`` only with
+        vacuum input. Dephasing and thermal-absorption channels can also have
+        nonzero jump rates, so this quantity alone is not an excitation-loss
+        rate.
+        """
+        name = self._channel_key(key)
+        if name not in self._collapse_flux_cache:
+            from quchip.engine.observables import collapse_number_operator
+
+            operator = collapse_number_operator(self._channels[name].coupling, self._backend, tag=f"flux:{name}")
+            flux = self._backend.array_module.real(self._backend.expect_over_time(operator, self._stacked_states()))
+            from quchip.utils.jax_utils import contains_tracer
+
+            if not contains_tracer(flux):
+                self._collapse_flux_cache[name] = flux
+            return flux
+        return self._collapse_flux_cache[name]
+
+    def collapse_integral(self, key: Any) -> Any:
+        """Return the cumulative expected jump count for one channel.
+
+        This is the cumulative trapezoid integral of :meth:`collapse_flux` on
+        the result grid. Its last entry is the expected number of jumps over
+        the whole solve.
+        """
+        xp = self._backend.array_module
+        flux = self.collapse_flux(key)
+        increments = 0.5 * (flux[1:] + flux[:-1]) * (self.times[1:] - self.times[:-1])
+        return xp.concatenate([xp.zeros((1,), dtype=increments.dtype), xp.cumsum(increments)])
+
+    # ------------------------------------------------------------------
     # States, partial traces, overlaps
     # ------------------------------------------------------------------
 
-    def _require_states(self) -> list[Any]:
-        if self.states is None:
+    @property
+    def states(self) -> Any:
+        """Return the retained native state history, or explain how to save it."""
+        if self._states is None or len(self._states) == 0:
             raise RuntimeError(_NO_STATES_MSG)
-        return list(self.states)
+        return self._states
 
     def _stacked_states(self) -> Any:
         """Return the trajectory as one ``(T, …)`` native stacked array (cached).
@@ -164,24 +301,25 @@ class SimulationResult:
         stored ``Qobj``s. Keeping it as one array (rather than ``T`` separate
         objects) is what collapses the per-point extractor loop.
         """
-        if self.states is None:
-            raise RuntimeError(_NO_STATES_MSG)
         cached = getattr(self, "_stacked_cache", None)
         if cached is None:
             cached = self._backend.stack_states(self.states)
-            self._stacked_cache = cached
+            from quchip.utils.jax_utils import contains_tracer
+
+            if not contains_tracer(cached):
+                self._stacked_cache = cached
         return cached
 
     def _is_ket_trajectory(self) -> bool:
         """Return whether the stored trajectory is kets (vs density matrices)."""
-        return self._backend.is_ket(self._require_states()[0])
+        return self._backend.is_ket(self.states[0])
 
     @property
     def _basis_labels(self) -> list[tuple[int, ...]]:
         """Return the full-chip computational basis as Fock tuples ``(n1, …, nK)`` (cached).
 
         One entry per basis vector of the whole chip, in ``dims`` order. Built
-        once and shared by :attr:`populations`, :meth:`population_array`, and
+        once and shared by :attr:`populations`, :meth:`population`, and
         :meth:`check_truncation` rather than each recomputing the product.
         """
         cached = self._basis_labels_cache
@@ -190,21 +328,7 @@ class SimulationResult:
             self._basis_labels_cache = cached
         return cached
 
-    @staticmethod
-    def _as_numpy_or_native(arr: Any) -> Any:
-        """Coerce *arr* to a real NumPy array, else return it unchanged.
-
-        Under the QuTiP backend the values are concrete and become a
-        ``numpy.ndarray``; under JAX (dynamiqs) a traced array cannot be cast
-        to ``float`` during ``jit``/``grad``, so the backend-native array is
-        returned verbatim to keep the call differentiable.
-        """
-        try:
-            return np.asarray(arr, dtype=float)
-        except Exception:
-            return arr
-
-    def overlap_array(self, target: Any) -> Any:
+    def overlap(self, target: Any) -> Any:
         """Return the overlap with *target* at every stored time.
 
         For ket trajectories returns ``|<target|psi(t)>|**2``; for density
@@ -223,25 +347,17 @@ class SimulationResult:
 
         Density-matrix trajectories raise :class:`TypeError` — there is no
         single phase-sensitive amplitude for a mixed state; use
-        :meth:`overlap_array` instead. One batched op, no per-point loop.
+        :meth:`overlap` instead. One batched op, no per-point loop.
         """
         backend = self._backend
         if not self._is_ket_trajectory():
             raise TypeError(
-                "amplitude_array() requires ket trajectories; use overlap_array() for density matrices."
+                "amplitude_array() requires ket trajectories; use overlap() for density matrices."
             )
         target = backend.coerce_state(target, dims=tuple(self.dims))
         return backend.array_module.asarray(
             backend.overlap_over_time(target, self._stacked_states())
         )
-
-    def overlap(self, target: Any) -> Any:
-        """Wrap :meth:`overlap_array` for convenience.
-
-        Returns a NumPy array under the QuTiP backend; under JAX (dynamiqs)
-        returns the backend-native array so the call stays JIT/grad-friendly.
-        """
-        return self._as_numpy_or_native(self.overlap_array(target))
 
     def _resolve_device_idx(self, device: str | BaseDevice) -> tuple[int, str]:
         label = resolve_label(device)
@@ -260,26 +376,38 @@ class SimulationResult:
             return self._backend.state_to_dm(s)
         return s
 
-    def state_at(self, t: float) -> Any:
-        """Return the state at the stored time nearest to *t* (ns)."""
-        states = self._require_states()
-        idx = int(np.argmin(np.abs(self.times - t)))
-        return states[idx]
+    def state_at(self, t: Any, *, method: str = "exact") -> Any:
+        """Return a retained state at a scalar time; states are never interpolated."""
+        from quchip.results._time import require_valid, time_selection
+        from quchip.utils.jax_utils import contains_tracer
 
-    def dm_at(self, t: float) -> Any:
-        """Return the density matrix at the stored time nearest to *t* (ns) — promotes kets on demand."""
-        return self.state(t, dm=True)
+        if method not in ("exact", "nearest"):
+            raise ValueError('State lookup method must be "exact" or "nearest".')
+        xp = self._backend.array_module
+        if xp.asarray(t).ndim != 0:
+            raise ValueError("state_at() requires a scalar time.")
+        index, _, _ = time_selection(self.times, t, method, xp)
+        if self._states is None or len(self._states) == 0:
+            if not contains_tracer(index) and int(index) != len(self.times) - 1:
+                raise RuntimeError(_NO_STATES_MSG)
+            return require_valid(self.final_state, index != len(self.times) - 1, _NO_STATES_MSG)
+        if contains_tracer(index):
+            return self._stacked_states()[index]
+        return self._states[int(index)]
+
+    def dm_at(self, t: float, *, method: str = "exact") -> Any:
+        """Return the density matrix at a retained time, promoting kets on demand."""
+        state = self.state_at(t, method=method)
+        return self._backend.state_to_dm(state) if self._backend.is_ket(state) else state
 
     @property
     def final_state(self) -> Any:
-        """Return the final state — explicit ``final_state`` if stored, else the last stored trajectory entry."""
+        """Return the last history entry or the separately retained final state."""
+        if self._states is not None and len(self._states) > 0:
+            return self._states[-1]
         if self._final_state is not None:
             return self._final_state
-        if self.states is not None and len(self.states) > 0:
-            return self.states[-1]
-        raise RuntimeError(
-            "No final state available — pass options={'store_final_state': True} or {'store_states': True}"
-        )
+        raise RuntimeError('No final state available; run with states="all" or states="final" to retain it.')
 
     def reduced_state(self, t: float, device: str | BaseDevice) -> Any:
         """Partial-trace the state at time *t* down to *device*'s subspace."""
@@ -291,29 +419,26 @@ class SimulationResult:
     # ------------------------------------------------------------------
 
     @property
-    def populations(self) -> dict[tuple[int, ...], np.ndarray]:
+    def populations(self) -> dict[tuple[int, ...], Any]:
         """Return per-basis-state populations ``|<n1, n2, ...|psi(t)>|**2`` over time.
 
-        Returns a dict keyed by Fock tuple ``(n1, n2, ..., nK)`` — one per
-        computational basis vector of the full chip — mapping to a real
-        ``numpy.ndarray`` of length ``len(self.times)``.
+        Keys index the solver's product basis, which need not be the local
+        energy basis. Each value is a native real array over ``self.times``.
+        Use :meth:`population` for isolated energy-level occupations.
 
-        Requires ``store_states``; density-matrix trajectories are handled
+        Requires ``states="all"``; density-matrix trajectories are handled
         transparently by reading the diagonal of each timestep's DM.
         """
         backend = self._backend
-        self._require_states()
         basis_labels = self._basis_labels
 
         # One batched diagonal read over the leading time axis -> (T, ∏dims),
         # never building a per-timestep density matrix for ket trajectories.
-        all_diags = np.asarray(
-            backend.populations_over_time(self._stacked_states()), dtype=float
-        )
+        all_diags = backend.array_module.real(backend.populations_over_time(self._stacked_states()))
         return {label: all_diags[:, i] for i, label in enumerate(basis_labels)}
 
-    def population_array(self, device: str | BaseDevice, level: int = 0) -> Any:
-        """Return the population of Fock *level* on *device* over time, in the backend's array module."""
+    def population(self, device: str | BaseDevice, level: int = 0) -> Any:
+        """Return occupation of a captured isolated energy level in native arrays."""
         backend = self._backend
         xp = backend.array_module
         dev_idx, label = self._resolve_device_idx(device)
@@ -322,6 +447,13 @@ class SimulationResult:
             raise ValueError(
                 f"Level {level} out of range for device '{label}' with {dev_dim} levels (0..{dev_dim - 1})."
             )
+
+        basis = self._bases.get(label)
+        if basis is not None and basis.energy_to_solver() is not None:
+            vector = xp.asarray(basis.energy_state(level))
+            projector = backend.from_array(xp.outer(vector, vector.conj()), dims=[[dev_dim], [dev_dim]])
+            embedded = backend.embed(projector, dev_idx, self.dims)
+            return xp.real(backend.expect_over_time(embedded, self._stacked_states()))
 
         # Full-chip diagonal populations (T, ∏dims) in one batched op, then sum
         # the basis states whose Fock index on *device* equals *level* — the
@@ -332,16 +464,6 @@ class SimulationResult:
             np.array([1.0 if tup[dev_idx] == level else 0.0 for tup in basis_labels], dtype=float)
         )
         return xp.real(diags @ select)
-
-    def population(self, device: str | BaseDevice, level: int = 0) -> Any:
-        """Wrap :meth:`population_array` for convenience.
-
-        Returns a NumPy array under the QuTiP backend; under JAX (dynamiqs)
-        returns the backend-native array so the call stays JIT/grad-friendly.
-        Use :meth:`population_array` directly when you want to keep gradient
-        flow regardless of context.
-        """
-        return self._as_numpy_or_native(self.population_array(device, level))
 
     # ------------------------------------------------------------------
     # Plot shims — delegate to the (lazy) viz module
@@ -396,60 +518,40 @@ class SimulationResult:
 
         return plot_wigner(self, index, trace_out=trace_out, ax=ax, **kwargs)
 
-    def check_truncation(
-        self,
-        *,
-        threshold: float = DEFAULT_TRUNCATION_THRESHOLD,
-        top_levels: int = 1,
-    ) -> dict[str, float]:
-        """Emit a ``UserWarning`` per device whose top-``top_levels`` population exceeds *threshold*.
+    def check_truncation(self, *, threshold: float = DEFAULT_TRUNCATION_THRESHOLD) -> dict[str, Any]:
+        """Report each device's maximum boundary population over sampling times.
 
-        Uses the final stored state only — cheap, one full-chip diagonal
-        read, no per-timestep loop, no partial traces. Silently no-ops
-        when no final state is available (e.g. ``store_states`` and
-        ``store_final_state`` both disabled).
-
-        Returns the per-device top-level population actually observed,
-        keyed by device label, so callers can surface the numbers without
-        re-parsing the warning text.
+        This warning heuristic can miss excursions between samples. Increase the
+        relevant cutoff and compare observables to establish convergence. Native
+        arrays remain differentiable; warning thresholds are evaluated only for
+        concrete results. Boundaries are declared by the captured component model.
         """
-        if self.device_info is None:
-            return {}
-        try:
-            final = self.final_state
-        except RuntimeError:
-            return {}
-
-        # The check reads the final state into NumPy to inspect Fock-level
-        # populations, which concretizes a traced value. Skip traced states so
-        # JIT/grad through a solve stays intact.
+        from quchip.engine.truncation import evaluate_boundaries
         from quchip.utils.jax_utils import contains_tracer
 
-        if contains_tracer(final):
-            return {}
-
-        backend = self._backend
-        state = np.asarray(backend.to_array(final), dtype=complex)
-        diag = (
-            np.abs(state[:, 0]) ** 2
-            if backend.is_ket(final)
-            else np.real(np.diag(state))
-        )
-
-        basis_labels = self._basis_labels
-        observed: dict[str, float] = {}
-        for dev_idx, (label, _computational) in enumerate(self.device_info):
-            dev_dim = self.dims[dev_idx]
-            k = min(top_levels, dev_dim)
-            top_range = range(dev_dim - k, dev_dim)
-            pop = float(sum(diag[i] for i, tup in enumerate(basis_labels) if tup[dev_idx] in top_range))
-            observed[label] = pop
-            if pop > threshold:
+        if not np.isfinite(threshold) or threshold < 0:
+            raise ValueError("truncation threshold must be finite and nonnegative")
+        plan, traces = evaluate_boundaries(self)
+        for reason in plan.unavailable:
+            warnings.warn(f"Truncation diagnostic unavailable: {reason}", UserWarning, stacklevel=2)
+        xp = self._backend.array_module
+        observed: dict[str, Any] = {}
+        traced = contains_tracer(traces)
+        if traced:
+            warnings.warn(
+                "Truncation boundary populations are traced; warning thresholds cannot be evaluated here. "
+                "Check the concrete result afterward, or pass check_truncation=False to disable the automatic check.",
+                UserWarning, stacklevel=2,
+            )
+        for check, trace in zip(plan.checks, traces, strict=True):
+            maximum = xp.maximum(0.0, xp.max(trace))
+            observed[check.label] = xp.maximum(observed.get(check.label, 0.0), maximum)
+            if not traced and float(maximum) > threshold:
                 warnings.warn(
-                    f"Device '{label}': top-{k} Fock-level population {pop:.3g} > threshold {threshold:.3g}. "
-                    f"Consider increasing `levels` to avoid truncation error.",
-                    UserWarning,
-                    stacklevel=2,
+                    f"Device {check.label!r}: maximum sampled {check.boundary.description} population "
+                    f"{float(maximum):.3g} > threshold {threshold:.3g}. "
+                    f"{check.boundary.convergence_hint} This is a sampling heuristic, not an error bound.",
+                    UserWarning, stacklevel=2,
                 )
         return observed
 
@@ -464,10 +566,12 @@ class SimulationResult:
         ]
         if self._expect_data is not None:
             parts.append(f"expect=dict({len(self._expect_data)} keys)")
+        if self._output_data:
+            parts.append(f"outputs=dict({len(self._output_data)} keys)")
         return ", ".join(parts) + ")"
 
 
-class SimulationBatchResult:
+class SimulationBatchResult(BatchResult[SimulationResult]):
     """Ordered, immutable batch of :class:`SimulationResult` with stacked helpers.
 
     Returned by :func:`~quchip.engine.solve_many` and by any sweep that
@@ -481,120 +585,34 @@ class SimulationBatchResult:
     a loss function that sums over the batch stays JAX-traceable end-to-end.
     """
 
-    def __init__(
-        self,
-        results: list[SimulationResult],
-        *,
-        shape: tuple[int, ...] | None = None,
-        axes: tuple[tuple[str, Any], ...] | None = None,
-    ) -> None:
-        self._results = tuple(results)
-        if shape is None:
-            self._shape: tuple[int, ...] = (len(self._results),)
-            self._axes = (("batch", tuple(range(len(self._results)))),) if axes is None else tuple(axes)
-        else:
-            self._shape = tuple(shape)
-            self._axes = () if axes is None else tuple(axes)
-        if int(np.prod(self._shape, dtype=int)) != len(self._results):
-            raise ValueError(
-                f"Batch shape {self._shape} has {int(np.prod(self._shape, dtype=int))} points, "
-                f"but results contains {len(self._results)} elements."
-            )
-        if self._axes and len(self._axes) != len(self._shape):
-            raise ValueError(f"Expected {len(self._shape)} axis descriptors, got {len(self._axes)}.")
+    def _require_shared_times(self, values: Any) -> Any:
+        from quchip.results._time import require_valid
 
-    @property
-    def results(self) -> tuple[SimulationResult, ...]:
-        """Return the per-element :class:`SimulationResult` objects in input order."""
-        return self._results
-
-    @property
-    def shape(self) -> tuple[int, ...]:
-        """Return the natural sweep-grid shape for this batch."""
-        return self._shape
-
-    @property
-    def axes(self) -> tuple[tuple[str, Any], ...]:
-        """Return sweep-axis metadata as ``(name, values)`` pairs."""
-        return self._axes
-
-    @property
-    def backend(self) -> Backend:
-        """Return the backend shared by every element (raises on an empty batch)."""
         if not self._results:
-            raise RuntimeError("Empty batch has no backend.")
-        return self._results[0]._backend
+            raise RuntimeError("Empty batch has no time coordinates.")
+        xp = self.backend.array_module
+        first = self._results[0].times
+        mismatch = xp.asarray(False)
+        message = "Batch points have different time grids; inspect individual results or reduce each trace."
+        for result in self._results[1:]:
+            if result.times.shape != first.shape:
+                raise ValueError(message)
+            mismatch = mismatch | xp.any(result.times != first)
+        return require_valid(values, mismatch, message)
 
-    def __len__(self) -> int:
-        return len(self._results)
+    @property
+    def times(self) -> Any:
+        """Return shared native coordinates, or explain incompatible time grids."""
+        return self._require_shared_times(self._results[0].times if self._results else None)
 
-    def __iter__(self):
-        return iter(self._results)
-
-    @staticmethod
-    def _axis_member_names(axis_name: Any) -> tuple[str, ...]:
-        if isinstance(axis_name, tuple):
-            return tuple(str(part) for part in axis_name)
-        text = str(axis_name)
-        return tuple(part for part in text.split("/") if part)
-
-    def _coordinate_from_dict(self, item: dict[str, int]) -> tuple[int, ...]:
-        if not self._axes:
-            raise TypeError("Dictionary indexing requires named sweep axes.")
-
-        coord: list[int] = []
-        consumed: set[str] = set()
-        missing: list[str] = []
-        for axis_name, _ in self._axes:
-            direct_name = str(axis_name)
-            member_names = self._axis_member_names(axis_name)
-            provided_names = [name for name in member_names if name in item]
-
-            if direct_name in item:
-                provided_names.append(direct_name)
-
-            if not provided_names:
-                missing.append("/".join(member_names))
-                continue
-
-            provided_indices = {int(item[name]) for name in provided_names}
-            if len(provided_indices) != 1:
-                raise ValueError(f"Zipped axis {direct_name!r} constituent names must use the same index.")
-            coord.append(provided_indices.pop())
-            consumed.update(provided_names)
-
-        unknown = sorted(set(item) - consumed)
-        if unknown:
-            axis_names = [name for axis_name, _ in self._axes for name in self._axis_member_names(axis_name)]
-            raise KeyError(f"Unknown sweep axis names {unknown}. Available: {axis_names}")
-        if missing:
-            raise KeyError(f"Missing sweep axis indices for {missing}.")
-        return tuple(coord)
-
-    def __getitem__(self, item: int | slice | dict[str, int]) -> SimulationResult | SimulationBatchResult:
-        if isinstance(item, dict):
-            coord = self._coordinate_from_dict(item)
-            return self._results[int(np.ravel_multi_index(coord, self._shape))]
-        if isinstance(item, slice):
-            selected = self._results[item]
-            indices = tuple(range(*item.indices(len(self._results))))
-            return SimulationBatchResult(
-                list(selected),
-                shape=(len(indices),),
-                axes=(("batch", indices),),
-            )
-        return self._results[item]
+    def _trace_values(self, values: list[Any], reduce: str | None) -> Any:
+        if reduce is None:
+            values = self._require_shared_times(values)
+        return self._reshape([self._reduce_time_axis(value, reduce) for value in values])
 
     def _check_targets_len(self, targets: list[Any] | tuple[Any, ...]) -> None:
         if len(targets) != len(self._results):
             raise ValueError(f"Expected {len(self._results)} targets, got {len(targets)}.")
-
-    def _stack(self, values: list[Any]) -> Any:
-        return self.backend.array_module.asarray(values)
-
-    def _reshape(self, values: list[Any]) -> Any:
-        array = self._stack(values)
-        return self.backend.array_module.reshape(array, self._shape + tuple(array.shape[1:]))
 
     def _reduce_time_axis(self, values: Any, reduce: str | None) -> Any:
         if reduce is None:
@@ -608,39 +626,74 @@ class SimulationBatchResult:
             return xp.mean(values, axis=-1)
         raise ValueError("reduce must be one of None, 'last', 'max', or 'mean'.")
 
-    def with_sweep_metadata(
-        self,
-        *,
-        shape: tuple[int, ...],
-        axes: tuple[tuple[str, Any], ...],
-    ) -> "SimulationBatchResult":
-        """Return an equivalent batch annotated with sweep-axis metadata."""
-        return SimulationBatchResult(list(self._results), shape=shape, axes=axes)
-
     def expect(self, key: Any, index: int | None = None, *, reduce: str | None = None) -> Any:
         """Return expectation traces reshaped to the natural sweep grid."""
-        values = self._reshape([r.expect(key, index=index) for r in self._results])
-        return self._reduce_time_axis(values, reduce)
+        return self._trace_values([r.expect(key, index=index) for r in self._results], reduce)
+
+    def output(self, exposure: Any) -> OutputFieldTrace:
+        """Return one complete field trace reshaped to the natural sweep grid."""
+        traces = [result.output(exposure) for result in self._results]
+        if not traces:
+            raise RuntimeError("Empty batch has no output fields.")
+        times, amplitude, flux, raw_amplitude, raw_flux = self._require_shared_times((
+            traces[0].times, [trace.amplitude for trace in traces], [trace.photon_flux for trace in traces],
+            [trace.raw_amplitude for trace in traces], [trace.raw_photon_flux for trace in traces],
+        ))
+        return OutputFieldTrace(
+            exposure=traces[0].exposure,
+            times=times,
+            amplitude=self._reshape(amplitude),
+            photon_flux=self._reshape(flux),
+            raw_amplitude=self._reshape(raw_amplitude),
+            raw_photon_flux=self._reshape(raw_flux),
+        )
 
     def population(self, device: str | BaseDevice, level: int = 0, *, reduce: str | None = None) -> Any:
         """Return population traces reshaped to the natural sweep grid."""
-        values = self._reshape([r.population_array(device, level) for r in self._results])
-        return self._reduce_time_axis(values, reduce)
+        return self._trace_values([r.population(device, level) for r in self._results], reduce)
+
+    def collapse_flux(self, key: Any, *, reduce: str | None = None) -> Any:
+        """Return one channel's jump-rate traces on the natural sweep grid.
+
+        ``reduce`` accepts ``None``, ``"last"``, ``"max"``, or ``"mean"``
+        and acts on the time axis.
+        """
+        return self._trace_values([r.collapse_flux(key) for r in self._results], reduce)
+
+    def collapse_integral(self, key: Any, *, reduce: str | None = None) -> Any:
+        """Return one channel's cumulative jump counts on the natural sweep grid.
+
+        ``reduce`` accepts ``None``, ``"last"``, ``"max"``, or ``"mean"``
+        and acts on the time axis. ``reduce="last"`` returns the expected
+        number of jumps in each solve.
+        """
+        return self._trace_values([r.collapse_integral(key) for r in self._results], reduce)
+
+    def _final_projections(self, targets: list[Any] | tuple[Any, ...], *, amplitude: bool) -> Any:
+        self._check_targets_len(targets)
+        values = []
+        for result, target in zip(self._results, targets):
+            backend = result._backend
+            state = result.final_state
+            is_ket = backend.is_ket(state)
+            if amplitude and not is_ket:
+                raise TypeError(
+                    "Final amplitudes require ket states; use final_overlap_magnitudes for density matrices."
+                )
+            target = backend.coerce_state(target, dims=tuple(result.dims))
+            value = backend.overlap_over_time(target, backend.stack_states([state]))[0]
+            if not amplitude:
+                value = backend.array_module.abs(value) ** (2 if is_ket else 1)
+            values.append(value)
+        return self._stack(values)
 
     def final_overlap_magnitudes(self, targets: list[Any] | tuple[Any, ...]) -> Any:
-        """Return stacked final overlap magnitudes, one per ``(result, target)`` pair."""
-        self._check_targets_len(targets)
-        return self._stack([r.overlap_array(t)[-1] for r, t in zip(self._results, targets)])
+        """Return final target-state populations for each result, without requiring histories."""
+        return self._final_projections(targets, amplitude=False)
 
     def final_amplitudes(self, targets: list[Any] | tuple[Any, ...]) -> Any:
-        """Return stacked final complex amplitudes (phase-sensitive), one per ``(result, target)`` pair."""
-        self._check_targets_len(targets)
-        return self._stack([r.amplitude_array(t)[-1] for r, t in zip(self._results, targets)])
-
-    def __repr__(self) -> str:
-        axis_names = [str(name) for name, _ in self._axes]
-        return f"SimulationBatchResult(n={len(self._results)}, shape={self._shape}, axes={axis_names})"
-
+        """Return final complex ket amplitudes for each result, without requiring histories."""
+        return self._final_projections(targets, amplitude=True)
 
 # ---------------------------------------------------------------------------
 # Result wrapping helpers
@@ -651,24 +704,34 @@ def _wrap(
     solver_result: SolverResult,
     backend: Backend,
     *,
-    chip: Any,
+    device_info: tuple[tuple[str, bool], ...],
     tlist: Any,
     e_ops_meta: Any,
     resolved_frame: Any,
+    engine_result: Any,
 ) -> SimulationResult:
     observable_traces = None
+    output_traces = None
     if e_ops_meta is not None:
         from quchip.engine.observables import build_observable_traces
 
-        observable_traces = build_observable_traces(
-            solver_result, tlist, chip, dict_meta=e_ops_meta, resolved_frame=resolved_frame
+        observable_traces, output_traces = build_observable_traces(
+            solver_result,
+            tlist,
+            dict_meta=e_ops_meta,
+            resolved_frame=resolved_frame,
+            engine_result=engine_result,
         )
     return SimulationResult(
         solver_result=solver_result,
         backend=backend,
-        dims=chip.dims,
-        device_info=[(d.label, d.computational) for d in chip.devices],
+        dims=engine_result.dims,
+        device_info=device_info,
         observable_traces=observable_traces,
+        output_traces=output_traces,
+        channels=engine_result.slh.channels if engine_result.dissipation else (),
+        bases=engine_result.bases,
+        dissipation=engine_result.dissipation,
     )
 
 
@@ -680,14 +743,31 @@ def wrap_solver_result(solver_result: SolverResult, problem: SolveProblem, backe
     (:func:`~quchip.engine.observables.build_observable_traces`)
     and to label devices for partial-trace helpers.
     """
-    return _wrap(
+    from quchip.engine.truncation import boundary_traces
+
+    plan = problem.truncation
+    samples = None
+    if plan is not None and plan.sampled:
+        raw = solver_result.expect
+        flat = list(raw.values()) if isinstance(raw, dict) else list(raw or ())
+        count = len(plan.operators)
+        diagnostic = flat[-count:] if count else ()
+        user_values = flat[:-count] if count else flat
+        samples = boundary_traces(plan, diagnostic, problem.tlist, backend)
+        solver_result = replace(solver_result, expect=user_values or None)
+    result = _wrap(
         solver_result,
         backend,
-        chip=problem.chip,
+        device_info=problem.device_info,
         tlist=problem.tlist,
         e_ops_meta=problem.e_ops_meta,
         resolved_frame=problem.resolved_frame,
+        engine_result=problem.engine_result,
     )
+    result._truncation = plan
+    result._boundary_traces = samples
+    result.stats["states"] = problem.states
+    return result
 
 
 def wrap_solver_results_from_batch(
@@ -696,14 +776,9 @@ def wrap_solver_results_from_batch(
     backend: Backend,
 ) -> list[SimulationResult]:
     """Wrap backend results using each batch point's resolved solve context."""
+    if len(solver_results) != batch.batch_size:
+        raise RuntimeError(f"Backend returned {len(solver_results)} results for {batch.batch_size} batch points.")
     return [
-        _wrap(
-            solver_result,
-            backend,
-            chip=problem.chip,
-            tlist=problem.tlist,
-            e_ops_meta=problem.e_ops_meta,
-            resolved_frame=problem.resolved_frame,
-        )
+        wrap_solver_result(solver_result, problem, backend)
         for solver_result, problem in zip(solver_results, batch.problems)
     ]

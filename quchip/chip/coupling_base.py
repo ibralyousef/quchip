@@ -1,12 +1,7 @@
 """Coupling base class and registry.
 
-Split out of :mod:`quchip.chip.couplings` so the declarative API in
-:mod:`quchip.declarative.models` can subclass :class:`BaseCoupling`
-without re-entering the import chain through ``Capacitive``
-(:class:`Capacitive` now itself depends on :class:`CouplingModel`).
-The concrete coupling classes — :class:`Capacitive`,
-:class:`TunableCapacitive`, :class:`Coupling` — still live in
-:mod:`quchip.chip.couplings`.
+Defined separately from concrete couplings to allow declarative models to
+subclass :class:`BaseCoupling` without a circular import.
 """
 
 from __future__ import annotations
@@ -60,29 +55,9 @@ class BaseCoupling(StateVersioned, Registrable, ABC, registry_root=True):
 
     _type_prefix: ClassVar[str] = "coupling"
 
-    # Whether an existing edge of this coupling type is a valid fold target for
-    # elimination's mediated-exchange consolidation
-    # (:mod:`quchip.chip.transformations.eliminate_device`). A scalar
-    # ``coupling_strength`` alone does not prove an edge is exchange-compatible
-    # — folding a mediated exchange into e.g. a dispersive ``g · n̂_a n̂_b``
-    # coupling would silently change its physics. True only for couplings
-    # whose full interaction is the dipole-dipole ``(a + a†)(b + b†)`` form
-    # (:class:`~quchip.chip.couplings.Capacitive`,
-    # :class:`~quchip.chip.couplings.TunableCapacitive`); an edge that does not
-    # declare this is left unchanged and the mediated exchange is added as its
-    # own parallel edge instead.
-    folds_exchange: ClassVar[bool] = False
 
-    # Whether this coupling's exchange physics reduces to a dispersive
-    # CrossKerr shift under coupling-target elimination
-    # (:mod:`quchip.chip.transformations.eliminate_coupling`). The reduction
-    # reads the chip's exact dressed spectrum and assumes an exchange-like
-    # interaction — a coupling whose physics is not of that form (e.g. a
-    # longitudinal or user-supplied :class:`~quchip.chip.couplings.Coupling`
-    # interaction) would silently mis-model as a CrossKerr, so only couplings
-    # declaring this capability are eligible. True for
-    # :class:`~quchip.chip.couplings.Capacitive` and
-    # :class:`~quchip.chip.couplings.TunableCapacitive`.
+    # Whether dressed-specification fitting estimates this exchange strength
+    # from a dispersive pull, rather than binding the pull as a direct scalar.
     reduces_to_crosskerr: ClassVar[bool] = False
 
     #: Observable represented by this coupling's declared scalar when the
@@ -116,26 +91,29 @@ class BaseCoupling(StateVersioned, Registrable, ABC, registry_root=True):
         self.label = label if label is not None else auto_label(type(self)._type_prefix)
 
     def copy(self, device_map: dict[str, BaseDevice]) -> "BaseCoupling":
-        """Shallow copy rebound to the device instances in *device_map*."""
+        """Copy authored values and rebind endpoints to *device_map*."""
+        from quchip.declarative.parameters import copy_authored_fields
+
         cloned = copy.copy(self)
+        copy_authored_fields(self, cloned)
         object.__setattr__(cloned, "device_a", device_map[self.device_a_label])
         object.__setattr__(cloned, "device_b", device_map[self.device_b_label])
         return cloned
 
     def parameter_values(self) -> dict[str, Any]:
         """Return this coupling's bindable values by local field name."""
-        fields = getattr(type(self), "__quchip_param_fields__", {})
-        if fields:
+        fields = getattr(type(self), "__quchip_param_fields__", None)
+        if fields is not None:
             return {name: getattr(self, name) for name in fields}
         return {self.coupling_strength_name: self.coupling_strength}
 
     def set_parameter_value(self, name: str, value: Any) -> None:
         """Apply one local parameter value on an isolated coupling copy."""
-        fields = getattr(type(self), "__quchip_param_fields__", {})
-        if name in fields:
+        fields = getattr(type(self), "__quchip_param_fields__", None)
+        if fields is not None and name in fields:
             setattr(self, name, value)
             return
-        if name == self.coupling_strength_name:
+        if fields is None and name == self.coupling_strength_name:
             self.set_coupling_strength(value)
             return
         raise KeyError(name)
@@ -160,18 +138,25 @@ class BaseCoupling(StateVersioned, Registrable, ABC, registry_root=True):
         return f"{type(self).__name__}('{self.device_a_label}' <-> '{self.device_b_label}', label={self.label!r})"
 
     def _resolve_devices(self, device_map: dict[str, BaseDevice]) -> None:
-        """Bind pending label-string references to device instances."""
+        """Validate both endpoints before binding label references to chip devices."""
+        endpoints = {}
         for attr in ("device_a", "device_b"):
             current = getattr(self, attr)
-            if isinstance(current, str):
-                resolved = device_map.get(current)
-                if resolved is None:
-                    raise ValueError(
-                        f"Coupling {self!r} references device {current!r} "
-                        f"which is not in the device list. "
-                        f"Available labels: {list(device_map.keys())}"
-                    )
-                object.__setattr__(self, attr, resolved)
+            label = resolve_label(current)
+            resolved = device_map.get(label)
+            if resolved is None:
+                raise ValueError(
+                    f"Coupling {self!r} references device {label!r} which is not in the device list. "
+                    f"Available labels: {list(device_map)}"
+                )
+            if not isinstance(current, str) and current is not resolved:
+                raise ValueError(
+                    f"Coupling {self.label!r} references a different device object labeled {label!r}. "
+                    "Use the declared chip device or its label."
+                )
+            endpoints[attr] = resolved
+        for attr, resolved in endpoints.items():
+            object.__setattr__(self, attr, resolved)
 
     @property
     @abstractmethod
@@ -192,18 +177,10 @@ class BaseCoupling(StateVersioned, Registrable, ABC, registry_root=True):
         return "g"
 
     def set_coupling_strength(self, value: Any) -> None:
-        """Write *value* into the scalar named by :attr:`coupling_strength_name`.
+        """Write the primary scalar named by :attr:`coupling_strength_name`.
 
-        The mutation counterpart of :attr:`coupling_strength`: callers that
-        need to move a coupling's primary scalar (optimizers, sweeps) go
-        through this seam instead of assuming an attribute name (``g``
-        holds only for :class:`~quchip.chip.couplings.Capacitive` /
-        :class:`~quchip.chip.couplings.Coupling`; :class:`~quchip.chip.couplings.TunableCapacitive`
-        uses ``g_0``, :class:`~quchip.chip.couplings.CrossKerr` uses ``chi``).
-        Default implementation covers the common case where the writable
-        attribute name matches :attr:`coupling_strength_name` exactly; a
-        subclass whose writable attribute differs from its display name
-        overrides this.
+        Examples include ``g``, ``g_0``, and ``chi``. Override when the writable
+        attribute differs from that name.
         """
         setattr(self, self.coupling_strength_name, value)
 

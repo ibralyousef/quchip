@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import inspect
 import io
 import json
 import os
@@ -162,9 +163,7 @@ def _solve_native_dynamiqs(model: dict[str, Any]) -> np.ndarray:
 def _build_quchip(n: int, levels: int, family: str) -> tuple[Any, list[str]]:
     import quchip
     from quchip import Capacitive, ChargeDrive, Chip, DuffingTransmon, Gaussian, QuantumSequence
-    from quchip.engine import solve_problem
 
-    del solve_problem
     freqs = frequencies(n)
     devices: list[Any] = [
         DuffingTransmon(
@@ -201,19 +200,23 @@ def _build_quchip(n: int, levels: int, family: str) -> tuple[Any, list[str]]:
         freq=freqs[0],
     )
     if family == "qutip":
-        options: dict[str, Any] = {"atol": ATOL, "rtol": RTOL, "nsteps": MAX_STEPS, "store_states": False}
+        options: dict[str, Any] = {"atol": ATOL, "rtol": RTOL, "nsteps": MAX_STEPS}
     else:
         import dynamiqs as dq
 
         options = {
             "method": dq.method.Tsit5(rtol=RTOL, atol=ATOL, max_steps=MAX_STEPS),
-            "store_states": False,
         }
+    # The same harness runs against 0.3 and pre-0.3 comparison commits.
+    storage = {"states": "none"} if "states" in inspect.signature(sequence.build_problem).parameters else {}
+    if not storage:
+        options["store_states"] = False
     problem = sequence.build_problem(
         tlist=time_grid(),
         e_ops=chip.e_ops(**{device.label: "n" for device in devices}),  # type: ignore[arg-type]
         initial_state=chip.bare_state(**{device.label: 0 for device in devices}),
         options=options,
+        **storage,
     )
     return problem, [device.label for device in devices]
 
@@ -274,6 +277,8 @@ def _worker(args: argparse.Namespace) -> None:
             solve(model)
         warm_samples = [_timed(lambda: solve(model))[0] for _ in range(args.solve_repeat)]
         build_samples = [_timed(build_call)[0] for _ in range(args.build_repeat)]
+        if traces.shape != (args.n, N_TIMES) or not np.isfinite(traces).all():
+            raise ValueError("observable traces have the wrong shape or contain non-finite values")
         np.save(args.trace_out, traces)
         row.update(
             cold_build_s=cold_build_s,
@@ -285,6 +290,8 @@ def _worker(args: argparse.Namespace) -> None:
         )
         if args.reference:
             reference = np.load(args.reference)
+            if reference.shape != traces.shape:
+                raise ValueError("reference and measured observable shapes differ")
             parity = float(np.max(np.abs(traces - reference)))
             row.update(parity=parity, status="ok" if parity < PARITY_TOL else "parity-fail")
         else:
@@ -307,7 +314,7 @@ def _package_version(name: str) -> str | None:
         return None
 
 
-def _provenance(repo: Path, main_ref: str, args: argparse.Namespace) -> dict[str, Any]:
+def _provenance(repo: Path, base_ref: str, args: argparse.Namespace) -> dict[str, Any]:
     return {
         "platform": platform.platform(),
         "machine": platform.machine(),
@@ -315,8 +322,8 @@ def _provenance(repo: Path, main_ref: str, args: argparse.Namespace) -> dict[str
         "head_branch": _git(repo, "branch", "--show-current") or "detached",
         "head_commit": _git(repo, "rev-parse", "HEAD"),
         "head_dirty": bool(_git(repo, "status", "--porcelain", "--untracked-files=no")),
-        "main_ref": main_ref,
-        "main_commit": _git(repo, "rev-parse", main_ref),
+        "base_ref": base_ref,
+        "base_commit": _git(repo, "rev-parse", base_ref),
         "qutip": _package_version("qutip"),
         "dynamiqs": _package_version("dynamiqs"),
         "jax": _package_version("jax"),
@@ -391,6 +398,11 @@ def _invoke_worker(
     return json.loads(row_path.read_text()), trace_path
 
 
+def _row_status(row: dict[str, Any]) -> str:
+    detail = row.get("error", f"max population error={row.get('parity', 0):.3g}")
+    return f"[dim={row['dim']} {row['family']}/{row['path']}] {row['status']}: {detail}"
+
+
 def _parse_rungs(value: str) -> list[int]:
     rungs = [int(token.strip()) for token in value.split(",") if token.strip()]
     if not rungs or any(n < 1 for n in rungs) or len(rungs) != len(set(rungs)):
@@ -400,7 +412,7 @@ def _parse_rungs(value: str) -> list[int]:
 
 def _run(args: argparse.Namespace) -> None:
     repo = Path(_git(Path.cwd(), "rev-parse", "--show-toplevel"))
-    provenance = _provenance(repo, args.main_ref, args)
+    provenance = _provenance(repo, args.base_ref, args)
     if provenance["head_dirty"] and not args.allow_dirty:
         raise SystemExit("current checkout is dirty; commit it first or pass --allow-dirty")
     output = Path(args.out).resolve()
@@ -410,18 +422,18 @@ def _run(args: argparse.Namespace) -> None:
     def persist(complete: bool) -> None:
         output.write_text(
             json.dumps(
-                {"schema_version": 2, "provenance": provenance, "complete": complete, "rows": rows},
+                {"schema_version": 3, "provenance": provenance, "complete": complete, "rows": rows},
                 indent=2,
             )
             + "\n"
         )
 
-    with tempfile.TemporaryDirectory(prefix="quchip-main-") as main_temp, tempfile.TemporaryDirectory(
+    with tempfile.TemporaryDirectory(prefix="quchip-base-") as base_temp, tempfile.TemporaryDirectory(
         prefix="quchip-benchmark-"
     ) as cell_temp:
-        main_root = Path(main_temp)
+        base_root = Path(base_temp)
         cell_root = Path(cell_temp)
-        _extract_ref(repo, args.main_ref, main_root)
+        _extract_ref(repo, args.base_ref, base_root)
         for rung_index, n in enumerate(_parse_rungs(args.rungs)):
             qutip_native, reference_trace = _invoke_worker(
                 path_name="native",
@@ -434,9 +446,11 @@ def _run(args: argparse.Namespace) -> None:
             )
             rows.append(qutip_native)
             persist(False)
-            print(f"[dim={args.levels**n} qutip/native] {qutip_native['status']}", flush=True)
-            reference = reference_trace if reference_trace.exists() else None
-            revisions: tuple[tuple[str, Path], ...] = (("head", repo), ("main", main_root))
+            print(_row_status(qutip_native), flush=True)
+            if qutip_native["status"] != "ok":
+                raise SystemExit("native QuTiP reference failed; comparison cannot establish physics parity")
+            reference = reference_trace
+            revisions: tuple[tuple[str, Path], ...] = (("head", repo), ("base", base_root))
             if rung_index % 2:
                 revisions = tuple(reversed(revisions))
             for path_name, source_root in revisions:
@@ -451,7 +465,7 @@ def _run(args: argparse.Namespace) -> None:
                 )
                 rows.append(row)
                 persist(False)
-                print(f"[dim={args.levels**n} qutip/{path_name}] {row['status']}", flush=True)
+                print(_row_status(row), flush=True)
 
             dynamiqs_native, _ = _invoke_worker(
                 path_name="native",
@@ -464,7 +478,7 @@ def _run(args: argparse.Namespace) -> None:
             )
             rows.append(dynamiqs_native)
             persist(False)
-            print(f"[dim={args.levels**n} dynamiqs/native] {dynamiqs_native['status']}", flush=True)
+            print(_row_status(dynamiqs_native), flush=True)
             for path_name, source_root in revisions:
                 row, _ = _invoke_worker(
                     path_name=path_name,
@@ -477,7 +491,7 @@ def _run(args: argparse.Namespace) -> None:
                 )
                 rows.append(row)
                 persist(False)
-                print(f"[dim={args.levels**n} dynamiqs/{path_name}] {row['status']}", flush=True)
+                print(_row_status(row), flush=True)
     persist(True)
     failures = [row for row in rows if row.get("status") != "ok"]
     if failures:
@@ -489,11 +503,14 @@ def _run(args: argparse.Namespace) -> None:
 def _report(args: argparse.Namespace) -> None:
     from reporting import load_result, render_markdown, render_plots
 
-    document = load_result(Path(args.data))
-    summary = render_markdown(document)
     summary_path = Path(args.summary)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(summary)
+    try:
+        document = load_result(Path(args.data))
+    except (ValueError, OSError) as exc:
+        summary_path.write_text(f"## Closed-system benchmark failed\n\n{exc}\n")
+        raise SystemExit(str(exc)) from exc
+    summary_path.write_text(render_markdown(document))
     outputs = render_plots(document, Path(args.out_dir))
     print(f"wrote {summary_path} and {len(outputs)} plots")
 
@@ -503,7 +520,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run = subparsers.add_parser("run", help="record closed-system benchmark rows")
-    run.add_argument("--main-ref", default="main")
+    run.add_argument("--base-ref", default="main")
     run.add_argument("--levels", type=int, default=LEVELS)
     run.add_argument("--rungs", default="1,3,5,7")
     run.add_argument("--build-repeat", type=int, default=3)
@@ -520,7 +537,7 @@ def _parser() -> argparse.ArgumentParser:
     report.set_defaults(handler=_report)
 
     worker = subparsers.add_parser("_worker", help=argparse.SUPPRESS)
-    worker.add_argument("--path", choices=("head", "main", "native"), required=True)
+    worker.add_argument("--path", choices=("head", "base", "native"), required=True)
     worker.add_argument("--family", choices=("qutip", "dynamiqs"), required=True)
     worker.add_argument("--n", type=int, required=True)
     worker.add_argument("--levels", type=int, required=True)

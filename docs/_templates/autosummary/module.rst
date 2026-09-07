@@ -1,6 +1,7 @@
 {{ fullname | escape | underline }}
 
 .. automodule:: {{ fullname }}
+   :{{ 'no-members' if modules else 'members' }}:
 
    {% block attributes %}
    {% if attributes %}

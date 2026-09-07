@@ -440,7 +440,9 @@ def export_chip(chip: Chip, **opts: Any) -> Any:
     Raises
     ------
     NotImplementedError
-        A coupling is neither :class:`~quchip.chip.couplings.Capacitive`,
+        The chip has a PortNetwork, retained effective terms, intrinsic
+        time-dependent Hamiltonians, or a coupling is neither
+        :class:`~quchip.chip.couplings.Capacitive`,
         :class:`~quchip.chip.couplings.TunableCapacitive`,
         :class:`~quchip.chip.couplings.CrossKerr`, nor a product-form
         :class:`~quchip.chip.couplings.Coupling`.
@@ -459,6 +461,16 @@ def export_chip(chip: Chip, **opts: Any) -> Any:
         raise TypeError(
             f"export_chip got unexpected keyword argument(s): {', '.join(sorted(opts))}. "
             "Composite export takes no options."
+        )
+
+    if chip.effective_terms:
+        raise NotImplementedError("scqubits export does not represent retained effective terms.")
+    if chip.dynamic_contributions():
+        raise NotImplementedError("scqubits export does not represent intrinsic time-dependent Hamiltonians.")
+    if chip.port_network is not None:
+        raise NotImplementedError(
+            "scqubits export does not represent PortNetwork interactions. "
+            "The attached network can contribute to both the Hamiltonian and dissipation."
         )
 
     dropped: list[str] = []

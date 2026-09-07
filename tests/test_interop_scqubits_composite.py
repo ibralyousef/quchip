@@ -372,6 +372,26 @@ def test_export_callable_coupling_raises():
         to_scqubits(chip)
 
 
+@pytest.mark.parametrize("owner", ["device", "coupling"])
+def test_export_rejects_intrinsic_time_dependent_hamiltonians(owner):
+    """Inherited static export mappings cannot discard component time terms."""
+    from quchip import CosineCoefficient, TimeDependentTerm
+
+    class ModulatedMode(Resonator):
+        def time_terms(self, op, p):
+            return (TimeDependentTerm(op.n, CosineCoefficient(amplitude=0.1, frequency=0.1)),)
+
+    class ModulatedEdge(Capacitive):
+        def time_terms(self, a, b, p):
+            return (TimeDependentTerm(a.n * b.n, CosineCoefficient(amplitude=0.1, frequency=0.1)),)
+
+    mode = (ModulatedMode if owner == "device" else Resonator)(freq=5., levels=3, label="a")
+    other = Resonator(freq=6., levels=3, label="b")
+    edge = (ModulatedEdge if owner == "coupling" else Capacitive)(mode, other, g=0.01)
+    with pytest.raises(NotImplementedError, match="time-dependent"):
+        to_scqubits(Chip([mode, other], [edge], approximation=Exact()))
+
+
 def test_export_drops_control_equipment_with_warning():
     """Chip-level control equipment is dropped with a single warning."""
     tmon = ChargeBasisTransmon(E_C=0.2, E_J=30.0, n_g=0.25, levels=4, num_basis=63, basis="eigen", label="tmon")

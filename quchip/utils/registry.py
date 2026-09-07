@@ -1,44 +1,13 @@
-"""Shared subclass-registry mixin for serializable quchip components.
+"""Subclass registration and serialization dispatch.
 
-A :class:`Registrable` subtree maintains a single registry mapping each
-concrete subclass's fully-qualified name to the class object, populated
-automatically at subclass-definition time. The mixin owns the *shared*
-serialization contract — the ``{"type": ...}`` stamp and the registry-root
-``from_dict`` dispatch — so devices, couplings, drives, envelopes, and
-signal transforms share one registration and dispatch rule instead of each
-component family hand-rolling its own registry dict, ``__init_subclass__``
-registration, and base-vs-leaf dispatch.
+Declaring ``class BaseThing(Registrable, registry_root=True)`` creates a
+registry for that family. Concrete subclasses register under their qualified
+names; registry roots and abstract classes are excluded.
 
-Declaring a registry root
--------------------------
-A *registry root* is declared with the ``registry_root=True`` class
-keyword::
-
-    class BaseThing(Registrable, registry_root=True):
-        ...
-
-The root owns a fresh registry dict and is itself excluded from
-registration. Every concrete subclass below it is registered under
-``f"{cls.__module__}.{cls.__qualname__}"``. Abstract subclasses — those
-that still carry unimplemented abstract methods — are skipped as well:
-they can never be instantiated, hence never serialized, so registering
-them would only add dead entries.
-
-Serialization contract
------------------------
-* :meth:`to_dict` stamps ``{"type": cls._type_key()}``. Subclasses that
-  carry extra payload override :meth:`to_dict`, call ``super().to_dict()``,
-  and add their own fields — preserving each type's payload exactly.
-* :meth:`from_dict`, when invoked on the registry root, looks the concrete
-  class up by ``data["type"]`` and delegates to *its* ``from_dict``,
-  forwarding any extra positional / keyword arguments (a coupling's two
-  endpoints, a drive's target, …). On a concrete subclass it reconstructs
-  via :meth:`_from_dict_payload`, whose default is the parameter-less
-  ``cls()``. Subclasses needing real reconstruction either override
-  ``from_dict`` (devices, couplings, envelopes — payload-carrying) or
-  override ``_from_dict_payload`` (drives — shared target and label
-  reconstruction). The parameter-less default covers the signal transforms
-  that take no constructor arguments.
+``to_dict`` supplies the ``type`` tag. A registry root's ``from_dict`` finds
+the concrete class and forwards the payload and any extra arguments to it.
+Concrete classes implement ``from_dict`` or ``_from_dict_payload``; the
+default payload constructor is ``cls()``.
 """
 
 from __future__ import annotations
@@ -47,14 +16,10 @@ from typing import Any, ClassVar
 
 
 def _is_abstract(cls: type) -> bool:
-    """Return whether *cls* still carries unimplemented abstract methods.
+    """Check for abstract methods before ``ABCMeta`` sets ``__abstractmethods__``.
 
-    :attr:`type.__abstractmethods__` is computed by ``ABCMeta.__new__`` only
-    *after* ``__init_subclass__`` returns, so it is not yet available when the
-    registry decides whether to register a freshly-defined subclass. This
-    reproduces that computation directly: for every name marked abstract
-    anywhere in the MRO, find its most-derived definition; if that definition
-    is still abstract, the class cannot be instantiated.
+    Registration runs inside ``__init_subclass__``, before that attribute exists.
+    Inspect the most-derived definition of each abstract name in the MRO.
     """
     abstract_names = {
         name

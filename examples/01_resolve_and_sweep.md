@@ -17,99 +17,15 @@ jupyter:
 
 # Statics and parameter studies
 
-Start from one declared chip. Read dressed quantities and change one parameter,
-then track an avoided crossing and its state assignments. The final example
-compares a fluxonium model with published spectroscopy and readout data. This
-guide does not create a `QuantumSequence` or evolve a state in time.
+Track an avoided crossing, inspect its dressed-state assignments, and compare
+a fluxonium model with published spectroscopy and readout data.
 
 quchip uses GHz for frequencies and couplings.
 
-## Declare and read a chip
+## Declare the coupled model
 
-Declare the devices, read their dressed transitions, then vary one bare
-frequency.
-
-```python
-from quchip import Capacitive, Chip, DuffingTransmon, Resonator
-
-q1 = DuffingTransmon(freq=5.30, anharmonicity=-0.65, levels=4, label="q1")
-q2 = DuffingTransmon(freq=5.58, anharmonicity=-0.65, levels=4, label="q2")
-bus = Resonator(freq=6.55, levels=4, label="bus")
-chip = Chip(
-    [q1, q2, bus],
-    [
-        Capacitive(q1, bus, g=0.05),
-        Capacitive(q2, bus, g=0.05),
-    ],
-    frame="rotating",
-)
-
-{
-    "dressed_f01_ghz": {
-        device.label: float(chip.freq(device)) for device in chip.devices
-    },
-    "static_zz_ghz": float(chip.static_zz(q1, q2)),
-}
-```
-
-<!-- executed-output:start -->
-
-Output:
-
-```text
-{'dressed_f01_ghz': {'q1': 5.297749744925113,
-  'q2': 5.577226664394395,
-  'bus': 6.55414143998032},
- 'static_zz_ghz': 2.2604309073415152e-05}
-```
-
-<!-- executed-output:end -->
-
-## Change one design parameter
-
-`with_params()` returns a new chip. Parameter paths come from component
-labels, so the change remains readable at the call site and the original chip
-keeps its declaration.
-
-```python
-shifted_chip = chip.with_params({"q2.freq": 5.40})
-
-{
-    "available_parameters": tuple(chip.parameters),
-    "original_q2_freq": chip.parameters["q2.freq"],
-    "shifted_q2_freq": shifted_chip.parameters["q2.freq"],
-    "shifted_dressed_q2_freq": float(shifted_chip.freq("q2")),
-}
-```
-
-<!-- executed-output:start -->
-
-Output:
-
-```text
-{'available_parameters': ('q1.freq',
-  'q1.anharmonicity',
-  'q2.freq',
-  'q2.anharmonicity',
-  'bus.freq',
-  'cap_0.g',
-  'cap_1.g'),
- 'original_q2_freq': 5.58,
- 'shifted_q2_freq': 5.4,
- 'shifted_dressed_q2_freq': 5.39765272276005}
-```
-
-<!-- executed-output:end -->
-
-## Resolve the avoided crossing
-
-Two multilevel transmons couple through a detuned bus resonator. Sweeping one
-bare transmon frequency through the other makes the bare declarations cross.
-The dressed transitions remain separated by twice the bus-mediated exchange
-rate.
-
-quchip uses GHz for frequencies. The model below uses the same parameters as
-the slide and applies `RWA()` in a rotating frame.
+Sweep one transmon through the other. Their bus-mediated interaction produces
+an avoided crossing; use `RWA()` in a rotating frame for this study.
 
 ```python
 import json
@@ -147,17 +63,146 @@ chip = Chip(
     frame="rotating",
     approximation=RWA(),
 )
-q1_line = ChargeDrive(q1, label="q1-charge")
-_ = chip.wire(q1_line)
 ```
 
-## Read the chip's statics
+## Sweep the avoided crossing
+
+`Sweep` names the public parameter path to vary. `SpectrumSweep` creates an
+isolated chip at each point, so the original declaration remains unchanged.
+Setting `overlap_threshold=0.0` keeps both intentionally hybridized
+one-excitation labels available at the centre of the avoided crossing.
+
+```python
+frequency_axis = Sweep(q2_frequencies, name="q2.freq")
+sweep_result = SpectrumSweep(
+    chip,
+    [frequency_axis],
+    evals_count=4,
+    overlap_threshold=0.0,
+).run(progress=False)
+```
+
+Subtract the ground energy from the two qubit-like branches. The bus-like
+excitation stays above this frequency window.
+
+```python
+ground_energy = sweep_result.eigenvalues[:, 0]
+qubit_branches = sweep_result.eigenvalues[:, 1:3] - ground_energy[:, None]
+lower_branch = qubit_branches[:, 0]
+upper_branch = qubit_branches[:, 1]
+splitting = upper_branch - lower_branch
+q1_branch = sweep_result.dressed_index(q1=1, q2=0, bus=0).astype(int) - 1
+
+minimum_index = int(np.argmin(splitting))
+minimum_splitting = float(splitting[minimum_index])
+minimum_frequency = float(q2_frequencies[minimum_index])
+inferred_exchange_rate = 0.5 * minimum_splitting
+
+q1_assignment = sweep_result.dressed_index(q1=1, q2=0, bus=0)
+q1_label = (1, 0, 0)
+q1_label_position = sweep_result.bare_labels.index(q1_label)
+q1_assignment_overlap = np.asarray(
+    sweep_result.assignment_overlaps[..., q1_label_position]
+)
+
+```
+
+<details>
+<summary>Plotting code</summary>
+
+```python
+import shutil
+
+plt.style.use("../docs/_static/quchip.mplstyle")
+plt.rcParams["text.usetex"] = bool(shutil.which("latex"))
+
+figure, (axis, overlap_axis) = plt.subplots(
+    2,
+    1,
+    figsize=(7.4, 6.2),
+    height_ratios=(3.0, 1.0),
+    sharex=True,
+    layout="constrained",
+)
+
+axis.plot(q2_frequencies, q2_frequencies, color="#9AA0A8", linestyle="--", linewidth=1.1)
+axis.axhline(q1_frequency, color="#9AA0A8", linestyle="--", linewidth=1.1, label="bare declarations")
+for branch_index in (0, 1):
+    q1_like = q1_branch == branch_index
+    axis.plot(
+        q2_frequencies,
+        np.where(q1_like, qubit_branches[:, branch_index], np.nan),
+        color="#C92F33",
+        linewidth=2.3,
+        label="$q_1$-like" if branch_index == 0 else None,
+    )
+    axis.plot(
+        q2_frequencies,
+        np.where(~q1_like, qubit_branches[:, branch_index], np.nan),
+        color="#16181C",
+        linewidth=2.3,
+        label="$q_2$-like" if branch_index == 0 else None,
+    )
+axis.annotate(
+    f"$2J$ = {1.0e3 * minimum_splitting:.1f} MHz",
+    xy=(minimum_frequency, 0.5 * (lower_branch[minimum_index] + upper_branch[minimum_index])),
+    xytext=(40, -40),
+    textcoords="offset points",
+    arrowprops={"arrowstyle": "-", "color": "#6D7277", "linewidth": 0.8},
+    fontsize=10,
+)
+axis.set(
+    ylabel="Transition frequency (GHz)",
+    xlim=(q2_frequencies[0], q2_frequencies[-1]),
+)
+axis.legend(frameon=False, ncols=2, loc="upper left")
+
+overlap_axis.plot(
+    q2_frequencies,
+    q1_assignment_overlap,
+    color="#246FA8",
+    linewidth=2.0,
+)
+overlap_axis.axhline(0.5, color="#9AA0A8", linestyle="--", linewidth=1.0)
+overlap_axis.set(
+    xlabel="Bare q2 frequency (GHz)",
+    ylabel=r"$q_1$ assignment",
+    ylim=(0.45, 1.02),
+)
+
+figure_path = "../docs/images/resolve_and_sweep.svg"
+figure.savefig(figure_path)
+plt.show()
+```
+
+</details>
+
+```{figure} ../images/resolve_and_sweep.svg
+:width: 720px
+:alt: Dressed transmon avoided crossing with the q1 bare-state assignment weight below
+
+The bare declarations cross while the dressed transitions retain a finite
+splitting. The assignment weight exposes the hybridized region directly.
+```
+
+The dashed lines are the bare declarations. Red follows the more $q_1$-like
+dressed transition, and black follows the more $q_2$-like transition. At the
+crossing, the branches remain separated by $2J\approx4.4$ MHz. Second-order
+dispersive perturbation theory gives $4.0$ MHz. The resolved spectrum includes
+the higher-order dressing retained by this truncated model. The lower panel
+shows why a bare-state label needs care at the crossing: its assignment weight
+falls to about one half as the two excitations hybridize.
+
+## Inspect the model after the sweep
 
 The declared frequencies are inputs. `chip.freq()` returns dressed
 $0\rightarrow1$ transitions, while `chip.static_zz()` returns the conditional
 two-qubit shift for this coupled model.
 
 ```python
+q1_line = ChargeDrive(q1, label="q1-charge")
+_ = chip.wire(q1_line)
+
 initial_dressed_frequencies = {
     "q1": float(chip.freq(q1)),
     "q2": float(chip.freq(q2)),
@@ -241,40 +286,10 @@ Output:
 
 <!-- executed-output:end -->
 
-## Sweep one bare frequency
-
-`Sweep` names the public parameter path to vary. `SpectrumSweep` creates an
-isolated chip at each point, so the original declaration remains unchanged.
-Setting `overlap_threshold=0.0` keeps both intentionally hybridized
-one-excitation labels available at the centre of the avoided crossing.
+<details>
+<summary>Numerical checks and record</summary>
 
 ```python
-frequency_axis = Sweep(q2_frequencies, name="q2.freq")
-sweep_result = SpectrumSweep(
-    chip,
-    [frequency_axis],
-    evals_count=4,
-    overlap_threshold=0.0,
-).run(progress=False)
-```
-
-The two lowest excited eigenvalues are the qubit-like branches throughout this
-window; the bus-like excitation remains far above them. Subtracting the ground
-energy at each sweep point gives the two transition frequencies. The public
-`dressed_index()` result tells us which branch is more $q_1$-like.
-
-```python
-ground_energy = sweep_result.eigenvalues[:, 0]
-qubit_branches = sweep_result.eigenvalues[:, 1:3] - ground_energy[:, None]
-lower_branch = qubit_branches[:, 0]
-upper_branch = qubit_branches[:, 1]
-splitting = upper_branch - lower_branch
-q1_branch = sweep_result.dressed_index(q1=1, q2=0, bus=0).astype(int) - 1
-
-minimum_index = int(np.argmin(splitting))
-minimum_splitting = float(splitting[minimum_index])
-minimum_frequency = float(q2_frequencies[minimum_index])
-inferred_exchange_rate = 0.5 * minimum_splitting
 second_order_splitting_scale = 2.0 * coupling_strength**2 / abs(bus_frequency - q1_frequency)
 relative_difference_to_second_order = (
     abs(minimum_splitting - second_order_splitting_scale) / minimum_splitting
@@ -288,97 +303,7 @@ if len(chip.resolve().dropped_terms) != 4:
     raise RuntimeError("The RWA ledger does not contain the four counter-rotating coupling bands.")
 if chip.parameters["q2.freq"] != q2_frequency0:
     raise RuntimeError("SpectrumSweep mutated the original chip.")
-```
 
-## Interpret the avoided crossing
-
-The dashed lines are the bare declarations. Red follows the more $q_1$-like
-dressed transition, and black follows the more $q_2$-like transition. At the
-crossing, the branches remain separated by $2J\approx4.4$ MHz. Second-order
-dispersive perturbation theory gives $4.0$ MHz. The resolved spectrum includes
-the higher-order dressing retained by this truncated model. The lower panel
-shows why a bare-state label needs care at the crossing: its assignment weight
-falls to about one half as the two excitations hybridize.
-
-```python
-q1_assignment = sweep_result.dressed_index(q1=1, q2=0, bus=0)
-q1_label = (1, 0, 0)
-q1_label_position = sweep_result.bare_labels.index(q1_label)
-q1_assignment_overlap = np.asarray(
-    sweep_result.assignment_overlaps[..., q1_label_position]
-)
-
-figure, (axis, overlap_axis) = plt.subplots(
-    2,
-    1,
-    figsize=(7.4, 6.2),
-    height_ratios=(3.0, 1.0),
-    sharex=True,
-    layout="constrained",
-)
-
-axis.plot(q2_frequencies, q2_frequencies, color="0.78", linestyle="--", linewidth=1.1)
-axis.axhline(q1_frequency, color="0.78", linestyle="--", linewidth=1.1, label="bare declarations")
-for branch_index in (0, 1):
-    q1_like = q1_branch == branch_index
-    axis.plot(
-        q2_frequencies,
-        np.where(q1_like, qubit_branches[:, branch_index], np.nan),
-        color="#C92F33",
-        linewidth=2.3,
-        label="$q_1$-like" if branch_index == 0 else None,
-    )
-    axis.plot(
-        q2_frequencies,
-        np.where(~q1_like, qubit_branches[:, branch_index], np.nan),
-        color="#16181C",
-        linewidth=2.3,
-        label="$q_2$-like" if branch_index == 0 else None,
-    )
-axis.annotate(
-    f"$2J$ = {1.0e3 * minimum_splitting:.1f} MHz",
-    xy=(minimum_frequency, 0.5 * (lower_branch[minimum_index] + upper_branch[minimum_index])),
-    xytext=(5.327, 5.270),
-    arrowprops={"arrowstyle": "-", "color": "0.35"},
-    fontsize=10,
-)
-axis.set(
-    ylabel="Transition frequency (GHz)",
-    xlim=(q2_frequencies[0], q2_frequencies[-1]),
-)
-axis.legend(frameon=False, ncols=2, loc="upper left")
-
-overlap_axis.plot(
-    q2_frequencies,
-    q1_assignment_overlap,
-    color="#246FA8",
-    linewidth=2.0,
-)
-overlap_axis.axhline(0.5, color="0.72", linestyle="--", linewidth=1.0)
-overlap_axis.set(
-    xlabel="Bare q2 frequency (GHz)",
-    ylabel=r"$q_1$ assignment",
-    ylim=(0.45, 1.02),
-)
-
-figure_path = "../docs/images/resolve_and_sweep.png"
-figure.savefig(figure_path, dpi=180)
-plt.show()
-```
-
-```{figure} ../images/resolve_and_sweep.png
-:width: 720px
-:alt: Dressed transmon avoided crossing with the q1 bare-state assignment weight below
-
-The bare declarations cross while the dressed transitions retain a finite
-splitting. The assignment weight exposes the hybridized region directly.
-```
-
-The receipt records the exchange inferred from the avoided crossing, the
-second-order scale, the approximation audit, and whether the original chip
-kept its declared `q2` frequency.
-
-```python
 statics_receipt = {
     "approximation": chip.settings["approximation"],
     "dressed_frequencies_ghz": initial_dressed_frequencies,
@@ -403,7 +328,35 @@ print(f"RESULT statics={json.dumps(statics_receipt, sort_keys=True, separators=(
 Output:
 
 ```text
-RESULT statics={"approximation":"RWA","dressed_frequencies_ghz":{"bus":6.55414143998032,"q1":5.297749744925113,"q2":5.577226664394395},"dropped_rwa_terms":4,"figure":"../docs/images/resolve_and_sweep.png","full_dimension":64,"inferred_exchange_rate_mhz":2.204908100780223,"minimum_at_bare_q2_ghz":5.3,"minimum_splitting_mhz":4.409816201560446,"original_chip_unchanged":true,"relative_difference_to_second_order":0.09293271710857891,"second_order_splitting_scale_mhz":4.000000000000001,"static_zz_khz":22.604309073415152,"sweep_points":181}
+RESULT statics={"approximation":"RWA","dressed_frequencies_ghz":{"bus":6.55414143998032,"q1":5.297749744925113,"q2":5.577226664394395},"dropped_rwa_terms":4,"figure":"../docs/images/resolve_and_sweep.svg","full_dimension":64,"inferred_exchange_rate_mhz":2.204908100780223,"minimum_at_bare_q2_ghz":5.3,"minimum_splitting_mhz":4.409816201560446,"original_chip_unchanged":true,"relative_difference_to_second_order":0.09293271710857891,"second_order_splitting_scale_mhz":4.000000000000001,"static_zz_khz":22.604309073415152,"sweep_points":181}
+```
+
+<!-- executed-output:end -->
+
+</details>
+
+## Change one design parameter
+
+`with_params()` changes one bare frequency while preserving the source chip.
+
+```python
+shifted_chip = chip.with_params({"q2.freq": 5.40})
+
+{
+    "original_q2_freq": chip.parameters["q2.freq"],
+    "shifted_q2_freq": shifted_chip.parameters["q2.freq"],
+    "shifted_dressed_q2_freq": float(shifted_chip.freq("q2")),
+}
+```
+
+<!-- executed-output:start -->
+
+Output:
+
+```text
+{'original_q2_freq': 5.58,
+ 'shifted_q2_freq': 5.4,
+ 'shifted_dressed_q2_freq': 5.39765272276005}
 ```
 
 <!-- executed-output:end -->
@@ -487,11 +440,9 @@ Output:
 
 <!-- executed-output:end -->
 
-Do not force a bare label through a strongly hybridized region without reading
-the overlaps. The value near `0.5` occurs at the centre of this crossing, where
-the two bare qubit excitations share the dressed branches. Setting a lower
-`overlap_threshold` keeps a branch available; it does not make the bare-state
-description more accurate.
+At the crossing, each dressed branch contains roughly equal bare qubit
+weights. Lowering `overlap_threshold` retains these labels without improving
+their physical assignment.
 
 ## Check numerical resolution
 
@@ -522,9 +473,8 @@ Output:
 
 <!-- executed-output:end -->
 
-For a truncation check, rebuild the devices with one extra level and compare
-the observable you intend to report. A stable transition does not guarantee a
-stable matrix element or dispersive shift, so check the actual output.
+Check local-level convergence separately for the reported transition, matrix
+element, or dispersive shift.
 
 ## Paper example: experimental fluxonium spectroscopy
 
@@ -542,11 +492,9 @@ resonator is added afterward.
 
 ### Load the published measurements
 
-The repository supplies extracted frequencies, so no image digitization is
-needed. `processed_data_fx8.csv` stores the measured qubit frequency and the
-five parameters fitted by the authors. `res_fit_results.csv` stores the two
-state-dependent resonator frequencies and their half-difference
-$\chi=(f_{r,1}-f_{r,0})/2$.
+`processed_data_fx8.csv` contains measured qubit frequencies and the authors'
+fitted parameters. `res_fit_results.csv` contains the conditional resonator
+frequencies and their half-difference $\chi=(f_{r,1}-f_{r,0})/2$.
 
 ```python
 import csv
@@ -634,11 +582,22 @@ def isolated_f01(phi_ext):
     return float(q.freq)
 
 
+```
+
+Evaluate the spectrum on its own flux grid and compare it with the measured points.
+
+```python
 paper_model_flux = np.linspace(0.5, 0.85, 351)
 predicted_f01_grid = np.asarray([isolated_f01(phi) for phi in paper_model_flux])
 predicted_f01_at_data = np.interp(paper_flux, paper_model_flux, predicted_f01_grid)
 f01_residual_mhz = 1.0e3 * (predicted_f01_at_data - measured_f01)
 
+```
+
+<details>
+<summary>Plotting code</summary>
+
+```python
 paper_spectrum_figure, (spectrum_axis, residual_axis) = plt.subplots(
     2,
     1,
@@ -650,9 +609,9 @@ paper_spectrum_figure, (spectrum_axis, residual_axis) = plt.subplots(
 spectrum_axis.scatter(
     paper_flux,
     measured_f01,
-    s=15,
-    color="#262626",
-    alpha=0.7,
+    s=12,
+    color="#16181C",
+    alpha=0.55,
     label="experiment",
 )
 spectrum_axis.plot(
@@ -663,23 +622,23 @@ spectrum_axis.plot(
     label="quchip",
 )
 spectrum_axis.set_ylabel(r"$f_{01}$ (GHz)")
-spectrum_axis.legend(frameon=False)
-spectrum_axis.grid(color="0.88", linewidth=0.7)
+spectrum_axis.legend()
 
-residual_axis.axhline(0.0, color="0.45", linewidth=1.0)
-residual_axis.scatter(paper_flux, f01_residual_mhz, s=14, color="#246FA8", alpha=0.78)
+residual_axis.axhline(0.0, color="#9AA0A8", linewidth=1.0)
+residual_axis.scatter(paper_flux, f01_residual_mhz, s=12, color="#246FA8", alpha=0.78)
 residual_axis.set(
     xlabel=r"External flux $\Phi_{\mathrm{ext}}/\Phi_0$",
     ylabel="model - data\n(MHz)",
 )
-residual_axis.grid(color="0.88", linewidth=0.7)
 
-paper_spectrum_path = "../docs/images/stefanski_fluxonium_spectrum.png"
-paper_spectrum_figure.savefig(paper_spectrum_path, dpi=180)
+paper_spectrum_path = "../docs/images/stefanski_fluxonium_spectrum.svg"
+paper_spectrum_figure.savefig(paper_spectrum_path)
 plt.show()
 ```
 
-```{figure} ../images/stefanski_fluxonium_spectrum.png
+</details>
+
+```{figure} ../images/stefanski_fluxonium_spectrum.svg
 :width: 720px
 :alt: Measured fluxonium transition frequencies, quchip prediction, and pointwise residuals across external flux
 
@@ -741,6 +700,11 @@ class FluxoniumReadoutCoupling(CouplingModel):
         return p.g * (lowering * r.adag + raising * r.a)
 
 
+```
+
+Use the published interaction with the fitted circuit parameters.
+
+```python
 paper_q = Fluxonium(
     E_C=paper_E_C,
     E_J=paper_E_J,
@@ -786,6 +750,11 @@ measured_fr1 = measured_fr1_all[readout_window]
 measured_chi_mhz = measured_chi_all[readout_window]
 
 
+```
+
+At each flux, ask the same chip for the two conditional readout frequencies.
+
+```python
 def readout_observables(phi_ext):
     point = paper_chip.with_params({"q.phi_ext": phi_ext})
     fr0 = float(point.freq("readout"))
@@ -810,6 +779,9 @@ predicted_chi_at_data_mhz = np.interp(
 )
 ```
 
+<details>
+<summary>Plotting code</summary>
+
 ```python
 readout_figure, (frequency_axis, chi_axis) = plt.subplots(
     2,
@@ -833,21 +805,20 @@ frequency_axis.plot(
     label=r"$q=|1\rangle$",
 )
 frequency_axis.set_ylabel("Readout frequency (GHz)")
-frequency_axis.legend(frameon=False, ncols=2)
-frequency_axis.grid(color="0.88", linewidth=0.7)
+frequency_axis.legend(ncols=2)
 
 chi_axis.scatter(
     readout_flux,
     measured_chi_mhz,
-    s=13,
-    color="#262626",
-    alpha=0.62,
+    s=12,
+    color="#16181C",
+    alpha=0.55,
     label="experiment",
 )
 chi_axis.plot(
     readout_model_flux,
     predicted_chi_grid_mhz,
-    color="#246FA8",
+    color="#C92F33",
     linewidth=2.0,
     label="quchip",
 )
@@ -855,15 +826,16 @@ chi_axis.set(
     xlabel=r"External flux $\Phi_{\mathrm{ext}}/\Phi_0$",
     ylabel=r"$\chi$ (MHz)",
 )
-chi_axis.legend(frameon=False)
-chi_axis.grid(color="0.88", linewidth=0.7)
+chi_axis.legend()
 
-paper_readout_path = "../docs/images/stefanski_fluxonium_readout.png"
-readout_figure.savefig(paper_readout_path, dpi=180)
+paper_readout_path = "../docs/images/stefanski_fluxonium_readout.svg"
+readout_figure.savefig(paper_readout_path)
 plt.show()
 ```
 
-```{figure} ../images/stefanski_fluxonium_readout.png
+</details>
+
+```{figure} ../images/stefanski_fluxonium_readout.svg
 :width: 720px
 :alt: Measured and predicted state-dependent readout resonator frequencies and dispersive shift across external flux
 
@@ -907,17 +879,20 @@ Output:
 {'sweet_spot': {'paper_f01_ghz': 0.377,
   'quchip_f01_ghz': 0.37229583974984704,
   'paper_fr0_ghz': 5.1739,
-  'quchip_fr0_ghz': 5.173631975636763,
+  'quchip_fr0_ghz': 5.173631975636749,
   'paper_chi_mhz': 0.92,
-  'quchip_chi_mhz': 1.1418029950291952},
+  'quchip_chi_mhz': 1.141802995038077},
  'flux_pulsed_readout': {'paper_flux': 0.6567,
   'paper_f01_ghz': 3.47,
   'quchip_f01_ghz': 3.4802282134309697,
   'paper_chi_mhz': -1.09,
-  'quchip_chi_mhz': -1.1351841383457906}}
+  'quchip_chi_mhz': -1.135184138343126}}
 ```
 
 <!-- executed-output:end -->
+
+<details>
+<summary>Numerical record</summary>
 
 ```python
 resonator_residual_mhz = 1.0e3 * np.concatenate(
@@ -950,24 +925,13 @@ print(
 Output:
 
 ```text
-RESULT paper_statics={"chi_median_absolute_error_mhz":0.1767470986042987,"chi_rmse_mhz":0.7651558998064468,"readout_frequency_rmse_mhz":1.0847642735011658,"readout_model_points":351,"readout_points":151,"spectrum_median_absolute_error_mhz":1.5923938298039175,"spectrum_model_points":351,"spectrum_p95_absolute_error_mhz":6.076768528398682,"spectrum_points":153}
+RESULT paper_statics={"chi_median_absolute_error_mhz":0.17674709860890925,"chi_rmse_mhz":0.7651558998067052,"readout_frequency_rmse_mhz":1.0847642735011205,"readout_model_points":351,"readout_points":151,"spectrum_median_absolute_error_mhz":1.5923938298039175,"spectrum_model_points":351,"spectrum_p95_absolute_error_mhz":6.076768528398682,"spectrum_points":153}
 ```
 
 <!-- executed-output:end -->
 
+</details>
+
 The paper's authors fitted the circuit parameters to these measurements.
 Treat this result as a cross-implementation check of their static model. A
 fabrication-level prediction would require independent circuit parameters.
-
-## Choose the static observable
-
-Use `freq()` and `transition_frequency()` for dressed transitions,
-`kerr_matrix()` for several dressed self-Kerr and cross-Kerr coefficients,
-`dressed_anharmonicity()` for one level curvature, `dispersive_shift()` or
-`static_zz()` for one conditional shift, `drive_matrix_elements()` for control
-strengths, and `state_components()` for hybridization. `SpectrumSweep` keeps
-the eigenvalues, assignments, overlaps, and grid shape together.
-
-Change either bus coupling and rerun the sweep to see how the inferred exchange
-changes. Moving the bus closer tests where the second-order dispersive scale
-stops tracking the resolved avoided crossing.

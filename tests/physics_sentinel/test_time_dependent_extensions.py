@@ -55,7 +55,10 @@ def test_frequency_coefficient_gradients_match_closed_form_and_finite_difference
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_commuting_device_time_evolution_matches_exact_phase(backend: str) -> None:
     if backend == "dynamiqs":
-        pytest.importorskip("dynamiqs")
+        dq = pytest.importorskip("dynamiqs")
+        options = {"method": dq.method.Tsit5(atol=1e-11, rtol=1e-10, max_steps=1_000_000)}
+    else:
+        options = {"atol": 1e-11, "rtol": 1e-10, "nsteps": 1_000_000}
     frequency = 0.4
     amplitude = 0.03
     modulation_frequency = 0.07
@@ -75,7 +78,7 @@ def test_commuting_device_time_evolution_matches_exact_phase(backend: str) -> No
     result = QuantumSequence(chip).simulate(
         tlist=np.linspace(0.0, duration, 121),
         initial_state=initial,
-        options={"atol": 1e-11, "rtol": 1e-10, "nsteps": 1_000_000},
+        options=options,
         check_truncation=False,
     )
 

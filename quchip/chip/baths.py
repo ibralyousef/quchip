@@ -28,6 +28,7 @@ from quchip.devices.spaces import FockSpace
 from quchip.utils.constants import k_B
 from quchip.utils.jax_utils import maybe_concrete_scalar
 from quchip.utils.labeling import auto_label, resolve_label
+from quchip.utils.values import copy_value
 
 if TYPE_CHECKING:
     from quchip.chip.chip import Chip
@@ -41,6 +42,10 @@ def _bose_occupation(temperature: Any, frequency: Any) -> Any:
     safe_denominator = jnp.where(is_zero, 1.0, k_B * temperature)
     finite = 1.0 / jnp.expm1(frequency / safe_denominator)
     return jnp.where(is_zero, 0.0, finite)
+
+
+def _adjoint(operator: Any) -> Any:
+    return operator.dag() if hasattr(operator, "dag") else jnp.asarray(operator).conj().T
 
 
 class Bath:
@@ -109,6 +114,7 @@ class Bath:
                 "Collective thermal baths are unsupported; use correlated=False "
                 "(independent channels sharing one temperature)."
             )
+        self._retained: dict[str, tuple[Any, Any, Any]] | None = None
         self.recipe = recipe
         self._targets = targets
         self.temperature = temperature
@@ -134,7 +140,7 @@ class Bath:
 
     def resolve_targets(self, chip: "Chip") -> list[str]:
         """Return the ordered target device labels (defaults to all devices)."""
-        if self._targets is None:
+        if self._targets is None or self._retained is not None:
             return [d.label for d in chip.devices]
         return [resolve_label(t) for t in self._targets]
 
@@ -148,7 +154,7 @@ class Bath:
         ``"correlated_dephasing"``). Partitioning treats a non-separable bath's
         target set as one inseparable block.
         """
-        return self.recipe == "thermal"
+        return self.recipe == "thermal" and self._retained is None
 
     def __repr__(self) -> str:
         """Return a compact bath-model and target summary."""
@@ -163,6 +169,11 @@ class Bath:
         targets = None if self._targets is None else [resolve_label(t) for t in self._targets]
         return {
             "type": f"{type(self).__module__}.{type(self).__qualname__}",
+            "retained": None if self._retained is None else {
+                label: [float(freq), *[dict(real=jnp.asarray(op).real.tolist(), imag=jnp.asarray(op).imag.tolist())
+                                       for op in (lowering, number)]]
+                for label, (freq, lowering, number) in self._retained.items()
+            },
             "recipe": self.recipe,
             "targets": targets,
             "temperature": self.temperature,
@@ -173,13 +184,31 @@ class Bath:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Bath":
         """Reconstruct a bath from serialized state (targets as label strings)."""
-        return cls(
+        bath = cls(
             d["recipe"],
             targets=d.get("targets"),
             temperature=d.get("temperature"),
             rate=d.get("rate"),
             label=d.get("label"),
         )
+        if d.get("retained") is not None:
+            bath._retained = {}
+            for label, entry in d["retained"].items():
+                if not isinstance(label, str) or not label or len(entry) != 3:
+                    raise ValueError("A retained bath target needs a label, frequency and two operators.")
+                frequency, *operators = entry
+                matrices = []
+                for operator in operators:
+                    real, imag = jnp.asarray(operator["real"]), jnp.asarray(operator["imag"])
+                    if real.ndim != 2 or real.shape != imag.shape or real.shape[0] != real.shape[1]:
+                        raise ValueError("Retained bath operators need square, matching real/imag matrices.")
+                    if not bool(jnp.all(jnp.isfinite(real) & jnp.isfinite(imag))):
+                        raise ValueError("Retained bath operators must be finite.")
+                    matrices.append(real + 1j * imag)
+                if not bool(jnp.isfinite(frequency)) or frequency < 0:
+                    raise ValueError("Retained bath frequencies must be finite and nonnegative.")
+                bath._retained[label] = (frequency, matrices[0], matrices[1])
+        return bath
 
     def physics_notes(self) -> list[str]:
         """Return human-readable declarations of this bath's model and scope.
@@ -216,7 +245,10 @@ class Bath:
         values (temperature, rate) are carried by reference, so traced
         values stay traced.
         """
-        return Bath.from_dict(self.to_dict())
+        result = Bath(self.recipe, None if self._targets is None else [resolve_label(t) for t in self._targets],
+                      temperature=copy_value(self.temperature), rate=copy_value(self.rate), label=self.label)
+        result._retained = copy_value(self._retained, readonly=True)
+        return result
 
     def parameter_values(self) -> dict[str, Any]:
         """Return active bath values by local field name."""
@@ -318,56 +350,49 @@ class Bath:
         Contributions remain backend-neutral; the engine projects and lowers
         them with the same basis records used for Hamiltonian terms.
         """
-        xp = jnp
-        labels = self.resolve_targets(chip)
-        records = self._resolved_bases(chip, bases)
-        terms: list[CollapseChannel] = []
         fields = {name: Parameter() for name in self._parameter_names}
         p = ParameterNamespace(f"bath.{self.label}", fields)
         gamma = 1.0 if self.rate is None else p.rate
-        chip_labels = tuple(device.label for device in chip.devices)
-
-        if self.recipe == "thermal":
-            for lbl in labels:
-                dev = chip[lbl]
-                n_bar = PhysicsExpr.from_function(
-                    _bose_occupation,
-                    p.temperature,
-                    PhysicsExpr.literal(dev.freq),  # type: ignore[attr-defined]  # BaseDevice contract
-                    labels=(),
-                    dims=(),
-                    name="n_bar",
-                )
-                lowering = self._operator_expr(dev, records[lbl], "lowering", xp)
-                raising = self._operator_expr(dev, records[lbl], "raising", xp)
-                terms.append(
-                    CollapseChannel(
-                        lowering.embed(chip_labels, chip.authored_dims),
-                        gamma * (n_bar + 1.0),
-                        f"thermal_emission:{lbl}",
-                    )
-                )
-                terms.append(
-                    CollapseChannel(
-                        raising.embed(chip_labels, chip.authored_dims),
-                        gamma * n_bar,
-                        f"thermal_absorption:{lbl}",
-                    )
-                )
-            return tuple(terms)
-
-        # Collective models: a single summed jump operator over the targets.
+        terms: list[CollapseChannel] = []
         summed: PhysicsExpr | None = None
-        for lbl in labels:
-            device = chip[lbl]
-            record = records[lbl]
-            kind = "lowering" if self.recipe == "collective_decay" else "number"
-            local = self._operator_expr(device, record, kind, xp)
-            embedded = local.embed(chip_labels, chip.authored_dims)
-            summed = embedded if summed is None else summed + embedded
+        for label, frequency, lowering, number in self._target_operators(chip, bases):
+            if self.recipe == "thermal":
+                n_bar = PhysicsExpr.from_function(
+                    _bose_occupation, p.temperature, PhysicsExpr.literal(frequency),
+                    labels=(), dims=(), name="n_bar",
+                )
+                terms.extend((
+                    CollapseChannel(lowering, gamma * (n_bar + 1), f"thermal_emission:{label}"),
+                    CollapseChannel(PhysicsExpr.from_function(
+                        _adjoint, lowering, labels=lowering.labels, dims=chip.authored_dims, name="raising",
+                    ), gamma * n_bar, f"thermal_absorption:{label}"),
+                ))
+            else:
+                operator = lowering if self.recipe == "collective_decay" else number
+                summed = operator if summed is None else summed + operator
         if summed is not None:
             terms.append(CollapseChannel(summed, gamma, self.recipe))
         return tuple(terms)
+
+    def _target_operators(self, chip: "Chip", bases: Mapping[str, Any] | None = None) -> Any:
+        """Yield each bath target before summing collective amplitudes or applying rates."""
+        labels, dims = tuple(d.label for d in chip.devices), chip.authored_dims
+        if self._retained is not None:
+            for label, (frequency, lowering, number) in self._retained.items():
+                if label in chip.device_map:
+                    frequency = getattr(chip[label], "freq", frequency)
+                yield (label, frequency, *[
+                    PhysicsExpr.from_matrix(op, labels=labels, dims=dims, name=f"{self.label}:{label}")
+                    for op in (lowering, number)
+                ])
+            return
+        records = self._resolved_bases(chip, bases)
+        for label in self.resolve_targets(chip):
+            device = chip[label]
+            yield (label, getattr(device, "freq", 0.0), *[
+                self._operator_expr(device, records[label], kind, jnp).embed(labels, dims)
+                for kind in ("lowering", "number")
+            ])
 
     def _collapse_channels_with_paths(
         self,

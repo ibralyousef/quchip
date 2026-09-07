@@ -42,7 +42,7 @@ class RetargetContext:
     edges
         For ``"edge"`` and ``"crosskerr"``: the per-pair reduction entries,
         keyed ``(label_a, label_b)`` in emission order, each carrying at
-        least ``"folded_into"`` (the edge's label on the reduced chip) and —
+        least ``"coupling"`` (the edge's label on the reduced chip) and —
         for ``"edge"`` — the exchange bookkeeping (``"j_eff"``,
         ``"dJ_domega_c"``, ...). Always pair-keyed regardless of how many
         pairs there are: one entry is simply the two-survivor case, not a
@@ -145,13 +145,13 @@ def _flux_edge_pump_rule(line: Any, ctx: RetargetContext) -> RetargetResult:
     gains: list[Any] = []
     pump_labels: list[str] = []
     for position, ((label_a, label_b), entry) in enumerate(ctx.edges.items()):
-        edge = ctx.reduced_chip.coupling(entry["folded_into"])
+        edge = ctx.reduced_chip.coupling(entry["coupling"])
         pump_label = line.label if position == 0 else f"{line.label}_{label_a}_{label_b}"
         if position > 0:
             copies.append(Crosstalk(line.label, pump_label, beta=1.0))
         lines.append(ParametricDrive(edge, label=pump_label))
         gains.append(Gain(pump_label, entry["dJ_domega_c"]))
-        pump_labels.append(f"'{entry['folded_into']}'")
+        pump_labels.append(f"'{entry['coupling']}'")
     note = (
         f"drive '{line.label}': FluxDrive('{ctx.mode_label}') → ParametricDrive on "
         f"{', '.join(pump_labels)}, Gain ∂J/∂ω_c per edge (small-signal, δω_c ≪ Δ)"

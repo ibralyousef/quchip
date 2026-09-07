@@ -27,6 +27,7 @@ import numpy as np
 from matplotlib.figure import Figure
 
 from quchip.devices.base import BaseDevice
+from quchip.results.input_output import SParameterResult
 from quchip.utils.labeling import resolve_label
 from quchip.viz._common import (
     _basis_label,
@@ -78,7 +79,7 @@ def plot_populations(
     trace_out : device, label, or list thereof, optional
         Subsystems to partial-trace over before computing populations.
         Accepts either device objects or their string labels (UX favourability).
-        Requires ``options={"store_states": True}`` on the solver call.
+        Requires ``states="all"`` on the solver call.
     computational : bool
         When ``True``, restricts computational subsystems to their
         ``{|0>, |1>}`` subspace.
@@ -104,7 +105,7 @@ def plot_populations(
     ------
     RuntimeError
         *trace_out* is given but no states were stored (pass
-        ``options={"store_states": True}`` to the solver).
+        ``states="all"`` to the solver).
     ValueError
         *trace_out* would remove every subsystem.
     """
@@ -172,7 +173,7 @@ def plot_state(
     ----------
     result : SimulationResult
         Output of :func:`quchip.engine.simulate`, with
-        ``options={"store_states": True}``.
+        ``states="all"``.
     index : int
         Stored-time index to plot. Supports Python-style negative
         indexing (``-1`` is the last stored time); must satisfy
@@ -208,7 +209,7 @@ def plot_state(
         *mode* is not ``"population"`` or ``"dm"``, or *trace_out*
         would remove every subsystem.
     RuntimeError
-        No states were stored (pass ``options={"store_states": True}``
+        No states were stored (pass ``states="all"``
         to the solver).
     """
     index = _normalize_time_index(result, index)
@@ -514,7 +515,7 @@ def plot_wigner(
     ----------
     result : SimulationResult
         Output of :func:`quchip.engine.simulate`, with
-        ``options={"store_states": True}``.
+        ``states="all"``.
     index : int
         Stored-time index to plot. Supports Python-style negative
         indexing (``-1``, the default, is the last stored time); must
@@ -548,7 +549,7 @@ def plot_wigner(
         message lists the retained device labels and a *trace_out*
         value that isolates a single one of them.
     RuntimeError
-        No states were stored (pass ``options={"store_states": True}``
+        No states were stored (pass ``states="all"``
         to the solver).
 
     References
@@ -595,3 +596,116 @@ def plot_wigner(
             fig.colorbar(im, ax=axis, label=r"$W(\alpha)$")
         fig.tight_layout()
         return fig
+
+
+def plot_sparameters(
+    result: Any,
+    pairs: list[tuple[Any, Any]] | None = None,
+    *,
+    select: dict[str, int] | None = None,
+    kind: Literal["db_phase", "magnitude", "iq"] = "db_phase",
+    axes: Any = None,
+) -> Figure:
+    """Plot entries from a small-signal scattering result.
+
+    Parameters
+    ----------
+    result : SParameterResult
+        Result returned by :meth:`VNA.sweep`. Other result types are rejected.
+    pairs : list of (output, input), optional
+        Matrix entries to draw. When omitted, draw all four entries for exactly
+        two planes; otherwise draw the first input column, capped at six entries.
+    select : dict of str to int, optional
+        Indices on non-frequency sweep axes. Omitted axes use index 0, and those
+        defaults appear in the plot title. Frequency stays the x axis and cannot
+        be selected.
+    kind : {"db_phase", "magnitude", "iq"}
+        ``"db_phase"`` stacks ``20 log10|S|`` in dB above unwrapped phase in
+        degrees. ``"magnitude"`` draws ``|S|``. ``"iq"`` draws ``Im S`` against
+        ``Re S``.
+    axes : matplotlib.axes.Axes or iterable of matplotlib.axes.Axes, optional
+        Existing axes to draw on: two for ``"db_phase"`` and one for the other
+        kinds. When ``None``, create the required axes.
+
+    Returns
+    -------
+    Figure
+        The figure containing the plots.
+
+    Raises
+    ------
+    TypeError
+        *result* is not an SParameterResult.
+    ValueError
+        *kind* is not ``"db_phase"``, ``"magnitude"``, or ``"iq"``, *select*
+        names ``"frequency"``, or no sweep axis remains for the x axis.
+    KeyError
+        *select* contains an unknown sweep-axis name.
+    """
+    if not isinstance(result, SParameterResult):
+        raise TypeError(f"plot_sparameters requires an SParameterResult; got {type(result).__name__}.")
+    if kind not in {"db_phase", "magnitude", "iq"}:
+        raise ValueError(f"Unknown plot kind {kind!r}; use 'db_phase', 'magnitude', or 'iq'.")
+    ports = result.ports
+    if pairs is None:
+        pairs = (
+            [(out, inp) for inp in ports for out in ports]
+            if len(ports) == 2
+            else [(out, ports[0]) for out in ports][:6]
+        )
+    names = result.axis_names
+    select = select or {}
+    unknown = set(select) - set(names)
+    if unknown:
+        raise KeyError(f"Unknown axes {sorted(unknown)}; available: {list(names)}")
+    if "frequency" in select:
+        raise ValueError("select indexes non-frequency axes; frequency is always the x axis.")
+    free = [name for name in names if name not in select]
+    if not free:
+        raise ValueError("plot_sparameters needs one unselected sweep axis; the result has none.")
+    sweep_axis = "frequency" if "frequency" in free else free[0]
+    index = tuple(slice(None) if name == sweep_axis else select.get(name, 0) for name in names)
+    x_values = np.asarray(dict(result.axes)[sweep_axis], dtype=float)
+    defaulted = [name for name in names if name != sweep_axis and name not in select]
+    title = f"defaults: {', '.join(f'{name}[0]' for name in defaulted)}" if defaulted else ""
+
+    colors = _cyclic_colors(range(len(pairs)), "tab10")
+    with _quchip_style():
+        drawn: tuple[Any, ...]
+        if kind == "db_phase":
+            if axes is None:
+                fig, drawn = plt.subplots(2, 1, sharex=True, figsize=(6.0, 6.0))
+            else:
+                drawn = tuple(axes)
+                fig = drawn[0].figure
+        else:
+            fig, single = _resolve_single_axes(axes)
+            drawn = (single,)
+        for idx, (output, input_) in enumerate(pairs):
+            values = np.asarray(result.s(output, input_))[index]
+            label = f"S({resolve_label(output)}, {resolve_label(input_)})"
+            color = colors[idx]
+            if kind == "db_phase":
+                with np.errstate(divide="ignore"):
+                    drawn[0].plot(x_values, 20.0 * np.log10(np.abs(values)), label=label, color=color)
+                drawn[1].plot(x_values, np.degrees(np.unwrap(np.angle(values))), label=label, color=color)
+            elif kind == "magnitude":
+                drawn[0].plot(x_values, np.abs(values), label=label, color=color)
+            else:
+                drawn[0].plot(np.real(values), np.imag(values), label=label, color=color)
+        x_label = "Frequency (GHz)" if sweep_axis == "frequency" else sweep_axis
+        if kind == "db_phase":
+            drawn[0].set_ylabel("|S| (dB)")
+            drawn[1].set_ylabel("Phase (deg)")
+            drawn[1].set_xlabel(x_label)
+        elif kind == "magnitude":
+            drawn[0].set_ylabel("|S|")
+            drawn[0].set_xlabel(x_label)
+        else:
+            drawn[0].set_xlabel("Re S")
+            drawn[0].set_ylabel("Im S")
+            drawn[0].set_aspect("equal", adjustable="datalim")
+        drawn[0].legend()
+        if title:
+            drawn[0].set_title(title, fontsize=9)
+    return fig

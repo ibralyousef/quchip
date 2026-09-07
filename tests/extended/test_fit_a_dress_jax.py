@@ -24,11 +24,12 @@ def test_fit_a_dress_passes_an_exact_jax_jacobian_to_scipy(monkeypatch: pytest.M
         x0 = np.asarray(kwargs["x0"], dtype=float)
         jacobian = np.asarray(kwargs["jac"](x0), dtype=float)
         step = 1e-6
-        finite_difference = np.column_stack([
-            (fun(x0 + step * np.eye(x0.size)[column]) - fun(x0 - step * np.eye(x0.size)[column]))
-            / (2.0 * step)
-            for column in range(x0.size)
-        ])
+        finite_difference = np.column_stack(
+            [
+                (fun(x0 + step * np.eye(x0.size)[column]) - fun(x0 - step * np.eye(x0.size)[column])) / (2.0 * step)
+                for column in range(x0.size)
+            ]
+        )
         np.testing.assert_allclose(jacobian, finite_difference, rtol=2e-4, atol=2e-6)
         checked = True
         return scipy_least_squares(fun, *args, **kwargs)
@@ -41,8 +42,9 @@ def test_fit_a_dress_passes_an_exact_jax_jacobian_to_scipy(monkeypatch: pytest.M
 
     result = fit_a_dress(
         chip,
-        coupling_targets={coupling: "g"},
-        observable_targets={
+        vary={q: ("freq", "anharmonicity"), r: ("freq",), coupling: ("g",)},
+        constraints={
+            coupling: {"cross_kerr": None, "coupling_strength": coupling.g},
             q: {"freq": 5.01, "anharmonicity": -0.25},
             r: {"freq": 7.01},
         },

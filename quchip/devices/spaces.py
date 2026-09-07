@@ -5,10 +5,26 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
+from operator import index
 from types import MappingProxyType
 from typing import Any
 
 import jax.numpy as jnp
+
+
+@dataclass(frozen=True)
+class TruncationBoundary:
+    """Authored basis indices near a cutoff and the corresponding convergence check."""
+
+    indices: tuple[int, ...]
+    description: str
+    convergence_hint: str
+
+    def __post_init__(self) -> None:
+        indices = tuple(index(value) for value in self.indices)
+        if len(set(indices)) != len(indices) or any(value < 0 for value in indices):
+            raise ValueError("Truncation boundary indices must be distinct and nonnegative")
+        object.__setattr__(self, "indices", indices)
 
 
 class LocalSpace(ABC):
@@ -22,6 +38,10 @@ class LocalSpace(ABC):
     @abstractmethod
     def matrix(self, name: str) -> Any:
         """Return one named operator as a JAX-compatible dense array."""
+
+    def truncation_boundary(self) -> TruncationBoundary | None:
+        """Describe a cutoff, or return None for an intrinsically finite space."""
+        raise NotImplementedError(f"{type(self).__name__} does not declare a truncation boundary")
 
     def operator(self, name: str, backend: Any) -> Any:
         """Lower one named local operator through ``backend``."""
@@ -38,8 +58,11 @@ class FockSpace(LocalSpace):
     levels: int
 
     def __post_init__(self) -> None:
-        if self.levels < 2:
+        if index(self.levels) < 2:
             raise ValueError(f"levels must be >= 2, got {self.levels}")
+
+    def truncation_boundary(self) -> TruncationBoundary:
+        return TruncationBoundary((self.levels - 1,), "Fock boundary", "Increase levels and compare observables.")
 
     @property
     def dimension(self) -> int:
@@ -92,8 +115,12 @@ class ChargeSpace(LocalSpace):
     num_basis: int
 
     def __post_init__(self) -> None:
-        if self.num_basis < 3 or self.num_basis % 2 == 0:
+        if index(self.num_basis) < 3 or self.num_basis % 2 == 0:
             raise ValueError(f"num_basis must be an odd integer >= 3, got {self.num_basis}")
+
+    def truncation_boundary(self) -> TruncationBoundary:
+        return TruncationBoundary((0, self.num_basis - 1), "charge-basis edges",
+                                  "Increase num_basis and compare observables.")
 
     @property
     def dimension(self) -> int:
@@ -128,10 +155,14 @@ class PhaseGridSpace(LocalSpace):
     extent: float
 
     def __post_init__(self) -> None:
-        if self.points < 3:
+        if index(self.points) < 3:
             raise ValueError(f"points must be >= 3, got {self.points}")
         if self.extent <= 0:
             raise ValueError(f"extent must be positive, got {self.extent}")
+
+    def truncation_boundary(self) -> TruncationBoundary:
+        return TruncationBoundary((0, self.points - 1), "phase-grid edges",
+                                  "Increase the phase range at fixed grid spacing and compare observables.")
 
     @property
     def dimension(self) -> int:
@@ -164,7 +195,7 @@ class CustomSpace(LocalSpace):
     """Named local operators supplied as matrices or zero-argument JAX callables."""
 
     def __init__(self, dimension: int, operators: Mapping[str, Any]) -> None:
-        if dimension < 1:
+        if index(dimension) < 1:
             raise ValueError(f"dimension must be positive, got {dimension}")
         self._dimension = dimension
         self.operators = MappingProxyType(dict(operators))

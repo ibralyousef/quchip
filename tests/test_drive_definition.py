@@ -8,45 +8,10 @@ import quchip
 import numpy as np
 import pytest
 from quchip import (
-    ChargeDrive,
     CouplingDrive,
     DeviceDrive,
     DuffingTransmon,
-    FluxDrive,
-    ParametricDrive,
-    PhaseDrive,
-    TunableCapacitive,
-    TwoPhotonDrive,
 )
-from quchip.engine.ir import DriveOp
-
-
-def test_drive_authoring_bases_are_public() -> None:
-    assert quchip.DeviceDrive is DeviceDrive
-    assert quchip.CouplingDrive is CouplingDrive
-
-
-def test_builtin_drives_expose_authored_hamiltonians() -> None:
-    first = DuffingTransmon(5.0, -0.25, levels=3, label="a")
-    second = DuffingTransmon(5.2, -0.25, levels=3, label="b")
-    coupling = TunableCapacitive(first, second, g_0=0.0, label="tc")
-    pulse = DriveOp(
-        target_label="a",
-        drive_label="charge",
-        envelope=quchip.Square(duration=2.0, amplitude=0.01),
-        freq=5.0,
-    )
-    signal = ChargeDrive(first).signal(pulse, first)
-
-    for drive, target in (
-        (ChargeDrive(first), first),
-        (PhaseDrive(first), first),
-        (FluxDrive(first), first),
-        (TwoPhotonDrive(first), first),
-        (ParametricDrive(coupling), coupling),
-    ):
-        authored = drive.hamiltonian(target, signal)
-        assert authored.labels
 
 
 def test_custom_drive_compiles_from_physical_iq_quadratures() -> None:

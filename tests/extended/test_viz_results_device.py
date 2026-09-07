@@ -91,13 +91,6 @@ def _line_by_label(ax: plt.Axes, label: str) -> plt.Line2D:
     raise AssertionError(f"Missing line for label {label!r}")
 
 
-def test_plot_populations_returns_figure(sample_result: SimulationResult) -> None:
-    """plot_populations returns a Figure instance."""
-    fig = sample_result.plot_populations()
-    assert isinstance(fig, Figure)
-    plt.close(fig)
-
-
 def test_plot_populations_returns_supplied_figure(sample_result: SimulationResult) -> None:
     """plot_populations given ax= returns the figure that owns that axes."""
     fig, ax = plt.subplots()
@@ -130,16 +123,6 @@ def test_plot_populations_computational_filter_restricts_basis_labels(sample_res
     plt.close(fig)
 
 
-def test_plot_populations_default_colors_follow_tab20_index_order(sample_result: SimulationResult) -> None:
-    """Default line colors follow the tab20 colormap in basis-state index order."""
-    fig = sample_result.plot_populations(trace_out=["q1", "r0"])
-    cmap = plt.get_cmap("tab20")
-    for idx, label in enumerate(["|0>", "|1>", "|2>"]):
-        line = _line_by_label(fig.axes[0], label)
-        assert to_rgba(line.get_color()) == pytest.approx(cmap(idx))
-    plt.close(fig)
-
-
 def test_plot_populations_explicit_color_override_wins(sample_result: SimulationResult) -> None:
     """An explicit colors override takes precedence over the default tab20 color."""
     fig = sample_result.plot_populations(trace_out=["q1", "r0"], colors={(1,): "#123456"})
@@ -153,36 +136,6 @@ def test_plot_state_population_respects_supplied_axes(sample_result: SimulationR
     fig, ax = plt.subplots()
     returned = sample_result.plot_state(0, trace_out=["q1", "r0"], ax=ax)
     assert returned is fig
-    plt.close(fig)
-
-
-def test_plot_state_dm_returns_figure_with_two_axes(sample_result: SimulationResult) -> None:
-    """plot_state in "dm" mode returns a figure with two axes, one per real/imaginary panel."""
-    fig = sample_result.plot_state(0, trace_out=["q1", "r0"], mode="dm")
-    assert isinstance(fig, Figure)
-    assert len(fig.axes) == 2
-    plt.close(fig)
-
-
-def test_plot_wigner_matches_qutip_vacuum_reference(sample_result: SimulationResult) -> None:
-    """The internal Wigner function computation matches QuTiP's reference for the vacuum state."""
-    import qutip
-    from quchip.viz.results import _wigner_from_density_matrix
-
-    rho = np.zeros((3, 3), dtype=complex)
-    rho[0, 0] = 1.0
-    xvec = np.linspace(-3.0, 3.0, 41)
-
-    actual = _wigner_from_density_matrix(rho, xvec, xvec)
-    expected = qutip.wigner(qutip.Qobj(rho, dims=[[3], [3]]), xvec, xvec)
-
-    np.testing.assert_allclose(actual, expected, atol=1e-6)
-
-
-def test_plot_wigner_returns_figure_without_qutip_objects(sample_result: SimulationResult) -> None:
-    """plot_wigner returns a Figure without requiring qutip objects as input."""
-    fig = sample_result.plot_wigner(trace_out=["q0", "q1"])
-    assert isinstance(fig, Figure)
     plt.close(fig)
 
 

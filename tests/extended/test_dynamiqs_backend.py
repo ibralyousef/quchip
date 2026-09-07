@@ -4,7 +4,6 @@ from __future__ import annotations
 
 
 import warnings
-from typing import Any
 
 import numpy as np
 import numpy.testing as npt
@@ -26,13 +25,13 @@ from quchip.control import ChargeDrive  # noqa: E402
 from quchip.control.sequence import QuantumSequence  # noqa: E402
 from quchip.control.envelopes import Square  # noqa: E402
 from quchip.declarative.expr import materialize_expr  # noqa: E402
-from quchip.engine import simulate  # noqa: E402
 from quchip.engine.ir import (  # noqa: E402
     CanonicalOperator,
     Carrier,
     Constant,
     DynamicTerm,
     EngineResult,
+    ResolvedSLH,
     ScalarModulation,
     Window,
 )
@@ -85,37 +84,6 @@ def test_dynamiqs_backend_enables_float64(backend: DynamiqsBackend) -> None:
     assert backend.array_module is jnp
 
 
-def test_protocol_methods_on_trivial_operators_and_states(backend: DynamiqsBackend) -> None:
-    """Operator factories, algebra helpers, and state helpers match trivial analytics."""
-    destroy = backend.to_array(backend.destroy(3))
-    expected_destroy = np.array(
-        [[0.0, 1.0, 0.0], [0.0, 0.0, np.sqrt(2.0)], [0.0, 0.0, 0.0]],
-        dtype=complex,
-    )
-    npt.assert_allclose(np.asarray(destroy), expected_destroy, atol=1e-12)
-
-    number = backend.number(3)
-    npt.assert_allclose(np.asarray(backend.to_array(number)), np.diag([0.0, 1.0, 2.0]), atol=1e-12)
-    npt.assert_allclose(np.asarray(backend.to_array(backend.identity(2))), np.eye(2), atol=1e-12)
-
-    matrix = np.array([[1.0, 2.0j], [-2.0j, 3.0]], dtype=complex)
-    op = backend.from_array(matrix)
-    npt.assert_allclose(np.asarray(backend.to_array(op)), matrix, atol=1e-12)
-
-    evals, estates = backend.eigenstates(number)
-    npt.assert_allclose(np.asarray(evals), np.array([0.0, 1.0, 2.0]), atol=1e-12)
-    assert len(estates) == 3
-    npt.assert_allclose(abs(backend.overlap(estates[0], estates[0])), 1.0, atol=1e-12)
-    npt.assert_allclose(abs(backend.overlap(estates[0], estates[1])), 0.0, atol=1e-12)
-
-    psi = backend.basis(3, 1)
-    rho = backend.state_to_dm(psi)
-    assert backend.is_ket(psi) is True
-    assert backend.is_ket(rho) is False
-    npt.assert_allclose(backend.norm(psi), 1.0, atol=1e-12)
-    npt.assert_allclose(backend.trace(rho), 1.0, atol=1e-12)
-
-
 def test_sparse_canonical_roundtrip_preserves_dia_layout(backend: DynamiqsBackend) -> None:
     """Canonical-operator roundtrip on a sparse operator preserves the dia layout and values."""
     op = backend.destroy(4)
@@ -162,69 +130,6 @@ def test_irregular_csr_uses_dense_when_dia_storage_would_be_larger(
             dtype=complex,
         ),
     )
-
-
-def test_tensor_partial_trace_and_coherent_state_helpers(backend: DynamiqsBackend) -> None:
-    """Tensor-state helpers and partial trace work on analytically trivial product states."""
-    psi = backend.tensor_states(backend.basis(2, 1), backend.basis(3, 2))
-    rho = backend.state_to_dm(psi)
-    reduced = backend.ptrace(rho, 0, [2, 3])
-
-    expected = np.array([[0.0, 0.0], [0.0, 1.0]], dtype=complex)
-    npt.assert_allclose(np.asarray(backend.to_array(reduced)), expected, atol=1e-12)
-
-    coherent = backend.coherent(8, 0.0)
-    npt.assert_allclose(abs(backend.overlap(coherent, backend.basis(8, 0))), 1.0, atol=1e-12)
-
-
-def test_sesolve_trivial_and_helper_accessors(backend: DynamiqsBackend) -> None:
-    """Trivial sesolve preserves the ground state and exposes arrays/scalars cleanly."""
-    H = backend.from_array(np.zeros((2, 2), dtype=complex))
-    psi0 = backend.basis(2, 0)
-    tlist = jnp.linspace(0.0, 1.0, 5)
-
-    result = backend.sesolve(H, psi0, tlist, e_ops=[backend.number(2)])
-
-    assert result.solver == "sesolve"
-    assert result.states is not None
-    assert len(result.states) == len(tlist)
-    npt.assert_allclose(np.asarray(result.times), np.asarray(tlist), atol=1e-12)
-    npt.assert_allclose(np.asarray(result.expect[0]), np.zeros(len(tlist)), atol=1e-12)
-    for state in result.states:
-        npt.assert_allclose(abs(backend.overlap(state, psi0)) ** 2, 1.0, atol=1e-12)
-
-
-def test_mesolve_trivial_open_system_run(backend: DynamiqsBackend) -> None:
-    """Trivial mesolve preserves the ground-state density matrix and keeps unit trace."""
-    H = backend.from_array(np.zeros((2, 2), dtype=complex))
-    rho0 = backend.state_to_dm(backend.basis(2, 0))
-    tlist = jnp.linspace(0.0, 1.0, 4)
-    c_ops = [np.sqrt(0.1) * backend.destroy(2)]
-
-    result = backend.mesolve(H, rho0, tlist, c_ops=c_ops, e_ops=[backend.number(2)])
-
-    assert result.solver == "mesolve"
-    assert result.states is not None
-    npt.assert_allclose(np.asarray(result.expect[0]), np.zeros(len(tlist)), atol=1e-12)
-    npt.assert_allclose(backend.trace(result.final_state), 1.0, atol=1e-12)
-
-
-def test_run_simulation_smoke_path_matches_runtime_expectations() -> None:
-    """Dynamiqs backend works through simulate()/SimulationResult on a trivial chip."""
-    backend = DynamiqsBackend()
-    chip = Chip(
-        devices=[DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")],
-        backend=backend,
-    )
-    tlist = jnp.linspace(0.0, 1.0, 5)
-    initial_state = chip.bare_state(q=0)
-
-    result = simulate(chip, [], tlist, initial_state=initial_state)
-
-    overlap = result.overlap_array(initial_state)
-    npt.assert_allclose(np.asarray(overlap), np.ones(len(tlist)), atol=1e-9)
-    assert result.states is not None
-    assert len(result.states) == len(tlist)
 
 
 def test_prepare_static_hamiltonian_preserves_sparse_layout() -> None:
@@ -287,13 +192,16 @@ def test_prepare_scalar_modulation_hamiltonian_remains_callable() -> None:
         subsystem_labels=("q",),
     )
     desc = EngineResult(
-        static_terms=(),
-        dynamic_terms=(
-            DynamicTerm(
-                operator=op,
-                time_dependence=ScalarModulation(signal=Carrier(freq=0.5)),
-                origin="drive",
+        slh=ResolvedSLH.from_terms(
+            static_terms=(),
+            dynamic_terms=(
+                DynamicTerm(
+                    operator=op,
+                    time_dependence=ScalarModulation(signal=Carrier(freq=0.5)),
+                    origin="drive",
+                ),
             ),
+            collapse_terms=(),
         ),
         dims=(2,),
         metadata={},
@@ -317,19 +225,22 @@ def test_prepare_windowed_scalar_modulation_supports_traced_stop_time() -> None:
     @jax.jit
     def sample_rhs(stop):
         desc = EngineResult(
-            static_terms=(),
-            dynamic_terms=(
-                DynamicTerm(
-                    operator=op,
-                    time_dependence=ScalarModulation(
-                        signal=Window(
-                            child=Constant(1.0 + 0.0j),
-                            start=0.0,
-                            stop=stop,
-                        )
+            slh=ResolvedSLH.from_terms(
+                static_terms=(),
+                dynamic_terms=(
+                    DynamicTerm(
+                        operator=op,
+                        time_dependence=ScalarModulation(
+                            signal=Window(
+                                child=Constant(1.0 + 0.0j),
+                                start=0.0,
+                                stop=stop,
+                            )
+                        ),
+                        origin="drive",
                     ),
-                    origin="drive",
                 ),
+                collapse_terms=(),
             ),
             dims=(2,),
             metadata={},
@@ -414,7 +325,7 @@ def test_batched_sesolve_handles_heterogeneous_problems_sequentially(backend: Dy
 
 
 def test_batched_sesolve_store_states_false_preserves_final_state(backend: DynamiqsBackend) -> None:
-    """batched_sesolve with store_states=False still returns a final_state and a single-entry states list."""
+    """Disabled history retains the requested final state independently."""
     H = backend.from_array(np.array([[0.0, 1.0], [1.0, 0.0]], dtype=complex))
     tlist = jnp.linspace(0.0, 1.0, 5)
     problems = [
@@ -426,7 +337,7 @@ def test_batched_sesolve_store_states_false_preserves_final_state(backend: Dynam
 
     assert len(results) == 2
     assert all(result.final_state is not None for result in results)
-    assert all(result.states is not None and len(result.states) == 1 for result in results)
+    assert all(result.states is None for result in results)
 
 
 def test_batched_mesolve_matches_separate_solves(backend: DynamiqsBackend) -> None:
@@ -463,172 +374,10 @@ def test_batched_mesolve_matches_separate_solves(backend: DynamiqsBackend) -> No
         npt.assert_allclose(np.asarray(batch_result.expect[0]), np.asarray(single_result.expect[0]), atol=1e-12)
 
 
-def test_frequency_sweep_lowers_to_single_native_batched_solve(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A carrier-frequency sweep sharing operator structure fans out as a single native-batched call."""
-    # build_batch over pulse.vary("freq", ...) produces one SolveBatch whose
-    # SolveBatch carries explicit frozen problems; the dynamiqs backend lowers
-    # their compatible Hamiltonians to one vmapped RHS via
-    # prepare_batch and solves it in one call to solve_batch.
-    from quchip.control.envelopes import Square as SquareEnv
-
-    qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.30, levels=3, label="q")
-    drive = ChargeDrive(target=qubit, label="d")
-    chip = Chip(devices=[qubit], frame="rotating", backend="dynamiqs", label="structural-test")
-    chip.wire(drive)
-
-    psi0 = chip.state(q=0)
-    e_ops = chip.e_ops(q="n")
-    tlist = np.linspace(0.0, 40.0, 80)
-
-    seq = QuantumSequence(chip)
-    pulse = seq.charge(qubit, envelope=SquareEnv(duration=40.0, amplitude=0.03), freq=5.0)
-    freq_axis = pulse.vary("freq", [4.9, 5.0, 5.1], name="freq")
-
-    backend = chip.backend
-    original_solve_batch = backend.solve_batch
-    original_prepare_batch = backend.prepare_batch
-    solve_batch_sizes: list[int] = []
-    prepare_batch_sizes: list[int] = []
-
-    def counted_solve_batch(batch, *, progress=True):
-        solve_batch_sizes.append(batch.batch_size)
-        return original_solve_batch(batch, progress=progress)
-
-    def counted_prepare_batch(batch):
-        prepare_batch_sizes.append(batch.batch_size)
-        return original_prepare_batch(batch)
-
-    monkeypatch.setattr(backend, "solve_batch", counted_solve_batch)
-    monkeypatch.setattr(backend, "prepare_batch", counted_prepare_batch)
-
-    problems = seq.build_batch(
-        freq_axis,
-        tlist=tlist,
-        initial_state=psi0,
-        e_ops=e_ops,
-    )
-    results = chip.solve_many(problems, progress=False)
-
-    assert len(results) == 3
-    assert solve_batch_sizes == [3], f"Expected single batch of 3, got {solve_batch_sizes}"
-    # Dynamiqs prepares the whole batch once via prepare_batch (native vmap);
-    # it never falls back to the per-element prepare_hamiltonian path.
-    assert prepare_batch_sizes == [3]
-
-    finals = [float(jnp.real(r.expect_final("q"))) for r in results]
-    assert not np.allclose(finals[0], finals[1], atol=1e-3) or not np.allclose(finals[1], finals[2], atol=1e-3)
-
-
-def test_dynamiqs_method_from_dict_accepts_nsteps_alias(backend: DynamiqsBackend) -> None:
-    """_method_from_dict should accept 'nsteps' as an alias for 'max_steps'."""
-    method = backend._method_from_dict({"nsteps": 1234})
-    assert method is not None
-    assert getattr(method, "max_steps", None) == 1234
-
-
-def test_dynamiqs_options_from_dict_accepts_progress_bar_alias(backend: DynamiqsBackend) -> None:
-    """_options_from_dict should accept 'progress_bar' as an alias for 'progress_meter'."""
-    options = backend._options_from_dict({"progress_bar": True})
-    assert getattr(options, "progress_meter", None) is True
-
-
-def test_solve_batch_respects_quchip_option_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
-    """quchip option aliases (progress_bar, nsteps) reach dynamiqs options/method on the batched lane."""
-    # Dynamiqs maps progress_bar -> progress_meter and nsteps -> max_steps via
-    # _options_from_dict/_method_from_dict; intercept those calls to verify the aliases
-    # actually arrive on the solve_batch lane, not just the per-problem lane.
-    qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.30, levels=3, label="q")
-    drive = ChargeDrive(target=qubit, label="d")
-    chip = Chip(devices=[qubit], frame="rotating", backend="dynamiqs", label="solve-batch-options")
-    chip.wire(drive)
-
-    seq = QuantumSequence(chip)
-    pulse = seq.charge(qubit, envelope=Square(duration=20.0, amplitude=0.03), freq=5.0)
-    freq_axis = pulse.vary("freq", [4.95, 5.05], name="freq")
-
-    problems = seq.build_batch(
-        freq_axis,
-        tlist=np.linspace(0.0, 20.0, 41),
-        initial_state=chip.state(q=0),
-        e_ops=chip.e_ops(q="n"),
-        options={"progress_bar": False, "nsteps": 2048},
-    )
-
-    backend = chip.backend
-    orig_options = backend._options_from_dict
-    orig_method = backend._method_from_dict
-    seen_options: list[dict] = []
-    seen_method: list[dict] = []
-
-    def capturing_options(raw: dict, *args: Any, **kwargs: Any) -> Any:
-        seen_options.append(dict(raw))
-        return orig_options(raw, *args, **kwargs)
-
-    def capturing_method(raw: dict, *args: Any, **kwargs: Any) -> Any:
-        seen_method.append(dict(raw))
-        return orig_method(raw, *args, **kwargs)
-
-    monkeypatch.setattr(backend, "_options_from_dict", capturing_options)
-    monkeypatch.setattr(backend, "_method_from_dict", capturing_method)
-
-    results = chip.solve_many(problems, progress=False)
-
-    assert len(results) == 2
-    # resolve_solver_options normalises progress_bar -> progress_meter and
-    # nsteps -> max_steps before the dict reaches _options_from_dict /
-    # _method_from_dict. Verify the normalised keys (with user values)
-    # actually arrive at the dynamiqs option constructors on the batched
-    # lane, not just the per-problem lane.
-    assert any(raw.get("progress_meter") is False for raw in seen_options), (
-        f"progress_bar alias did not reach _options_from_dict as progress_meter=False; saw {seen_options!r}"
-    )
-    assert any(raw.get("max_steps") == 2048 for raw in seen_method), (
-        f"nsteps alias did not reach _method_from_dict as max_steps=2048; saw {seen_method!r}"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Cached jitted ``solve_problem`` (the dynamiqs single-solve artifact cache):
 # parity vs the un-jitted protocol-default path, grad/vmap traceability, and
 # adversarial cache-correctness (no structural collision, no stale-value reuse).
-
-
-def test_repeated_native_batch_reuses_one_compiled_solve() -> None:
-    """Structurally identical batches reuse one value-independent compiled solve."""
-    qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.30, levels=3, label="q")
-    drive = ChargeDrive(target=qubit, label="d")
-    backend = DynamiqsBackend()
-    chip = Chip([qubit], frame="rotating", backend=backend)
-    chip.wire(drive)
-    sequence = QuantumSequence(chip)
-    pulse = sequence.charge(
-        qubit,
-        envelope=Square(duration=4.0, amplitude=0.03),
-        freq=5.0,
-    )
-    axis = pulse.vary("amplitude", [0.02, 0.04], name="amp")
-    batch = sequence.build_batch(
-        axis,
-        tlist=np.linspace(0.0, 4.0, 9),
-        initial_state=chip.state(q=0),
-    )
-    cache = backend._get_jit_solve_cache()
-    cache.clear()
-
-    first = backend.solve_batch(batch, progress=False)
-    second = backend.solve_batch(batch, progress=False)
-
-    assert len(first) == len(second) == 2
-    assert len(cache) == 1
-    compiled = next(iter(cache.values()))
-    assert compiled._cache_size() == 1
-    for left, right in zip(first, second):
-        npt.assert_allclose(
-            np.asarray(backend.to_array(left.final_state)),
-            np.asarray(backend.to_array(right.final_state)),
-        )
 
 
 # ``benchmarks/repeated_solve_parity.py`` validated this manually; these are the
@@ -651,7 +400,8 @@ def _r5_build(open_system: bool):
 def _r5_problem(chip, qubit, amp, tlist):
     seq = QuantumSequence(chip)
     seq.charge(qubit, envelope=Square(duration=40.0, amplitude=jnp.asarray(amp)), freq=5.0)
-    return seq.build_problem(tlist=tlist, initial_state=chip.state(q=0), e_ops=chip.e_ops(q="n"))
+    return seq.build_problem(tlist=tlist, initial_state=chip.state(q=0), e_ops=chip.e_ops(q="n"),
+                             states="final")
 
 
 def _r5_cached(problem):

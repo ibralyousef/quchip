@@ -11,7 +11,7 @@ pytestmark = pytest.mark.optional_backend
 pytest.importorskip("dynamiqs")
 
 from quchip.analysis import analyze_static_zz, effective_hamiltonian  # noqa: E402
-from quchip.analysis.effective_hamiltonian import _inverse_sqrt_hermitian  # noqa: E402
+from quchip.chip.sw import _inverse_sqrt_hermitian  # noqa: E402
 from quchip.backend.dynamiqs import DynamiqsBackend  # noqa: E402
 from quchip.chip.chip import Chip  # noqa: E402
 from quchip.chip.couplings import Capacitive  # noqa: E402

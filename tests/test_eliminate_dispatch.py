@@ -10,7 +10,6 @@ from quchip import (
     ChargeDrive,
     Chip,
     ControlEquipment,
-    CrossKerr,
     DuffingTransmon,
     FluxTunableTransmon,
     ParametricDrive,
@@ -59,14 +58,15 @@ def test_frequency_tunable_bridge_emits_tunable_capacitive_edge():
     assert isinstance(edge, TunableCapacitive)
 
 
-def test_bridge_folds_into_existing_direct_edge_preserving_label():
-    """The mediated exchange folds into an existing direct edge, keeping that edge's label."""
+def test_bridge_keeps_direct_edge_and_adds_mediated_exchange():
+    """A direct edge keeps its parameter while a separate edge carries the mediated exchange."""
     res = eliminate(_bridge_chip(direct_g=0.004), "bus")
     edge = res.chip.coupling("direct")
     assert type(edge) is Capacitive
     j = res.effective_params["exchange"]["j_eff"]
-    assert np.isclose(float(edge.g), 0.004 + float(j))
-    assert res.effective_params["exchange"]["folded_into"] == "direct"
+    assert np.isclose(float(edge.g), 0.004)
+    mediated = res.chip.coupling(res.effective_params["exchange"]["coupling"])
+    assert np.isclose(float(mediated.g), float(j))
 
 
 def test_exchange_entry_carries_dj_domega():
@@ -76,8 +76,8 @@ def test_exchange_entry_carries_dj_domega():
     assert np.isclose(float(dj), 0.08 * 0.08 / 2 * (1 / 1.3**2 + 1 / 1.1**2))
 
 
-def test_bridge_chain_folds_second_exchange_into_first_edge():
-    """A second fixed bus folds its exchange into the Capacitive the first left behind."""
+def test_bridge_chain_retains_each_mediated_contribution():
+    """Successive fixed buses contribute distinct mediated edges without counting the first twice."""
     q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
     q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.24, levels=3, label="q1")
     b1 = Resonator(freq=6.3, levels=4, label="b1")
@@ -93,10 +93,9 @@ def test_bridge_chain_folds_second_exchange_into_first_edge():
     step1 = eliminate(chip, "b1")
     step2 = eliminate(step1.chip, "b2")
 
-    (edge,) = step2.chip.couplings
-    assert edge.label == "elim_b1"
-    assert type(edge) is Capacitive
-    assert step2.effective_params["exchange"]["folded_into"] == "elim_b1"
+    assert {edge.label for edge in step2.chip.couplings} == {"elim_b1", "elim_b2"}
+    assert all(type(edge) is Capacitive for edge in step2.chip.couplings)
+    assert step2.effective_params["exchange"]["coupling"] == "elim_b2"
 
     # J1: bare-frequency bridge exchange from eliminating b1 first.
     j1 = 0.08 * 0.08 / 2 * (1 / (5.0 - 6.3) + 1 / (5.2 - 6.3))
@@ -106,11 +105,11 @@ def test_bridge_chain_folds_second_exchange_into_first_edge():
     q0_after_b1 = 5.0 + 0.08**2 / (5.0 - 6.3)
     q1_after_b1 = 5.2 + 0.08**2 / (5.2 - 6.3)
     j2 = 0.06 * 0.06 / 2 * (1 / (q0_after_b1 - 6.8) + 1 / (q1_after_b1 - 6.8))
-    assert np.isclose(float(edge.g), j1 + j2)
+    assert np.isclose(sum(float(edge.g) for edge in step2.chip.couplings), j1 + j2)
 
 
-def test_bridge_folds_into_user_built_tunable_capacitive_direct_edge():
-    """A user-built TunableCapacitive direct edge is folded into (not shadowed by) the bridge exchange."""
+def test_bridge_preserves_the_existing_tunable_direct_edge():
+    """An existing tunable edge retains its independent modulation target and baseline."""
     q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
     q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.24, levels=3, label="q1")
     bus = Resonator(freq=6.3, levels=4, label="bus")
@@ -120,11 +119,11 @@ def test_bridge_folds_into_user_built_tunable_capacitive_direct_edge():
 
     res = eliminate(chip, "bus")
 
-    (edge,) = res.chip.couplings
-    assert edge.label == "direct"
+    edge = res.chip.coupling("direct")
     assert isinstance(edge, TunableCapacitive)
     j = res.effective_params["exchange"]["j_eff"]
-    assert np.isclose(float(edge.g_0), 0.004 + float(j))
+    assert np.isclose(float(edge.g_0), 0.004)
+    assert np.isclose(float(res.chip.coupling("elim_bus").g), float(j))
 
 
 def _readout_chip():
@@ -140,26 +139,24 @@ def _readout_chip():
     return chip, q, r, coupling
 
 
-def test_coupling_target_keeps_both_devices_and_emits_crosskerr():
-    """Eliminating a coupling (not a device) keeps both endpoints and emits a CrossKerr edge between them."""
+def test_coupling_target_keeps_both_devices_and_retains_matrix():
+    """An edge reduction retains both endpoints and its full matrix correction."""
     chip, q, r, coupling = _readout_chip()
     res = eliminate(chip, "cap0")
     reduced = res.chip
 
     assert {d.label for d in reduced.devices} == {"q", "r"}
-    edge = reduced.coupling("elim_cap0")
-    assert isinstance(edge, CrossKerr)
-    assert edge.device_a_label == "q"
-    assert edge.device_b_label == "r"
+    assert not reduced.couplings
+    assert np.linalg.norm(reduced.effective_terms[0].hamiltonian) > 0.
+    assert reduced["q"].freq == q.freq and reduced["r"].freq == r.freq
 
 
 def test_coupling_target_chi_matches_dispersive_shift():
-    """The emitted CrossKerr's chi matches the chip's dispersive shift between the two survivors."""
+    """The exact pair diagnostic matches its independently dressed dispersive shift."""
     chip, q, r, coupling = _readout_chip()
     expected_chi = chip.dispersive_shift("q", "r")
-    res = eliminate(chip, "cap0")
-    edge = res.chip.coupling("elim_cap0")
-    assert np.isclose(float(edge.chi), float(expected_chi))
+    res = eliminate(chip, "cap0", method="exact")
+    assert np.isclose(float(res.effective_params["q"]["chi"]), float(expected_chi))
 
 
 def test_coupling_target_reports_dressed_freq_after():
@@ -167,7 +164,7 @@ def test_coupling_target_reports_dressed_freq_after():
     chip, q, r, coupling = _readout_chip()
     expected_q = chip.freq("q", when={"r": 0})
     expected_r = chip.freq("r", when={"q": 0})
-    res = eliminate(chip, "cap0")
+    res = eliminate(chip, "cap0", method="exact")
 
     assert np.isclose(float(res.effective_params["q"]["freq_after"]), float(expected_q))
     assert np.isclose(float(res.effective_params["r"]["freq_after"]), float(expected_r))
@@ -177,8 +174,8 @@ def test_coupling_target_reports_dressed_freq_after():
     assert np.isclose(
         float(res.effective_params["r"]["lamb_shift"]), float(expected_r) - r.freq
     )
-    assert np.isclose(float(res.chip["q"].freq), float(expected_q))
-    assert np.isclose(float(res.chip["r"].freq), float(expected_r))
+    assert res.chip["q"].freq == q.freq
+    assert res.chip["r"].freq == r.freq
 
 
 def test_coupling_target_validity_reports_g_over_delta():
@@ -193,7 +190,8 @@ def test_coupling_target_accepts_object_or_label():
     """Coupling-target elimination accepts either the coupling object or its label."""
     chip, q, r, coupling = _readout_chip()
     res = eliminate(chip, coupling)
-    assert isinstance(res.chip.coupling("elim_cap0"), CrossKerr)
+    by_label = eliminate(chip, coupling.label)
+    np.testing.assert_allclose(res.chip.hamiltonian().matrix(), by_label.chip.hamiltonian().matrix())
 
 
 def test_coupling_target_drive_on_surviving_device_carries_through():
@@ -245,12 +243,13 @@ def test_pair_keys_survive_device_vs_coupling_scan_order_mismatch():
     step1 = eliminate(chip, "center")
     step2 = eliminate(step1.chip, "bus")
 
-    (edge,) = step2.chip.couplings
+    edge = step2.chip.coupling(step2.effective_params["exchange"]["coupling"])
     assert type(edge) is Capacitive
     assert step2.effective_params["exchange"]["between"] in (("qa", "qb"), ("qb", "qa"))
     # Both folds contribute; the second J uses the first fold's Lamb-shifted
     # frequencies, so assert composition structurally and the magnitude scale.
-    assert abs(float(edge.g)) > abs(float(step1.effective_params["exchange"]["j_eff"])) * 0.5
+    assert abs(sum(float(edge.g) for edge in step2.chip.couplings)) > abs(
+        float(step1.effective_params["exchange"]["j_eff"])) * 0.5
 
 
 def test_result_mappings_accept_objects_and_either_pair_order():

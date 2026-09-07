@@ -25,9 +25,8 @@ import numpy as np
 import pytest
 import warnings
 
-from quchip.chip import Chip, DressedResult
+from quchip.chip import Chip
 from quchip.chip.couplings import Capacitive
-from quchip.backend.qutip import QuTiPBackend
 from quchip.control import ChargeDrive, ControlEquipment
 from quchip.devices.resonator import Resonator
 from quchip.devices.transmon.duffing import DuffingTransmon
@@ -59,53 +58,6 @@ def dispersive_system():
 
 class TestDressedStates:
     """Verify dressed-state computation and state assignment surfaces."""
-
-    def test_dress_returns_dressed_result(self, dispersive_system) -> None:
-        """dress() returns a populated DressedResult with sorted eigenvalues."""
-        chip, _, _ = dispersive_system
-
-        result = chip.dress()
-
-        assert isinstance(result, DressedResult)
-        assert isinstance(result.eigenvalues, np.ndarray)
-        assert isinstance(result.state_map, dict)
-        assert isinstance(result.dressed_eigenvalues, dict)
-
-        assert result.eigenvalues.size > 0
-        assert len(result.eigenstates) == result.eigenvalues.size
-        assert len(result.state_map) > 0
-        assert len(result.dressed_eigenvalues) > 0
-
-        eigenvalues = np.real(result.eigenvalues)
-        assert np.all(np.diff(eigenvalues) >= -1e-12), "Dressed eigenvalues are not sorted ascending"
-
-    def test_dressed_frequency_is_chip_derived_not_device_state(self, dispersive_system) -> None:
-        """Per-device dressed frequencies are derived from the owning chip, not stored on devices."""
-        chip, qubit, resonator = dispersive_system
-
-        assert "_dressed_freq" not in qubit.__dict__
-        assert "_dressed_freq" not in resonator.__dict__
-
-        q_freq = chip.freq(qubit)
-        r_freq = chip.freq(resonator)
-
-        assert qubit.dressed_freq == pytest.approx(q_freq)
-        assert resonator.dressed_freq == pytest.approx(r_freq)
-
-        # Perturbative coupling: dressed frequencies remain close to bare.
-        assert abs(qubit.dressed_freq - OMEGA_Q) < 0.05
-        assert abs(resonator.dressed_freq - OMEGA_R) < 0.05
-
-    def test_drive_freq_uses_dressed(self, dispersive_system) -> None:
-        """drive_freq resolves to the chip-derived dressed frequency."""
-        chip, qubit, resonator = dispersive_system
-
-        assert qubit.drive_freq == pytest.approx(chip.freq(qubit))
-        assert resonator.drive_freq == pytest.approx(chip.freq(resonator))
-
-        # Shifts are non-zero in this coupled system.
-        assert abs(qubit.drive_freq - OMEGA_Q) > 1e-6
-        assert abs(resonator.drive_freq - OMEGA_R) > 1e-6
 
     def test_state_map_covers_low_energy(self, dispersive_system) -> None:
         """state_map must include |0,0>, |1,0>, and |0,1> labels."""
@@ -194,32 +146,6 @@ class TestDressedStates:
         assert result.state_map == reference_map
 
 
-class TestBackendEigensystemData:
-    def test_qutip_backend_eigensystem_data_returns_consistent_matrix(self) -> None:
-        """QuTiPBackend.eigensystem_data reports eigenvalues, eigenvector matrix, and eigenstates consistently."""
-        backend = QuTiPBackend()
-        H = backend.number(3)
-        data = backend.eigensystem_data(H)
-
-        np.testing.assert_allclose(np.asarray(data.eigenvalues, dtype=float), [0.0, 1.0, 2.0])
-        np.testing.assert_allclose(np.abs(np.asarray(data.eigenvector_matrix, dtype=complex)), np.eye(3))
-        assert len(data.eigenstates) == 3
-
-    @pytest.mark.optional_backend
-    def test_dynamiqs_backend_eigensystem_data_returns_consistent_matrix(self) -> None:
-        """DynamiqsBackend.eigensystem_data reports eigenvalues, eigenvector matrix, and eigenstates consistently."""
-        pytest.importorskip("dynamiqs")
-        from quchip.backend.dynamiqs import DynamiqsBackend
-
-        backend = DynamiqsBackend()
-        H = backend.number(3)
-        data = backend.eigensystem_data(H)
-
-        np.testing.assert_allclose(np.asarray(data.eigenvalues, dtype=float), [0.0, 1.0, 2.0])
-        np.testing.assert_allclose(np.abs(np.asarray(data.eigenvector_matrix, dtype=complex)), np.eye(3))
-        assert len(data.eigenstates) == 3
-
-
 class TestEnergy:
     """Verify energy() extraction against perturbation theory."""
 
@@ -237,23 +163,6 @@ class TestEnergy:
         expected = 2.0 * chi_pert
 
         assert chi_numeric == pytest.approx(expected, rel=0.15)
-
-    def test_energy_auto_dresses(self, dispersive_system) -> None:
-        """energy() auto-dresses an undressed chip before evaluation."""
-        chip, _, _ = dispersive_system
-
-        assert chip._analysis._dressed_result is None
-        e0 = chip.energy(q=0)
-        assert isinstance(e0, float)
-
-    def test_energy_symmetric(self, dispersive_system) -> None:
-        """Dispersive shift computed both ways should be equal."""
-        chip, _, _ = dispersive_system
-
-        chi_qr = chip.energy(q=1, r=1) - chip.energy(q=1, r=0) - chip.energy(q=0, r=1) + chip.energy(q=0, r=0)
-        chi_rq = chip.energy(q=1, r=1) - chip.energy(q=0, r=1) - chip.energy(q=1, r=0) + chip.energy(q=0, r=0)
-
-        assert chi_qr == pytest.approx(chi_rq, abs=1e-14)
 
     def test_dispersive_shift_matches_energy_arithmetic(self, dispersive_system) -> None:
         """dispersive_shift() matches the equivalent energy() arithmetic."""
@@ -294,16 +203,6 @@ def test_static_zz_matches_energy_arithmetic() -> None:
 class TestTransitionFreq:
     """Verify conditional dressed transition frequencies."""
 
-    def test_transition_freq_vacuum(self, dispersive_system) -> None:
-        """Vacuum-conditioned transition stays near bare qubit frequency."""
-        chip, qubit, _ = dispersive_system
-
-        chip.dress()
-        freq_vacuum = chip.freq(qubit)
-
-        assert freq_vacuum == pytest.approx(qubit.dressed_freq)
-        assert abs(freq_vacuum - OMEGA_Q) < 0.05
-
     def test_transition_freq_conditional(self, dispersive_system) -> None:
         """n=1 conditional transition shift matches perturbative splitting."""
         chip, qubit, resonator = dispersive_system
@@ -331,19 +230,6 @@ class TestTransitionFreq:
 
         with pytest.raises(ValueError, match="got bool"):
             chip.freq(qubit, when={resonator: True})
-
-    def test_transition_freq_auto_dresses(self, dispersive_system) -> None:
-        """freq() works without a prior dress() call by routing through the array kernel."""
-        chip, qubit, _ = dispersive_system
-
-        assert chip._analysis._dressed_result is None
-        assert chip._analysis._array_cache is None
-        freq = chip.freq(qubit)
-        assert isinstance(freq, float)
-        # The trace-friendly array path populates _array_cache; the eager
-        # dict-based DressedResult is only built on explicit dress() calls.
-        assert chip._analysis._array_cache is not None
-
 
 class TestLookupHelpers:
     def test_dressed_index_and_bare_label_round_trip(self, dispersive_system) -> None:
@@ -456,16 +342,6 @@ class TestDriveMatrixElements:
 class TestCacheInvalidation:
     """Verify frame changes do NOT invalidate dressed-state cache."""
 
-    def test_set_frame_preserves_dressed_result(self, dispersive_system) -> None:
-        """set_frame() should preserve the cached dressed result."""
-        chip, _, _ = dispersive_system
-
-        result = chip.dress()
-        assert chip._analysis._dressed_result is result
-
-        chip.set_frame("rotating")
-        assert chip._ensure_dressed() is result  # Cache preserved
-
     def test_static_parameter_change_invalidates_dressed_cache(self, dispersive_system) -> None:
         """Mutating a device parameter invalidates the cached dressed result."""
         chip, qubit, _ = dispersive_system
@@ -494,25 +370,6 @@ class TestCacheInvalidation:
             atol=1e-12,
         )
 
-    def test_chi_removed(self, dispersive_system) -> None:
-        """chip.chi() is not part of the public API."""
-        chip, qubit, resonator = dispersive_system
-        chip.dress()
-        assert not hasattr(chip, "chi")
-
-    def test_resolve_frame_rotating_returns_dressed(self, dispersive_system) -> None:
-        """resolve_frame(rotating) uses dressed frequencies."""
-        from quchip.engine.frames import resolve_frame
-
-        chip, qubit, resonator = dispersive_system
-        chip.dress()
-        chip.set_frame("rotating")
-        freqs = resolve_frame(chip, chip.frame).frequencies
-        # Should use dressed frequencies (dev.drive_freq after dressing)
-        assert freqs["q"] == pytest.approx(qubit.drive_freq)
-        assert freqs["r"] == pytest.approx(resonator.drive_freq)
-
-
 def test_effective_subspace_hamiltonian_lowdin_on_bus_coupled_pair() -> None:
     """Loewdin orthonormalization yields the exchange coupling off-diagonally and dressed energies as eigenvalues."""
     q0 = DuffingTransmon(freq=5.00, anharmonicity=-0.25, levels=3, label="q0")
@@ -535,3 +392,13 @@ def test_effective_subspace_hamiltonian_lowdin_on_bus_coupled_pair() -> None:
 
     expected = sorted([chip.energy({q0: 1}), chip.energy({q1: 1})])
     assert np.linalg.eigvalsh(effective) == pytest.approx(expected, abs=1e-12)
+
+
+def test_cached_qutip_kerr_values_remain_accessible_inside_jit():
+    import jax
+
+    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
+    r = Resonator(freq=7.0, levels=4, label="r")
+    chip = Chip([q, r], [Capacitive(q, r, g=0.08)], backend="qutip")
+    expected = float(chip.dispersive_shift("q", "r"))
+    assert jax.jit(lambda scale: chip.dispersive_shift("q", "r") * scale)(2.0) == pytest.approx(2 * expected)

@@ -1,7 +1,8 @@
 """Schrieffer-Wolff reduction kernels (2nd order) on bare chip blocks.
 
-All functions are pure, ``jax.numpy``-only on the value path, and traced-safe:
-no ``float()``, no Python branch on a traced value. ``H`` is the chip's bare
+Numerical kernels use ``jax.numpy`` and support tracing; a conditional host
+check reports coupled singularities. No traced physics is coerced to Python
+scalars. ``H`` is the chip's bare
 Hamiltonian in the C-order product basis, ordinary GHz; block masks are static
 NumPy booleans (dims are static). The caller (the elimination handlers in
 ``quchip.chip.transformations``) owns cloning, folding, and control-plane
@@ -21,8 +22,11 @@ References: Bravyi, DiVincenzo & Loss, Ann. Phys. 326, 2793 (2011)
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -86,6 +90,22 @@ def mode_blocks(dims: tuple[int, ...], labels: list[str], mode_label: str) -> tu
     return p_mask, ~p_mask
 
 
+def cross_block_gap(h: Any, p_mask: Any) -> Any:
+    """Smallest coupled P/Q bare-energy gap at diagnostic working precision."""
+    energies = jnp.real(jnp.diagonal(h))
+    cross = p_mask[:, None] ^ p_mask[None, :]
+    active = cross & (jnp.abs(h) > _WORKING_PRECISION)
+    return jnp.min(jnp.where(active, jnp.abs(energies[:, None] - energies[None, :]), jnp.inf))
+
+
+def _reject_coupled_degeneracy(invalid: Any) -> None:
+    if bool(invalid):
+        raise ValueError(
+            "Schrieffer-Wolff reduction is undefined for degenerate levels with nonzero coupling. "
+            "Keep the coupled levels together or change the operating point."
+        )
+
+
 def sylvester_generator(h: Any, p_mask: Any) -> tuple[Any, Any]:
     """Generator ``S`` solving the P↔Q Sylvester condition, plus the block-gap diagnostic.
 
@@ -93,7 +113,11 @@ def sylvester_generator(h: Any, p_mask: Any) -> tuple[Any, Any]:
     ``S_ij = V_ij / (E_i − E_j)`` on the cross blocks only. The division is
     double-``where`` guarded so an exactly degenerate cross pair with no
     matrix element between it contributes zero — with a finite gradient, not
-    a ``NaN`` propagated backward through the unselected branch.
+    a ``NaN`` propagated backward through the unselected branch. A coupled
+    degeneracy raises. Traced execution uses a conditional error callback
+    and marks invalid outputs NaN, so an elided debug effect cannot return
+    a plausible generator. Valid vmapped calls can still dispatch the
+    predicate check to the host under JAX's conditional batching rule.
 
     Returns
     -------
@@ -105,13 +129,26 @@ def sylvester_generator(h: Any, p_mask: Any) -> tuple[Any, Any]:
     """
     energies = jnp.real(jnp.diagonal(h))
     v = h - jnp.diag(jnp.diagonal(h))
-    denom = energies[:, None] - energies[None, :]
     cross = p_mask[:, None] ^ p_mask[None, :]
-    safe = jnp.where(cross & (jnp.abs(denom) > 0.0), denom, 1.0)
-    s = jnp.where(cross, v / safe, 0.0)
-    active = cross & (jnp.abs(v) > _WORKING_PRECISION)
-    min_gap = jnp.min(jnp.where(active, jnp.abs(denom), jnp.inf))
-    return s, min_gap
+    return interaction_generator(energies, jnp.where(cross, v, 0.0)), cross_block_gap(h, p_mask)
+
+
+def interaction_generator(energies: Any, interaction: Any) -> Any:
+    """First-order anti-Hermitian generator removing an interaction's off-diagonal part."""
+    denom = energies[:, None] - energies[None, :]
+    v = interaction - jnp.diag(jnp.diagonal(interaction))
+    invalid = jnp.any((denom == 0.0) & (v != 0.0))
+    if contains_tracer((energies, interaction)):
+        jax.lax.cond(
+            invalid,
+            lambda flag: jax.debug.callback(_reject_coupled_degeneracy, flag),
+            lambda flag: None,
+            invalid,
+        )
+    else:
+        _reject_coupled_degeneracy(invalid)
+    s = v / jnp.where(denom != 0.0, denom, 1.0)
+    return jnp.where(invalid, jnp.full_like(s, jnp.nan), s)
 
 
 def h_effective_second_order(h: Any, s: Any, p_mask: Any) -> Any:
@@ -127,7 +164,7 @@ def basis_row(p_index: Any, labels: list[str], dims: tuple[int, ...], excited_la
 
     Shared basis bookkeeping between :func:`extract_pair_parameters` and any
     caller reading out a matching row of a separately transformed P-block
-    operator (e.g. a collapse operator carried through :func:`transform_collapse`).
+    operator.
     """
     occupations = np.array(np.unravel_index(np.asarray(p_index), dims))
     occ = [0] * len(dims)
@@ -175,21 +212,6 @@ def extract_pair_parameters(
     return params
 
 
-def transform_collapse(c_full: Any, s: Any, p_mask: Any) -> Any:
-    """``c_eff = P (c + [S, c]) P`` — the 2nd-order jump-operator transform (dense).
-
-    The same rotation that block-diagonalizes ``H`` carries the jump
-    operators into the reduced frame; truncating at first order in ``S``
-    matches the Hamiltonian's 2nd-order accuracy. The projection is exact
-    for the spectrum but approximate for dissipation; the caller records
-    this approximation in the result notes. Pass the *unit* jump operator and fold
-    the rate back in via :func:`purcell_rate_from`.
-    """
-    c_rotated = c_full + s @ c_full - c_full @ s
-    p_index = np.flatnonzero(p_mask)
-    return c_rotated[np.ix_(p_index, p_index)]
-
-
 def purcell_rate_from(c_eff_survivor_lowering_amplitude: Any, kappa: Any) -> Any:
     """``rate = |amplitude|² · κ`` — the mediated decay a survivor inherits.
 
@@ -212,141 +234,140 @@ def _exact_eigensystem(h: Any, dims: tuple[int, ...]) -> tuple[Any, Any, Labelin
     return eigenvalues, eigenvectors, labeling
 
 
-def exact_reduction(chip: "Chip", mode_label: str, survivor_labels: list[str]) -> dict:
-    """Exact-from-dressing reduction of the complete authored static model.
+def _raise_exact_condition(invalid: Any, *, message: str) -> None:
+    if bool(invalid):
+        raise ValueError(message)
 
-    Diagonalizes the lab-frame Hamiltonian without term removal, independent
-    of the chip's solve approximation. Kept-block energies are exact to all
-    orders — which is what ZZ needs. This is the des-Cloizeaux
-    caveat in reverse: energies are exact, but the effective basis is the
-    overlap-projected one, not the canonical SW rotation, so off-diagonal
-    reads (``J``) agree with the perturbative route only through 2nd order.
 
-    Returns the same parameter shape as the perturbative extraction —
-    ``{survivor: {"freq_after": E(1_s) − E(0)}}`` and ``("J", a, b)`` — plus
-    ``("zz", a, b) = E₁₁ − E₁₀ − E₀₁ + E₀₀`` per survivor pair (identical
-    convention to :meth:`Chip.dispersive_shift`).
+def _check_exact_condition(invalid: Any, message: str) -> None:
+    if contains_tracer(invalid):
+        # An effectful check also survives callers requesting only a gradient.
+        jax.experimental.io_callback(
+            partial(_raise_exact_condition, message=message), None, jax.lax.stop_gradient(invalid),
+        )
+    else:
+        _raise_exact_condition(invalid, message=message)
 
-    Raises
-    ------
-    ValueError
-        When two kept computational labels are assigned the same dressed
-        state (concrete path only; under tracing the guard is skipped —
-        labeling indices are best-effort diagnostics there, never a traced
-        branch).
+
+def _inverse_sqrt_hermitian(matrix: Any, iterations: int = 64) -> Any:
+    """Return a differentiable inverse square root of a positive-definite Hermitian matrix.
+
+    The coupled Newton-Schulz iteration evaluates the matrix function through
+    products and sums. It therefore avoids eigenvector derivatives, which are
+    undefined when the matrix has repeated eigenvalues even though its inverse
+    square root remains smooth. Eager and traced calls verify the defining
+    residual; the fixed iteration count keeps the traced path compatible with reverse-
+    mode differentiation and resolves condition numbers through ``1e8`` in
+    double precision.
     """
-    from quchip.approximations import Exact
+    matrix = 0.5 * (matrix + matrix.conj().T)
+    scale = jnp.linalg.norm(matrix, ord="fro")
+    identity = jnp.eye(matrix.shape[0], dtype=matrix.dtype)
+    y = matrix / scale
+    z = identity
+    for _ in range(iterations):
+        correction = 0.5 * (3.0 * identity - z @ y)
+        y = y @ correction
+        z = correction @ z
+    inverse_sqrt = z / jnp.sqrt(scale)
+    inverse_sqrt = 0.5 * (inverse_sqrt + inverse_sqrt.conj().T)
+    residual = jnp.linalg.norm(inverse_sqrt @ matrix @ inverse_sqrt - identity)
+    _check_exact_condition(
+        ~jnp.isfinite(residual) | (residual > 1e-9),
+        "The projected dressed-state Gram matrix is singular or too ill-conditioned "
+        "for stable symmetric orthonormalization.",
+    )
+    return inverse_sqrt
 
-    h, labels, dims = bare_hamiltonian(chip, approximation=Exact())
-    eigenvalues, evecs, labeling = _exact_eigensystem(h, dims)
 
-    def occupation(excited: dict[str, int]) -> tuple[int, ...]:
-        occ = [0] * len(labels)
-        for lab, n in excited.items():
-            occ[labels.index(lab)] = n
-        return tuple(occ)
+@dataclass(frozen=True)
+class ExactSubspace:
+    """One orthonormal retained coordinate map and its exact Hamiltonian."""
 
-    def label_index(label: tuple[int, ...]) -> int:
-        return int(np.ravel_multi_index(label, dims))
+    hamiltonian: Any
+    embedding: Any
+    energies: Any
+    kept_indices: Any
 
-    kept_tuples = [occupation({})]
-    kept_tuples += [occupation({s: 1}) for s in survivor_labels]
-    for i, a in enumerate(survivor_labels):
-        kept_tuples += [occupation({a: 1, b: 1}) for b in survivor_labels[i + 1:]]
+    def transform_operator(self, operator: Any) -> Any:
+        return self.embedding.conj().T @ jnp.asarray(operator) @ self.embedding
 
-    if not contains_tracer(evecs):
-        # Collision check independent of the assignment policy: the row-greedy
-        # policy excludes taken columns, so its `duplicates` diagnostic never
-        # fires — but two kept labels whose *best-overlap* dressed state
-        # coincides means the bare labels have stopped meaning anything.
-        evecs_np = np.asarray(evecs)
-        claimed: dict[int, tuple[int, ...]] = {}
-        colliding: list[tuple[int, ...]] = []
-        for kept in kept_tuples:
-            weights = np.abs(evecs_np[label_index(kept), :]) ** 2
-            best = int(np.argmax(weights))
-            # No majority: the bare label's plurality dressed state holds at
-            # most half the label — a 50/50 hybrid with something outside the
-            # kept block (the 1e-6 absorbs eigensolver noise on exact ties).
-            if weights[best] < 0.5 + 1e-6:
-                colliding.append(kept)
-            elif best in claimed:
-                colliding += [claimed[best], kept]
-            else:
-                claimed[best] = kept
-        if colliding:
-            raise ValueError(
-                f"Exact reduction of '{mode_label}' cannot label the kept block: bare states "
-                f"{sorted(set(colliding))} have no majority dressed eigenstate. Near-degenerate "
-                "dressed states straddle the bare labels — exactly the regime near a coupler "
-                "idle point; method='sw' remains available, or shift the operating point."
-            )
 
-    def energy(excited: dict[str, int]) -> Any:
-        return eigenvalues[labeling.indices[label_index(occupation(excited))]]
+def exact_subspace(eigenvalues: Any, eigenvectors: Any, kept_indices: Any, dressed_indices: Any) -> ExactSubspace:
+    """Use one Lowdin map for a complete retained Hamiltonian and every operator."""
+    kept = np.array(kept_indices, dtype=int, copy=True)
+    kept.flags.writeable = False
+    selected = jnp.asarray(eigenvectors)[:, jnp.asarray(dressed_indices)]
+    energies = jnp.asarray(eigenvalues)[jnp.asarray(dressed_indices)]
+    w = selected[kept]
+    inverse_sqrt = _inverse_sqrt_hermitian(w @ w.conj().T)
+    unitary = inverse_sqrt @ w
+    embedding = selected @ unitary.conj().T
+    hamiltonian = (unitary * energies) @ unitary.conj().T
+    hamiltonian = .5 * (hamiltonian + hamiltonian.conj().T)
+    return ExactSubspace(hamiltonian, embedding, energies, kept)
 
-    e_0 = energy({})
-    params: dict[Any, Any] = {}
-    for surv in survivor_labels:
-        params[surv] = {"freq_after": energy({surv: 1}) - e_0}
 
-    for i, a in enumerate(survivor_labels):
-        for b in survivor_labels[i + 1:]:
-            bare = jnp.array([label_index(occupation({a: 1})), label_index(occupation({b: 1}))])
-            dressed = jnp.stack([labeling.indices[int(bare[0])], labeling.indices[int(bare[1])]])
-            # des-Cloizeaux read: the projected dressed vectors are not
-            # orthonormal in the 2-dim bare subspace, so symmetric (Löwdin)
-            # orthonormalization S^{-1/2} (W E W†) S^{-1/2} is required —
-            # its eigenvalues are exactly the two dressed energies, and the
-            # off-diagonal is the effective exchange.
-            w = evecs[bare[:, None], dressed[None, :]]
-            gram = w @ w.conj().T
-            gram_evals, gram_evecs = jnp.linalg.eigh(gram)
-            inv_sqrt = gram_evecs @ jnp.diag(gram_evals ** -0.5) @ gram_evecs.conj().T
-            h_sub = inv_sqrt @ (w @ jnp.diag(eigenvalues[dressed]) @ w.conj().T) @ inv_sqrt
-            h_sub = 0.5 * (h_sub + h_sub.conj().T)
-            params[("J", a, b)] = h_sub[0, 1]
-            params[("zz", a, b)] = jnp.real(
-                energy({a: 1, b: 1}) - energy({a: 1}) - energy({b: 1}) + e_0
-            )
+def exact_mode_subspace(h: Any, labels: list[str], dims: tuple[int, ...], mode_label: str,
+                        survivor_labels: list[str]) -> ExactSubspace:
+    """Diagonalize one model and validate its computational label assignment."""
+    eigenvalues, eigenvectors, labeling = _exact_eigensystem(h, dims)
+    p_mask, _ = mode_blocks(dims, labels, mode_label)
+    kept = np.flatnonzero(p_mask)
+    ground = [0] * len(labels)
+    diagnostics = [tuple(ground)]
+    for index, label in enumerate(survivor_labels):
+        single = ground.copy()
+        single[labels.index(label)] = 1
+        diagnostics.append(tuple(single))
+        for other in survivor_labels[index + 1:]:
+            pair = single.copy()
+            pair[labels.index(other)] = 1
+            diagnostics.append(tuple(pair))
+    rows = np.array([np.ravel_multi_index(occupation, dims) for occupation in diagnostics])
+    weights = jnp.abs(eigenvectors[rows]) ** 2
+    best = jnp.argmax(weights, axis=1)
+    duplicate = jnp.any(jnp.triu(best[:, None] == best[None, :], k=1))
+    _check_exact_condition(
+        duplicate | jnp.any(jnp.max(weights, axis=1) < .5 + 1e-6),
+        f"Exact reduction of {mode_label!r} cannot label the kept block: Near-degenerate dressed states "
+        "leave computational bare labels without distinct majority eigenstates. Shift the operating point "
+        "or use an appropriate SW reduction.",
+    )
+    return exact_subspace(eigenvalues, eigenvectors, kept, jnp.asarray(labeling.indices)[kept])
+
+
+def exact_pair_parameters(subspace: ExactSubspace, labels: list[str], dims: tuple[int, ...], mode_label: str,
+                          survivor_labels: list[str]) -> dict:
+    """Report labeled energies and exchange entries from the complete retained model."""
+    params = extract_pair_parameters(subspace.hamiltonian, subspace.kept_indices, labels, dims, mode_label)
+    rows = {int(index): row for row, index in enumerate(subspace.kept_indices)}
+
+    def energy(*excited: str) -> Any:
+        occupation = [int(label in excited) for label in labels]
+        return subspace.energies[rows[int(np.ravel_multi_index(tuple(occupation), dims))]]
+
+    ground = energy()
+    for index, label in enumerate(survivor_labels):
+        params[label]["freq_after"] = energy(label) - ground
+        for other in survivor_labels[index + 1:]:
+            params[("zz", label, other)] = jnp.real(energy(label, other) - energy(label) - energy(other) + ground)
     return params
-
-
-def exact_transform_collapse(c_full: Any, evecs: Any, kept_dressed_indices: Any) -> Any:
-    """``c_eff = P U† c U P`` with ``U`` the labeled eigenvector matrix (dense).
-
-    Rotates the jump operator into the dressed basis and keeps the rows and
-    columns of the kept block's assigned dressed states. This is the exact
-    counterpart of :func:`transform_collapse`; the caller records the selected
-    dissipation treatment in the result notes.
-    """
-    u = jnp.asarray(evecs)
-    c_dressed = u.conj().T @ jnp.asarray(c_full) @ u
-    kept = jnp.asarray(kept_dressed_indices)
-    return c_dressed[kept[:, None], kept[None, :]]
 
 
 def pathway_attribution(h: Any, s: Any, p_mask: Any, i_idx: int, j_idx: int) -> list[tuple[int, Any]]:
     """Virtual-state attribution for one ``H_eff`` matrix element.
 
     The contribution of intermediate ``|k⟩`` to ``(½[S, V])_ij`` is
-    ``½ V_ik V_kj (1/(E_i − E_k) + 1/(E_j − E_k))``, with the same
-    double-``where`` guard as the generator. Returns ``(k, amount)`` pairs
+    ``½ V_ik V_kj (1/(E_i − E_k) + 1/(E_j − E_k))``, evaluated directly from the supplied generator
+    and its commutator. Returns ``(k, amount)`` pairs
     for the Q-block states carrying a nonzero path at working precision;
     under tracing the nonzero filter cannot run, so every Q state is
     returned (diagnostics remain complete either way — extra entries are
     exact zeros).
     """
-    energies = jnp.real(jnp.diagonal(h))
     v = h - jnp.diag(jnp.diagonal(h))
-
-    def guarded_inverse(gap: Any) -> Any:
-        safe = jnp.where(jnp.abs(gap) > 0.0, gap, 1.0)
-        return jnp.where(jnp.abs(gap) > 0.0, 1.0 / safe, 0.0)
-
-    gap_i = energies[i_idx] - energies
-    gap_j = energies[j_idx] - energies
-    amounts = 0.5 * v[i_idx, :] * v[:, j_idx] * (guarded_inverse(gap_i) + guarded_inverse(gap_j))
+    amounts = 0.5 * (s[i_idx, :] * v[:, j_idx] - v[i_idx, :] * s[:, j_idx])
 
     q_index = np.flatnonzero(~np.asarray(p_mask))
     if contains_tracer(amounts):

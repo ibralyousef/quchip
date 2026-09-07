@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from quchip.backend.containers import PreparedStationary
 from quchip.engine.ir import SteadyStateProblem
 from quchip.engine.observables import decompose_eops
 from quchip.results.steady_state import (
@@ -70,10 +71,14 @@ def steadystate(
     return solve_steadystate_problem(problem)
 
 
-def solve_steadystate_problem(problem: SteadyStateProblem) -> SteadyStateResult:
+def solve_steadystate_problem(
+    problem: SteadyStateProblem, *, prepared: PreparedStationary | None = None,
+) -> SteadyStateResult:
     """Solve an already assembled stationary problem and enforce uniqueness."""
-    backend = problem.chip.backend
-    backend_result = backend.steadystate(problem)
+    backend = problem.backend
+    backend_result = (
+        backend.steadystate(problem) if prepared is None else backend.steadystate(problem, prepared=prepared)
+    )
     nullity = maybe_concrete_scalar(backend_result.nullity)
     if nullity is not None and int(nullity) != 1:
         raise ValueError(
@@ -93,7 +98,7 @@ def steadystate_batch(
     progress: bool = True,
 ) -> SteadyStateBatchResult:
     """Solve stationary states over Cartesian or zipped parameter axes."""
-    from quchip.sweep import ZippedSweep, _iter_axis_points
+    from quchip.sweep import _axis_metadata, _iter_axis_points
 
     shape, expanded = _iter_axis_points(axes)
     iterator = expanded
@@ -112,19 +117,8 @@ def steadystate_batch(
         )
         for _, params in iterator
     ]
-    axis_metadata: list[tuple[str, Any]] = []
-    for axis in axes:
-        if isinstance(axis, ZippedSweep):
-            names = tuple(member.name for member in axis.sweeps)
-            values = tuple(
-                {member.name: member.values[index] for member in axis.sweeps}
-                for index in range(axis.size)
-            )
-            axis_metadata.append(("/".join(names), values))
-        else:
-            axis_metadata.append((axis.name, axis.values))
     return SteadyStateBatchResult(
         results,
         shape=shape,
-        axes=tuple(axis_metadata),
+        axes=_axis_metadata(axes),
     )

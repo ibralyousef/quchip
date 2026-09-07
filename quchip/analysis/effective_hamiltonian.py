@@ -1,32 +1,16 @@
-"""Static-ZZ pathway attribution and des-Cloizeaux effective-Hamiltonian extraction.
+"""Static-ZZ pathways and des-Cloizeaux effective Hamiltonians.
 
-Two analysis primitives built on the dressed-state and Schrieffer-Wolff (SW)
-machinery of :mod:`quchip.chip.sw` and :mod:`quchip.chip.analysis`:
+:func:`analyze_static_zz` reports exact dressed ZZ and a second-order
+Schrieffer-Wolff attribution to virtual transitions. The pathway estimates
+are diagnostics; the reported ZZ is computed from the dressed spectrum.
 
-analyze_static_zz
-    :func:`analyze_static_zz` — the exact residual ZZ between two devices
-    (:meth:`~quchip.chip.chip.Chip.dispersive_shift`, unchanged), plus a
-    2nd-order SW attribution of the virtual states mediating it. The exact
-    ``zz`` value is the "ZZ = 0 while J stays on target" loss primitive of a
-    calibration sweep; ``pathways`` is a diagnostic for which virtual
-    transition dominates it.
-effective_hamiltonian
-    :func:`effective_hamiltonian` — the des-Cloizeaux effective Hamiltonian on
-    a user-chosen computational subspace: dense, GHz, with eigenvalues that
-    are exactly the labeled dressed energies of the requested bare states.
+:func:`effective_hamiltonian` returns a dense GHz matrix on a chosen
+computational subspace, with eigenvalues equal to its labeled dressed energies.
+Differentiation requires backend eigensolver support and a fixed assignment.
 
-Both routes are algebra on the chip's exact dressed spectrum (no perturbative
-truncation for the reported ``zz`` or ``effective_hamiltonian`` eigenvalues),
-so they stay differentiable end-to-end whenever the chip's backend supports
-differentiating through its eigensolver.
-
-References
-----------
-Bravyi, DiVincenzo & Loss, *Schrieffer-Wolff transformation for quantum
-many-body systems*, Ann. Phys. 326, 2793 (2011).
-Blais et al., *Circuit quantum electrodynamics*, RMP 93, 025005 (2021), §IV.C
-(static ZZ) and the des-Cloizeaux perturbation-theory appendix convention for
-projecting onto a computational subspace.
+References: Bravyi, DiVincenzo & Loss, *Schrieffer-Wolff transformation for
+quantum many-body systems*, Ann. Phys. 326, 2793 (2011); Blais et al.,
+*Circuit quantum electrodynamics*, RMP 93, 025005 (2021), §IV.C.
 """
 
 from __future__ import annotations
@@ -38,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence
 import jax.numpy as jnp
 import numpy as np
 
-from quchip.chip.sw import bare_hamiltonian, pathway_attribution, sylvester_generator
+from quchip.chip.sw import bare_hamiltonian, exact_subspace, pathway_attribution, sylvester_generator
 from quchip.devices.base import BaseDevice
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar
 
@@ -223,39 +207,6 @@ def _normalize_subspace(
     return list(itertools.product(*ranges))
 
 
-def _inverse_sqrt_hermitian(matrix: Any, iterations: int = 64) -> Any:
-    """Return a differentiable inverse square root of a positive-definite Hermitian matrix.
-
-    The coupled Newton-Schulz iteration evaluates the matrix function through
-    products and sums. It therefore avoids eigenvector derivatives, which are
-    undefined when the matrix has repeated eigenvalues even though its inverse
-    square root remains smooth. Concrete calls verify the defining residual;
-    the fixed iteration count keeps the traced path compatible with reverse-
-    mode differentiation and resolves condition numbers through ``1e8`` in
-    double precision.
-    """
-    matrix = 0.5 * (matrix + matrix.conj().T)
-    scale = jnp.linalg.norm(matrix, ord="fro")
-    identity = jnp.eye(matrix.shape[0], dtype=matrix.dtype)
-    y = matrix / scale
-    z = identity
-    for _ in range(iterations):
-        correction = 0.5 * (3.0 * identity - z @ y)
-        y = y @ correction
-        z = correction @ z
-    inverse_sqrt = z / jnp.sqrt(scale)
-    inverse_sqrt = 0.5 * (inverse_sqrt + inverse_sqrt.conj().T)
-    residual = inverse_sqrt @ matrix @ inverse_sqrt - identity
-    if not contains_tracer(residual):
-        residual_norm = float(np.linalg.norm(np.asarray(residual), ord=2))
-        if not np.isfinite(residual_norm) or residual_norm > 1e-9:
-            raise ValueError(
-                "The projected dressed-state Gram matrix is singular or too ill-conditioned "
-                f"for stable symmetric orthonormalization (residual={residual_norm:.3e})"
-            )
-    return inverse_sqrt
-
-
 @dataclass(frozen=True)
 class EffectiveHamiltonianResult:
     """Store the des-Cloizeaux effective Hamiltonian on a labeled computational subspace.
@@ -264,8 +215,7 @@ class EffectiveHamiltonianResult:
     overlap block between the requested bare states and their assigned
     dressed states, ``E`` the labeled dressed energies, and ``S = W W^dagger``
     the (generally non-orthonormal) overlap Gram matrix — the symmetric
-    (Löwdin) orthonormalization of :func:`~quchip.chip.sw.exact_reduction`'s
-    pairwise construction, generalized to an arbitrary number of kept states.
+    (Löwdin) orthonormalization shared with exact mode reductions.
     ``S^-1/2 W`` is unitary by construction, so ``h_eff`` is unitarily similar
     to ``diag(E)``: its eigenvalues are exactly the labeled dressed energies,
     to numerical precision, regardless of how strongly the kept states
@@ -326,15 +276,9 @@ def _h_eff_on_basis(chip: "Chip", basis: Sequence[tuple[int, ...]]) -> Any:
     eigenvalues = jnp.asarray(eigenvalues)
 
     bare_idx_list = [int(np.ravel_multi_index(state, dims)) for state in basis]
-    bare_idx = jnp.array(bare_idx_list)
     dressed_idx = jnp.stack([labeling.indices[i] for i in bare_idx_list])
 
-    w = evecs[bare_idx[:, None], dressed_idx[None, :]]
-    gram = w @ w.conj().T
-    gram = 0.5 * (gram + gram.conj().T)
-    inv_sqrt = _inverse_sqrt_hermitian(gram)
-    h_eff = inv_sqrt @ (w @ jnp.diag(eigenvalues[dressed_idx]) @ w.conj().T) @ inv_sqrt
-    return 0.5 * (h_eff + h_eff.conj().T)
+    return exact_subspace(eigenvalues, evecs, bare_idx_list, dressed_idx).hamiltonian
 
 
 def effective_hamiltonian(

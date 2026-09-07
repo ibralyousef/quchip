@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from quchip.declarative.expr import PhysicsExpr, materialize_array
+from quchip.declarative.expr import PhysicsExpr, materialize_array, materialize_scalar
 from quchip.declarative.ops import EndpointOps, LocalOps
 from quchip.devices.spaces import FockSpace
 
@@ -41,24 +41,13 @@ def test_cross_endpoint_matmul_errors_with_clear_message():
         _ = a.x @ b.x
 
 
-def test_traced_scalar_left_multiply_does_not_raise():
-    """A 0-d scalar left-multiplying an operator scales it without raising."""
+@pytest.mark.parametrize("value", [2, 2.0, jnp.asarray(2.0)])
+def test_scalar_multiplication_from_either_side(value):
+    """Python and array scalars scale every matrix element from either side."""
     op = LocalOps(label="q", space=FockSpace(3))
-    omega = jnp.asarray(5.0)
-    expr = omega * op.n
-    assert isinstance(expr, PhysicsExpr)
-    assert expr.kind == "scale"
-    assert float(expr.args[0].args[0]) == 5.0
-
-
-def test_traced_scalar_right_multiply_does_not_raise():
-    """A 0-d scalar right-multiplying an operator scales it without raising."""
-    op = LocalOps(label="q", space=FockSpace(3))
-    omega = jnp.asarray(5.0)
-    expr = op.n * omega
-    assert isinstance(expr, PhysicsExpr)
-    assert expr.kind == "scale"
-    assert float(expr.args[0].args[0]) == 5.0
+    expected = jnp.diag(jnp.asarray([0.0, 2.0, 4.0]))
+    assert jnp.array_equal(materialize_array(value * op.n), expected)
+    assert jnp.array_equal(materialize_array(op.n * value), expected)
 
 
 def test_traced_scalar_flows_through_jax_grad():
@@ -66,18 +55,19 @@ def test_traced_scalar_flows_through_jax_grad():
     op = LocalOps(label="q", space=FockSpace(3))
 
     def coefficient(omega):
-        return (omega * op.n).args[0].args[0]
+        return materialize_array(omega * op.n)[1, 1].real
 
     grad_fn = jax.grad(coefficient)
     assert float(grad_fn(jnp.asarray(3.0))) == 1.0
 
 
-def test_python_scalar_still_works():
-    """Plain Python scalars scale an operator from either side."""
-    op = LocalOps(label="q", space=FockSpace(3))
-    expr = 2.0 * op.n
-    assert expr.args[0].args[0] == 2.0
-    assert (op.n * 3).args[0].args[0] == 3
+def test_scalar_division_accepts_an_integer_parameter_binding():
+    """A declared reciprocal promotes integer bindings instead of applying integer power."""
+    quality = PhysicsExpr.parameter(scope="r", name="quality")
+
+    value = materialize_scalar(2.0 / quality, bindings={"r.quality": 8})
+
+    assert value == pytest.approx(0.25)
 
 
 def test_array_operand_rejected():

@@ -1,8 +1,6 @@
 # From the SQA 2026 talk
 
-Define the chip once, then ask static, dynamic, structural, or derivative
-questions through public APIs. The snippets below are small enough to run as
-written. Each of the five entry points has one link to its full guide.
+Five independent calculations from the talk, each linked to its full guide.
 
 quchip uses GHz for frequencies and couplings, ns for time, and mK for
 temperature.
@@ -27,7 +25,7 @@ devices: ['q', 'r']
 authored H: \omega_{q}\,\hat n_{q} + 0.5\,\alpha_{q}\,\hat n_{q}\,(\hat n_{q} - \hat I_{q}) + \omega_{r}\,\hat n_{r} + g_{qr}\,(\hat a_{q} + \hat a^\dagger_{q})\,(\hat a_{r} + \hat a^\dagger_{r})
 ```
 
-[Continue with chip definition and inspection](https://docs.quchip.org/guides/defining-and-inspecting-a-chip).
+[Continue with chip definition and inspection](defining-and-inspecting-a-chip.md).
 
 ## Read and sweep statics
 
@@ -54,7 +52,7 @@ Output:
 first and last dressed f01 (GHz): [4.89859099 5.09846968]
 ```
 
-[Continue with statics and parameter studies](https://docs.quchip.org/guides/statics-and-parameter-studies).
+[Continue with statics and parameter studies](statics-and-parameter-studies.md).
 
 ## Simulate one pulse
 
@@ -82,10 +80,10 @@ print("final excited-state population:", result.population("q", 1)[-1])
 Output:
 
 ```text
-final excited-state population: 0.7450958150852982
+final excited-state population: 0.7450817911512911
 ```
 
-[Continue with dynamics, pulses, observables, and readout](https://docs.quchip.org/guides/dynamics-pulses-and-readout).
+[Continue with dynamics, pulses, observables, and readout](dynamics-pulses-and-readout.md).
 
 ## Transform a chip
 
@@ -114,7 +112,7 @@ g / detuning: 0.025
 valid: True
 ```
 
-[Continue with chip transformations](https://docs.quchip.org/guides/chip-transformations).
+[Continue with chip transformations](chip-transformations.md).
 
 ## Differentiate a static loss
 
@@ -164,4 +162,4 @@ Jacobian:
  [-1.29839799e-04  5.10942405e-04 -5.70796457e-03]]
 ```
 
-[Continue with experimental static fitting, dynamic losses, and multi-sequence analysis](https://docs.quchip.org/guides/differentiability).
+[Continue with experimental static fitting, dynamic losses, and multi-sequence analysis](differentiability.md).

@@ -1,23 +1,9 @@
-"""JAX-traceable dressed-state labeling primitives.
+"""Assign dressed eigenvectors to bare or eigenstate references.
 
-Three layers, separated cleanly:
-
-1. **Pure-JAX kernel.** :func:`label_eigensystem` takes ``(evals, evecs,
-   reference, policy)`` and returns a :class:`Labeling`. Knows nothing
-   about :class:`Chip`, devices, caching, warnings, or backends.
-2. **References as data.** :class:`BareProductReference` and
-   :class:`EigenstateReference` produce reference vectors and label keys.
-   Overlaps are computed by one shared kernel, :func:`compute_overlaps`,
-   so subspace generalization is a tensor reshape rather than a new
-   subclass.
-3. **Façade.** :class:`~quchip.chip.analysis.ChipAnalysis` calls the
-   kernel and builds the existing :class:`DressedResult`.
-
-Inspired by SuperGrad's ``compute_energy_map``: one-line ``jnp.argmax``
-for greedy assignment, ``lax.scan`` argmax-with-masking for global
-greedy, and continuation along a parameter path. Generalized so
-references are pluggable as data and the path is a stacked eigvec
-tensor rather than a list of chip configurations.
+:func:`label_eigensystem` supports greedy, global-greedy, and continuation
+assignments. :class:`BareProductReference` and :class:`EigenstateReference`
+provide vectors and labels; :func:`compute_overlaps` computes their overlaps.
+The assignment kernels are inspired by SuperGrad's ``compute_energy_map``.
 """
 
 from __future__ import annotations
@@ -89,12 +75,20 @@ class LabelingPath:
 class BareProductReference:
     """Bare product basis states in Kronecker order.
 
-    Vectors are not materialized: bare products are the standard basis
-    of the eigvec matrix in Kronecker order, so overlaps reduce to
-    ``|evecs|**2`` directly (see :func:`compute_overlaps`).
+    Optional local vectors map each component's energy states into its solver
+    basis. None denotes an identity factor. The full product matrix is never
+    materialized; identity references reduce directly to ``|evecs|**2``.
     """
 
     dims: tuple[int, ...]
+    local_vectors: tuple[Any | None, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.local_vectors and len(self.local_vectors) != len(self.dims):
+            raise ValueError("Product references require one local factor per subsystem.")
+        for dimension, vectors in zip(self.dims, self.local_vectors):
+            if vectors is not None and vectors.shape != (dimension, dimension):
+                raise ValueError("Local reference factors must match their subsystem dimensions.")
 
     @property
     def keys(self) -> tuple[tuple[int, ...], ...]:
@@ -122,7 +116,12 @@ def compute_overlaps(reference: Any, evecs: jnp.ndarray) -> jnp.ndarray:
     ``|<k|psi_j>|**2 = |evecs[k, j]|**2``.
     """
     if isinstance(reference, BareProductReference):
-        return jnp.abs(evecs) ** 2
+        amplitudes = evecs.reshape(*reference.dims, evecs.shape[-1])
+        for axis, vectors in enumerate(reference.local_vectors):
+            if vectors is not None:
+                amplitudes = jnp.tensordot(vectors.conj().T, amplitudes, axes=(1, axis))
+                amplitudes = jnp.moveaxis(amplitudes, 0, axis)
+        return jnp.abs(amplitudes.reshape(evecs.shape)) ** 2
     return jnp.abs(reference.vectors.conj() @ evecs) ** 2
 
 
@@ -289,8 +288,7 @@ def _labeling_arrays(
     """
     indices, chosen_overlaps, margins = policy(overlaps)
     n_dressed = overlaps.shape[1]
-    one_hot = jnp.eye(n_dressed, dtype=jnp.int32)[indices]   # (n_labels, n_dressed)
-    counts = one_hot.sum(axis=0)                             # (n_dressed,)
+    counts = jnp.bincount(indices, length=n_dressed)
     duplicates = counts[indices] > 1
     return indices, chosen_overlaps, margins, duplicates
 

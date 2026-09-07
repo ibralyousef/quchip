@@ -1,4 +1,4 @@
-"""Tests for fit_a_dress's fit_parameters free-parameter selection."""
+"""Tests for fit_a_dress's vary free-parameter selection."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 from quchip import Capacitive, Chip, DuffingTransmon, Resonator, TunableCapacitive, fit_a_dress
 from quchip.chip.coupling_base import BaseCoupling
 from quchip.declarative import DeviceModel, LocalOps, Scalar, parameter
-from quchip.inverse_design.fit import _pack_initial_params, _resolve_fit_parameters
+from quchip.inverse_design.fit import _resolve_vary
 
 
 class _ToyDeviceModel(DeviceModel):
@@ -45,7 +45,7 @@ class _KappaCoupling(BaseCoupling):
     """Coupling whose scalar strength lives on ``.kappa``, not ``.g``.
 
     Declares ``coupling_strength_name`` explicitly, so selecting or
-    freezing it through ``fit_parameters`` exercises the generic
+    freezing it through ``vary`` exercises the generic
     ``coupling_strength_name`` / ``set_coupling_strength`` seam rather than
     an assumed ``.g`` attribute.
     """
@@ -79,32 +79,21 @@ def _simple_chip() -> tuple[DuffingTransmon, Resonator, Capacitive, Chip]:
     return q, r, coupling, chip
 
 
-def test_fit_parameters_none_retains_old_free_set() -> None:
-    """fit_parameters=None packs every declared device tunable and every coupling strength."""
-    _, _, _, chip = _simple_chip()
-
-    names_default, _ = _pack_initial_params(chip, ())
-    names_explicit_none, _ = _pack_initial_params(chip, (), device_selection=None, coupling_selection=None)
-
-    assert set(names_default) == {"q.freq", "q.anharmonicity", "r.freq", "qr.g"}
-    assert names_default == names_explicit_none
-
-
-def test_resolve_fit_parameters_treats_object_and_label_keys_identically() -> None:
-    """A fit_parameters key given as a device/coupling object or its label resolves to the same selection."""
+def test_resolve_vary_treats_object_and_label_keys_identically() -> None:
+    """A vary key given as a device/coupling object or its label resolves to the same selection."""
     q, r, coupling, chip = _simple_chip()
 
-    by_object = _resolve_fit_parameters(chip, {q: ("freq",), coupling: ()})
-    by_label = _resolve_fit_parameters(chip, {"q": ("freq",), "qr": ()})
+    by_object = _resolve_vary(chip, {q: ("freq",), coupling: ()})
+    by_label = _resolve_vary(chip, {"q": ("freq",), "qr": ()})
 
     assert by_object == by_label
 
 
-def test_fit_parameters_selection_moves_only_selected_and_freezes_the_rest() -> None:
+def test_vary_selection_moves_only_selected_and_freezes_the_rest() -> None:
     """Selected parameters move to hit the target; every unlisted device and coupling stays bit-identical."""
     q, r, coupling, chip = _simple_chip()
 
-    result = fit_a_dress(chip, observable_targets={q: {"freq": 5.05}}, fit_parameters={q: ("freq",)})
+    result = fit_a_dress(chip, constraints={q: {"freq": 5.05}, coupling: {"cross_kerr": None}}, vary={q: ("freq",)})
 
     assert set(result.initial_params) == {"q.freq"}
     assert set(result.final_params) == {"q.freq"}
@@ -124,8 +113,8 @@ def test_empty_selection_for_one_component_is_legal() -> None:
 
     result = fit_a_dress(
         chip,
-        coupling_targets={coupling: "chi"},
-        fit_parameters={q: (), coupling: (coupling.coupling_strength_name,)},
+        constraints={coupling: {"cross_kerr": 2 * coupling.g}},
+        vary={q: (), coupling: (coupling.coupling_strength_name,)},
     )
 
     assert set(result.final_params) == {"qr.g"}
@@ -134,19 +123,19 @@ def test_empty_selection_for_one_component_is_legal() -> None:
 
 
 def test_zero_total_free_parameters_raises() -> None:
-    """A fit_parameters mapping that freezes every listed component and omits the rest raises ValueError."""
+    """A vary mapping that freezes every listed component and omits the rest raises ValueError."""
     q, r, coupling, chip = _simple_chip()
 
     with pytest.raises(ValueError, match="zero free parameters"):
-        fit_a_dress(chip, fit_parameters={q: (), r: (), coupling: ()})
+        fit_a_dress(chip, vary={q: (), r: (), coupling: ()})
 
 
 def test_unknown_component_label_raises_with_available_choices() -> None:
-    """An unresolvable fit_parameters key raises ValueError listing the chip's known labels."""
+    """An unresolvable vary key raises ValueError listing the chip's known labels."""
     _, _, _, chip = _simple_chip()
 
     with pytest.raises(ValueError, match="does not match any device or coupling") as exc_info:
-        _resolve_fit_parameters(chip, {"not_a_label": ()})
+        _resolve_vary(chip, {"not_a_label": ()})
 
     message = str(exc_info.value)
     assert "'q'" in message and "'r'" in message and "'qr'" in message
@@ -157,7 +146,7 @@ def test_unknown_device_parameter_name_raises_with_available_choices() -> None:
     q, _, _, chip = _simple_chip()
 
     with pytest.raises(ValueError, match="not tunable parameters") as exc_info:
-        _resolve_fit_parameters(chip, {q: ("not_a_param",)})
+        _resolve_vary(chip, {q: ("not_a_param",)})
 
     message = str(exc_info.value)
     assert "freq" in message and "anharmonicity" in message
@@ -168,17 +157,17 @@ def test_unknown_coupling_parameter_name_raises_with_available_choices() -> None
     _, _, coupling, chip = _simple_chip()
 
     with pytest.raises(ValueError, match="not the declared coupling-strength") as exc_info:
-        _resolve_fit_parameters(chip, {coupling: ("not_g",)})
+        _resolve_vary(chip, {coupling: ("not_g",)})
 
     assert "'g'" in str(exc_info.value)
 
 
 def test_duplicate_resolved_keys_raise() -> None:
-    """Two fit_parameters keys resolving to the same component label raise ValueError."""
+    """Two vary keys resolving to the same component label raise ValueError."""
     q, _, _, chip = _simple_chip()
 
     with pytest.raises(ValueError, match="duplicate"):
-        _resolve_fit_parameters(chip, {q: ("freq",), "q": ("anharmonicity",)})
+        _resolve_vary(chip, {q: ("freq",), "q": ("anharmonicity",)})
 
 
 def test_bare_string_value_raises() -> None:
@@ -186,7 +175,7 @@ def test_bare_string_value_raises() -> None:
     q, _, _, chip = _simple_chip()
 
     with pytest.raises(ValueError, match="collection of parameter names"):
-        _resolve_fit_parameters(chip, {q: "freq"})
+        _resolve_vary(chip, {q: "freq"})
 
 
 def test_desired_chip_defaults_balance_targets_and_parameters() -> None:
@@ -205,12 +194,14 @@ def test_desired_chip_defaults_balance_targets_and_parameters() -> None:
 
 
 def test_count_sufficient_fit_does_not_warn() -> None:
-    """A fit_parameters selection with free parameters <= target residuals emits no underdetermined warning."""
+    """A vary selection with free parameters <= target residuals emits no underdetermined warning."""
     q, _, _, chip = _simple_chip()
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        result = fit_a_dress(chip, fit_parameters={q: ("freq", "anharmonicity")})
+        result = fit_a_dress(
+            chip, constraints={chip.couplings[0]: {"cross_kerr": None}}, vary={q: ("freq", "anharmonicity")}
+        )
 
     assert not any("underdetermined" in str(w.message) for w in caught)
     assert result.solver_info["n_free_parameters"] == 2
@@ -229,8 +220,8 @@ def test_custom_device_model_with_declared_tunables_fits_through_generic_seam() 
 
     result = fit_a_dress(
         chip,
-        observable_targets={toy: {"freq": target_freq}},
-        fit_parameters={toy: ("omega",)},
+        constraints={toy: {"freq": target_freq}, coupling: {"cross_kerr": None}},
+        vary={toy: ("omega",)},
     )
 
     assert set(result.final_params) == {"toy.omega"}
@@ -240,26 +231,26 @@ def test_custom_device_model_with_declared_tunables_fits_through_generic_seam() 
 
 
 def test_custom_coupling_declared_strength_name_can_be_selected_or_frozen() -> None:
-    """fit_parameters selects or freezes a custom coupling's own coupling_strength_name, not a stray '.g'."""
+    """vary selects or freezes a custom coupling's own coupling_strength_name, not a stray '.g'."""
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
     r = Resonator(freq=7.0, levels=4, label="r")
     coupling = _KappaCoupling(q, r, kappa=0.01, label="kc")
     chip = Chip([q, r], [coupling], frame="rotating")
 
-    frozen = fit_a_dress(chip, fit_parameters={q: ("freq",)})
+    frozen = fit_a_dress(chip, vary={q: ("freq",)})
     assert "kc.kappa" not in frozen.final_params
     assert frozen.chip.couplings[0].kappa == coupling.kappa
 
     selected = fit_a_dress(
         chip,
-        observable_targets={coupling: {"g": 0.05}},
-        fit_parameters={coupling: ("kappa",)},
+        constraints={coupling: {"cross_kerr": None, "coupling_strength": 0.05}},
+        vary={coupling: ("kappa",)},
     )
     assert set(selected.final_params) == {"kc.kappa"}
     assert selected.chip.couplings[0].kappa == pytest.approx(0.05, abs=5e-4)
 
 
-def test_tunable_capacitive_g0_can_be_selected_via_fit_parameters() -> None:
+def test_tunable_capacitive_g0_can_be_selected_via_vary() -> None:
     """A built-in coupling with a non-'g' strength attribute (TunableCapacitive.g_0) selects through its own name."""
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
     r = Resonator(freq=7.0, levels=4, label="r")
@@ -268,8 +259,8 @@ def test_tunable_capacitive_g0_can_be_selected_via_fit_parameters() -> None:
 
     result = fit_a_dress(
         chip,
-        observable_targets={coupling: {"g": 0.03}},
-        fit_parameters={coupling: ("g_0",)},
+        constraints={coupling: {"cross_kerr": None, "coupling_strength": 0.03}},
+        vary={coupling: ("g_0",)},
     )
 
     assert set(result.final_params) == {"tc.g_0"}
@@ -280,7 +271,7 @@ def test_tunable_capacitive_g0_can_be_selected_via_fit_parameters() -> None:
 def test_jax_backed_selection_gets_exact_jacobian_sized_to_the_reduced_vector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A JAX-native backend keeps the exact Jacobian path, sized to the fit_parameters-reduced vector."""
+    """A JAX-native backend keeps the exact Jacobian path, sized to the vary-reduced vector."""
     pytest.importorskip("dynamiqs")
     from scipy.optimize import least_squares as scipy_least_squares
 
@@ -294,11 +285,12 @@ def test_jax_backed_selection_gets_exact_jacobian_sized_to_the_reduced_vector(
         x0 = np.asarray(kwargs["x0"], dtype=float)
         jacobian = np.asarray(kwargs["jac"](x0), dtype=float)
         step = 1e-6
-        finite_difference = np.column_stack([
-            (fun(x0 + step * np.eye(x0.size)[column]) - fun(x0 - step * np.eye(x0.size)[column]))
-            / (2.0 * step)
-            for column in range(x0.size)
-        ])
+        finite_difference = np.column_stack(
+            [
+                (fun(x0 + step * np.eye(x0.size)[column]) - fun(x0 - step * np.eye(x0.size)[column])) / (2.0 * step)
+                for column in range(x0.size)
+            ]
+        )
         np.testing.assert_allclose(jacobian, finite_difference, rtol=2e-4, atol=2e-6)
         assert jacobian.shape[1] == 2
         checked = True
@@ -313,8 +305,8 @@ def test_jax_backed_selection_gets_exact_jacobian_sized_to_the_reduced_vector(
 
     result = fit_a_dress(
         chip,
-        observable_targets={q: {"freq": 5.01, "anharmonicity": -0.25}, r: {"freq": 7.01}},
-        fit_parameters={q: ("freq", "anharmonicity")},
+        constraints={q: {"freq": 5.01, "anharmonicity": -0.25}, r: {"freq": 7.01}, coupling: {"cross_kerr": None}},
+        vary={q: ("freq", "anharmonicity")},
     )
 
     assert checked

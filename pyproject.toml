@@ -22,14 +22,13 @@ dependencies = [
     "tqdm",
     "loky",
     "jax",
-    "optax",
 ]
 
 [project.optional-dependencies]
 dynamiqs = ["dynamiqs>=0.3.4"]
 viz = ["pyvis"]
-scqubits = ["scqubits>=4.2"]
-test = ["pytest", "pyvis", "scqubits>=4.2", "jupytext", "nbconvert", "ipykernel"]
+scqubits = ["scqubits>=4.2", "qutip<5.3.1"]
+test = ["pytest", "pyvis", "scqubits>=4.2", "qutip<5.3.1", "jupytext", "nbconvert", "ipykernel"]
 dev = ["ruff", "mypy", "pytest", "pyvis", "jupytext", "nbconvert", "ipykernel"]
 docs = ["sphinx", "furo", "myst-parser", "sphinx-copybutton"]
 
@@ -53,9 +52,10 @@ markers = [
     "optional_backend: tests that require the dynamiqs optional backend",
     "viz: visualization coverage",
 ]
-filterwarnings = [
-    "ignore:coupling_targets=, observable_targets=, and fit_parameters= are deprecated since quchip 0\\.2\\.1:DeprecationWarning",
-]
+
+
+[tool.setuptools.package-data]
+quchip = ["py.typed"]
 
 [tool.setuptools.packages.find]
 include = ["quchip*"]

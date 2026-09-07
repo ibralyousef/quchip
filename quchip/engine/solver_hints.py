@@ -17,50 +17,32 @@ from typing import Any
 import numpy as np
 
 from quchip.engine.ir import (
-    Carrier,
     DynamicTerm,
     ScalarModulation,
     SignalProgram,
     StaticTerm,
     Window,
     signal_children,
+    decompose_carrier_bands,
 )
 from quchip.utils.constants import TWO_PI
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar
-
-# Above this Hilbert-space dimension, _static_diagonal_span skips its dense
-# diagonal materialization: the advisory hint is not worth an O(dim^2) dense
-# conversion.
-_MAX_SPECTRAL_HINT_DIM = 2048
-
-
-def _collect_carrier_freqs_from_signal(signal: SignalProgram) -> list[float]:
-    """Recursively gather absolute carrier frequencies (rad/ns) from a signal AST.
-
-    Walks the AST via :func:`~quchip.engine.ir.signal_children`, the single
-    structural source of truth for node-shape. Traced carrier frequencies
-    are skipped because this feeds advisory solver metadata only; forcing
-    them through Python ``max(...)`` would break JAX tracing without
-    changing physics.
-    """
-    if isinstance(signal, Carrier):
-        freq = maybe_concrete_scalar(signal.freq)
-        return [] if freq is None else [abs(freq)]
-    return [f for child in signal_children(signal) for f in _collect_carrier_freqs_from_signal(child)]
-
 
 def _max_abs_carrier_freq(dynamic_terms: tuple[DynamicTerm, ...]) -> float | None:
     """Maximum absolute carrier frequency (rad/ns) across *dynamic_terms*, or ``None`` if none.
 
     Used as an advisory hint so backends can pick a conservative solver
     step; never participates in physics.
-    :func:`_collect_carrier_freqs_from_signal` covers why ``max(...)`` is
-    safe on the gathered list.
+    Resolved carrier bands own products, powers and frequency cancellation;
+    traced values are omitted from this advisory hint.
     """
     all_freqs: list[float] = []
     for term in dynamic_terms:
         if isinstance(term.time_dependence, ScalarModulation):
-            all_freqs.extend(_collect_carrier_freqs_from_signal(term.time_dependence.signal))
+            for band in decompose_carrier_bands(term.time_dependence.signal):
+                frequency = maybe_concrete_scalar(band.freq)
+                if frequency is not None:
+                    all_freqs.append(abs(frequency))
     return max(all_freqs) if all_freqs else None
 
 
@@ -117,35 +99,41 @@ def _min_positive_window_width(dynamic_terms: tuple[DynamicTerm, ...]) -> float 
     return min(all_widths) if all_widths else None
 
 
-def _static_diagonal_span(static_terms: tuple[StaticTerm, ...]) -> float | None:
-    """Spectral-bound hint ``max(diag) - min(diag)`` for the combined static Hamiltonian.
+def operator_norm_bound(operator: Any) -> float | None:
+    """Bound the spectral norm by sqrt(||A||₁ ||A||∞), without densifying."""
+    from quchip.engine.bands import canonical_to_coo
 
-    Returns ``None`` when empty, oversized, or not fully concrete (a traced
-    coefficient must stay dynamic — no ``float()`` forced concretization).
+    if contains_tracer((operator.values, operator.indices, operator.indptr, operator.offsets)):
+        return None
+    rows, cols, values = canonical_to_coo(operator)
+    absolute = np.abs(np.asarray(values))
+    row_sums = np.bincount(rows, weights=absolute, minlength=operator.shape[0])
+    col_sums = np.bincount(cols, weights=absolute, minlength=operator.shape[1])
+    return float(np.sqrt(np.max(row_sums) * np.max(col_sums)))
+
+
+def _static_spectral_span(static_terms: tuple[StaticTerm, ...]) -> float | None:
+    """Gershgorin span of the combined Hamiltonian, preserving energy offsets.
+
+    Sum diagonals before taking extrema; bound off-diagonal row radii using
+    existing sparse payloads. No global dense matrix or eigensolve is needed.
     """
+    from quchip.engine.bands import canonical_to_coo
+
     if not static_terms:
+        return 0.0
+    if any(contains_tracer((term.coefficient, term.operator.values, term.operator.indices,
+                            term.operator.indptr, term.operator.offsets)) for term in static_terms):
         return None
-    dim = static_terms[0].operator.shape[0]
-    if dim > _MAX_SPECTRAL_HINT_DIM:
-        return None
-    combined = np.zeros(dim, dtype=float)
+    size = static_terms[0].operator.shape[0]
+    diagonal, radii = np.zeros(size), np.zeros(size)
     for term in static_terms:
-        coeff = maybe_concrete_scalar(term.coefficient)
-        if coeff is None:
-            return None
-        operator_payload = (
-            term.operator.values,
-            term.operator.indices,
-            term.operator.indptr,
-            term.operator.offsets,
-        )
-        if contains_tracer(operator_payload):
-            return None
-        combined += np.real(np.asarray(term.operator.diagonal(), dtype=complex)) * coeff
-    span = maybe_concrete_scalar(np.max(combined) - np.min(combined))
-    if span is None or span <= 0:
-        return None
-    return span
+        rows, cols, values = canonical_to_coo(term.operator)
+        values = np.asarray(values) * term.coefficient
+        on_diagonal = rows == cols
+        np.add.at(diagonal, rows[on_diagonal], np.real(values[on_diagonal]))
+        np.add.at(radii, rows[~on_diagonal], np.abs(values[~on_diagonal]))
+    return float(np.max(diagonal + radii) - np.min(diagonal - radii))
 
 
 def _solver_hint_metadata(

@@ -34,6 +34,7 @@ from quchip.backend._dims import (
     validate_two_body_indices,
 )
 from quchip.backend.containers import (
+    BatchSolveError,
     DeferredBatch,
     EagerBatch,
     EigensystemData,
@@ -50,6 +51,7 @@ __all__ = [
     "Operator",
     "State",
     "SolverResult",
+    "BatchSolveError",
     "SteadyStateSolverResult",
     "PreparedHamiltonian",
     "PreparedBatch",

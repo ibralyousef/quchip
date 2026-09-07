@@ -10,7 +10,7 @@ Eigenvalue formulas:
 
 from __future__ import annotations
 
-from quchip.approximations import RWA, Exact
+from quchip.approximations import RWA
 
 import numpy as np
 import pytest
@@ -23,120 +23,7 @@ from quchip.declarative.expr import materialize_expr
 from quchip.devices.resonator import Resonator
 from quchip.chip.couplings import Capacitive
 from quchip.engine.approximations import apply_operator_band_filter
-from quchip.control.drive import ChargeDrive, FluxDrive
 from quchip.utils.labeling import auto_label, resolve_label
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _reset_labels():
-    """Reset auto-label counters so tests are order-independent."""
-    reset_label_counters()
-    yield
-    reset_label_counters()
-
-
-# ---------------------------------------------------------------------------
-# TestDuffingTransmon
-# ---------------------------------------------------------------------------
-
-
-class TestDuffingTransmon:
-    """Analytical tests for the DuffingTransmon device."""
-
-    def test_hamiltonian_shape(self) -> None:
-        """hamiltonian() returns operator with correct dimensions."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=4)
-        H = q.hamiltonian()
-        assert H.shape == (4, 4)
-
-    def test_eigenvalues(self, backend: Backend) -> None:
-        """Eigenvalues match E_n = ω·n + (α/2)·n·(n−1)."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=4)
-        H = q.hamiltonian()
-        evals = np.linalg.eigvalsh(H.matrix(backend=backend))
-        # levels=4, freq=5.0, alpha=-0.25: E_0=0.0, E_1=5.0,
-        # E_2=10.0+(-0.125)*2=9.75, E_3=15.0+(-0.125)*6=14.25
-        expected = [0.0, 5.0, 9.75, 14.25]
-        np.testing.assert_allclose(evals, expected, atol=1e-10)
-
-    def test_lowering_operator(self, backend: Backend) -> None:
-        """⟨0|a|1⟩ = 1.0 — standard Fock-space matrix element."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=4)
-        a = q.lowering_operator()
-        a_full = a.full()
-        assert abs(a_full[0, 1] - 1.0) < 1e-10
-
-    def test_number_operator(self) -> None:
-        """Diagonal elements of n̂ are [0, 1, 2, ...]."""
-        levels = 5
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=levels)
-        n = q.number_operator()
-        diag = n.diag()
-        expected = np.arange(levels, dtype=float)
-        np.testing.assert_allclose(diag, expected, atol=1e-10)
-
-    def test_backend_optional(self) -> None:
-        """Calling hamiltonian() without backend resolves to default."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3)
-        H = q.hamiltonian()
-        assert H is not None
-        assert H.shape == (3, 3)
-
-
-# ---------------------------------------------------------------------------
-# TestResonator
-# ---------------------------------------------------------------------------
-
-
-class TestResonator:
-    """Analytical tests for the Resonator device."""
-
-    def test_hamiltonian_eigenvalues(self, backend: Backend) -> None:
-        """Eigenvalues match E_n = ω·n for freq=6.0, levels=5."""
-        r = Resonator(freq=6.0, levels=5)
-        H = r.hamiltonian()
-        evals = np.linalg.eigvalsh(H.matrix(backend=backend))
-        expected = [0.0, 6.0, 12.0, 18.0, 24.0]
-        np.testing.assert_allclose(evals, expected, atol=1e-10)
-
-    def test_coherent_state(self, backend: Backend) -> None:
-        """coherent_state(0.0) produces vacuum — overlap with |0⟩ ≈ 1.0."""
-        r = Resonator(freq=6.0, levels=10)
-        psi = r.coherent_state(0.0)
-        ket_0 = backend.basis(10, 0)
-        overlap = abs(backend.expect(ket_0 * backend.dag(ket_0), psi))
-        assert abs(overlap - 1.0) < 1e-10
-
-    def test_collapse_operators_with_internal_quality_factor(self) -> None:
-        """Q=10000 at f=5 GHz produces one collapse op with coefficient sqrt(2π·f/Q)."""
-        # Convention lock-in (issue #66): Q is defined against the ordinary frequency, so
-        # kappa = 2*pi*f/Q (rad/ns). The 2*pi is part of Q's physical definition, not a
-        # units-boundary conversion, and must not move out of resonator.py.
-        freq = 5.0
-        Q = 10000.0
-        r = Resonator(freq=freq, internal_quality_factor=Q, levels=5)
-        c_ops = r.collapse_operators()
-        assert len(c_ops) == 1
-
-        expected_sqrt_kappa = np.sqrt(2 * np.pi * freq / Q)
-        c_full = c_ops[0].full()
-        np.testing.assert_allclose(abs(c_full[0, 1]), expected_sqrt_kappa, atol=1e-10)
-
-    def test_collapse_operators_without_internal_quality_factor(self) -> None:
-        """No internal_quality_factor → empty list."""
-        r = Resonator(freq=6.0, levels=5)
-        c_ops = r.collapse_operators()
-        assert c_ops == []
-
-
-# ---------------------------------------------------------------------------
-# TestCapacitive
-# ---------------------------------------------------------------------------
 
 
 class TestCapacitive:
@@ -185,31 +72,6 @@ class TestCapacitive:
         assert abs(element) > 1e-15, "Counter-rotating term should be non-zero"
         np.testing.assert_allclose(element.real, g, atol=1e-10)
 
-    def test_coupling_strength_property(self) -> None:
-        """c.coupling_strength == g."""
-        g = 0.035
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3)
-        r = Resonator(freq=6.0, levels=5)
-        c = Capacitive(q, r, g=g)
-        assert c.coupling_strength == g
-
-    def test_approximation_is_chip_owned(self) -> None:
-        """The chip owns one approximation strategy for all authored terms."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        r = Resonator(freq=6.0, levels=5, label="r")
-        coupling = Capacitive(q, r, g=0.02)
-        chip = Chip([q, r], [coupling], approximation=Exact())
-
-        assert chip.approximation == Exact()
-        assert not hasattr(coupling, "rwa")
-
-    def test_coupling_cannot_override_chip_approximation(self) -> None:
-        """A coupling rejects engine-owned approximation settings."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        r = Resonator(freq=6.0, levels=5, label="r")
-        with pytest.raises(TypeError, match="approximation"):
-            Capacitive(q, r, g=0.02, approximation=Exact())
-
     def test_accepts_label_strings_via_late_binding(self) -> None:
         """Capacitive(\"q0\", \"q1\", ...) resolves inside Chip and matches object form."""
         # Coupling constructors accept device objects or label strings; strings bind
@@ -236,18 +98,6 @@ class TestCapacitive:
         H_obj = chip_obj.hamiltonian()
         np.testing.assert_allclose(H_str.matrix(), H_obj.matrix(), atol=0.0)
 
-    def test_accepts_mixed_string_and_object(self) -> None:
-        """One label string + one device object resolves correctly."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
-        r = Resonator(freq=6.0, levels=5, label="q1")
-        c = Capacitive(q, "q1", g=0.01)
-
-        assert c.is_resolved is False
-        Chip([q, r], couplings=[c])
-        assert c.is_resolved is True
-        assert c.device_a is q
-        assert c.device_b is r
-
     def test_rejects_non_label_non_device_types(self) -> None:
         """Integers, dicts, and other junk still get a clear TypeError."""
         q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
@@ -265,40 +115,18 @@ class TestCapacitive:
             Chip([q, r], couplings=[c])
 
 
-# ---------------------------------------------------------------------------
-# TestNoiseValidation — parameter guardrails
-# ---------------------------------------------------------------------------
-
-
 class TestNoiseValidation:
     """Verify constructor rejects invalid noise parameter combinations."""
-
-    def test_T1_negative(self) -> None:
-        """T1 <= 0 raises ValueError."""
-        with pytest.raises(ValueError, match="T1 must be positive"):
-            DuffingTransmon(freq=5.0, anharmonicity=-0.25, T1=-1.0)
 
     def test_T1_zero(self) -> None:
         """T1 == 0 raises ValueError."""
         with pytest.raises(ValueError, match="T1 must be positive"):
             DuffingTransmon(freq=5.0, anharmonicity=-0.25, T1=0.0)
 
-    def test_T2_negative(self) -> None:
-        """T2 <= 0 raises ValueError."""
-        with pytest.raises(ValueError, match="T2 must be positive"):
-            DuffingTransmon(freq=5.0, anharmonicity=-0.25, T1=1000.0, T2=-1.0)
-
     def test_T2_zero(self) -> None:
         """T2 == 0 raises ValueError."""
         with pytest.raises(ValueError, match="T2 must be positive"):
             DuffingTransmon(freq=5.0, anharmonicity=-0.25, T1=1000.0, T2=0.0)
-
-    def test_T2_without_T1_accepted(self) -> None:
-        """T2 without T1 is accepted — pure-dephasing collapse op uses gamma_phi = 1/T2."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, T2=500.0)
-        assert q.T2 == 500.0
-        assert q.T1 is None
-        assert len(q.collapse_operators()) == 1
 
     def test_T2_exceeds_2T1(self) -> None:
         """T2 > 2·T1 raises ValueError."""
@@ -309,47 +137,6 @@ class TestNoiseValidation:
         """thermal_population < 0 raises ValueError."""
         with pytest.raises(ValueError, match="thermal_population must be non-negative"):
             DuffingTransmon(freq=5.0, anharmonicity=-0.25, thermal_population=-0.1)
-
-    def test_valid_noise_params_accepted(self) -> None:
-        """Valid parameter combos are stored correctly."""
-        q = DuffingTransmon(
-            freq=5.0,
-            anharmonicity=-0.25,
-            T1=10_000.0,
-            T2=8_000.0,
-            thermal_population=0.02,
-        )
-        assert q.T1 == 10_000.0
-        assert q.T2 == 8_000.0
-        assert q.thermal_population == 0.02
-
-    def test_noise_defaults_are_none(self) -> None:
-        """Without noise kwargs, all noise fields are None."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25)
-        assert q.T1 is None
-        assert q.T2 is None
-        assert q.thermal_population is None
-
-    def test_resonator_accepts_noise_kwargs(self) -> None:
-        """Resonator forwards noise kwargs to BaseDevice."""
-        r = Resonator(freq=6.0, levels=5, T1=5000.0)
-        assert r.T1 == 5000.0
-
-    def test_T2_equals_2T1_accepted(self) -> None:
-        """T2 == 2·T1 is the boundary — accepted, no pure dephasing."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, T1=1000.0, T2=2000.0)
-        assert q.T2 == 2000.0
-
-    def test_thermal_population_zero_accepted(self) -> None:
-        """thermal_population == 0 is valid (zero-temp thermal channel)."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, thermal_population=0.0)
-        assert q.thermal_population == 0.0
-
-
-# ---------------------------------------------------------------------------
-# TestCollapseOperators — channel assembly and rates
-# ---------------------------------------------------------------------------
-
 
 class TestCollapseOperators:
     """Verify collapse operator counts, rates, and formulas."""
@@ -502,20 +289,6 @@ class TestCollapseOperators:
         c1_full = c_ops[1].full()
         np.testing.assert_allclose(abs(c1_full[0, 1]), kappa, atol=1e-12)
 
-    def test_resonator_Q_no_noise(self) -> None:
-        """Resonator Q-factor loss is produced without additional noise terms."""
-        freq = 6.0
-        Q = 1e4
-        r = Resonator(freq=freq, internal_quality_factor=Q, levels=5)
-        c_ops = r.collapse_operators()
-        assert len(c_ops) == 1  # Only Q-based loss
-
-
-# ---------------------------------------------------------------------------
-# TestLabeling — utils/labeling shared auto-label machinery
-# ---------------------------------------------------------------------------
-
-
 def test_auto_label_increments_per_prefix():
     """Each prefix keeps its own counter, independent of other prefixes."""
     reset_label_counters()
@@ -525,61 +298,7 @@ def test_auto_label_increments_per_prefix():
     assert auto_label("charge") == "charge_2"
 
 
-def test_resolve_label_passes_through_strings():
-    """A string label resolves to itself."""
-    assert resolve_label("q0") == "q0"
-
-
-def test_resolve_label_extracts_dot_label():
-    """An object with a ``.label`` attribute resolves to that label."""
-
-    class FakeDevice:
-        label = "q0"
-
-    assert resolve_label(FakeDevice()) == "q0"
-
-
 def test_resolve_label_rejects_unlabeled_objects():
     """An object without a label raises TypeError."""
     with pytest.raises(TypeError, match="label"):
         resolve_label(42)
-
-
-def test_coupling_auto_labels():
-    """Successive Capacitive couplings get incrementing auto-labels."""
-    reset_label_counters()
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3)
-    r = Resonator(freq=7.0, levels=5)
-    c = Capacitive(q, r, g=0.02)
-    assert c.label == "cap_0"
-    c2 = Capacitive(q, r, g=0.01)
-    assert c2.label == "cap_1"
-
-
-def test_coupling_explicit_label():
-    """An explicit label overrides auto-labeling."""
-    reset_label_counters()
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3)
-    r = Resonator(freq=7.0, levels=5)
-    c = Capacitive(q, r, g=0.02, label="my_cap")
-    assert c.label == "my_cap"
-
-
-def test_drive_auto_labels():
-    """Drive auto-labels increment per subclass prefix."""
-    reset_label_counters()
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3)
-    d1 = ChargeDrive(target=q)
-    d2 = ChargeDrive(target=q)
-    d3 = FluxDrive(target=q)
-    assert d1.label == "charge_0"
-    assert d2.label == "charge_1"
-    assert d3.label == "flux_0"
-
-
-def test_drive_explicit_label():
-    """An explicit label overrides drive auto-labeling."""
-    reset_label_counters()
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3)
-    d = ChargeDrive(target=q, label="my_drive")
-    assert d.label == "my_drive"

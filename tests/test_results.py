@@ -34,3 +34,19 @@ def test_amplitude_array_without_states_raises_runtime_error() -> None:
     target = qt.basis(2, 0)
     with pytest.raises(RuntimeError, match=_NO_STATES_MSG):
         result.amplitude_array(target)
+
+
+def test_list_history_does_not_cache_a_tracer():
+    import jax
+    from quchip.backend.dynamiqs import DynamiqsBackend
+    from quchip.utils.jax_utils import contains_tracer
+
+    backend = DynamiqsBackend()
+    result = SimulationResult(
+        SolverResult(times=np.array([0.0, 1.0]), states=[backend.basis(3, 0), backend.basis(3, 1)]),
+        backend, [3], device_info=[("q", True)],
+    )
+    np.testing.assert_allclose(jax.jit(lambda: result.populations[(1,)])(), [0.0, 1.0])
+    assert not contains_tracer(result._stacked_cache)
+    assert isinstance(result.populations[(1,)], jax.Array)
+    np.testing.assert_allclose(result.population("q", 1), [0.0, 1.0])

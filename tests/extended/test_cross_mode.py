@@ -6,7 +6,6 @@ from quchip.approximations import RWA
 
 import numpy as np
 import numpy.testing as npt
-import pytest
 
 from quchip.chip.chip import Chip
 from quchip.chip.couplings import Capacitive
@@ -26,13 +25,6 @@ FRAME_MODES: list[tuple[str, str | float | dict[str, float]]] = [
     ("dict", {"q": 5.0, "r": 7.0}),
 ]
 SOLVER_OPTS = {"atol": 1e-10, "rtol": 1e-8}
-
-
-@pytest.fixture(autouse=True)
-def _reset_labels():
-    reset_label_counters()
-    yield
-    reset_label_counters()
 
 
 def _build_dispersive_system(
@@ -64,7 +56,7 @@ def test_cross_mode_populations_match():
         dop = DriveOp(
             target_label="q",
             envelope=Square(duration=30.0, amplitude=0.02),
-            freq=q.drive_freq,
+            freq=chip.freq(q),
             drive_label=drive_q.label,
         )
         result = simulate(chip, [dop], tlist, options=SOLVER_OPTS)

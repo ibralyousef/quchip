@@ -24,6 +24,23 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, TypeAlias
 
 
+from quchip.utils.values import DeferredValue
+
+
+class BatchSolveError(RuntimeError):
+    """A numerical or configuration failure at one batch point, safe across workers."""
+
+    def __init__(self, index: int, detail: str, parameters: dict[str, Any] | None = None) -> None:
+        self.index = index
+        self.detail = detail
+        self.parameters = {} if parameters is None else dict(parameters)
+        super().__init__(index, detail, self.parameters)
+
+    def __str__(self) -> str:
+        context = f" with parameters {self.parameters!r}" if self.parameters else ""
+        return f"Batch point {self.index} failed{context}: {self.detail}"
+
+
 @dataclass
 class SolverResult:
     """Backend-agnostic container for a single time-evolution solve.
@@ -66,7 +83,24 @@ class SteadyStateSolverResult:
     stats: dict[str, Any] = field(default_factory=dict)
     residual: Any = None
     nullity: Any = None
-    condition_number: Any = None
+    _condition_number: DeferredValue | None = field(default=None, repr=False)
+
+    @property
+    def condition_number(self) -> Any:
+        return None if self._condition_number is None else self._condition_number()
+
+
+@dataclass(frozen=True)
+class LinearResponseSolverResult:
+    """Backend payload for one batched passive-linear scattering solve."""
+
+    responses: Any
+    residuals: Any
+    _condition_numbers: DeferredValue = field(repr=False)
+
+    @property
+    def condition_numbers(self) -> Any:
+        return self._condition_numbers()
 
 
 @dataclass
@@ -81,6 +115,15 @@ class PreparedHamiltonian:
 
     rhs: Any
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PreparedStationary:
+    """Temporary native generator shared by one stationary operating point."""
+
+    backend: Any = field(repr=False, compare=False)
+    engine_result: Any = field(repr=False, compare=False)
+    liouvillian: Any = field(repr=False, compare=False)
 
 
 @dataclass

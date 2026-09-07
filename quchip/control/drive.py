@@ -30,7 +30,7 @@ from quchip.declarative.dissipation import CollapseChannel, normalize_dissipatio
 from quchip.declarative.expr import ParameterNamespace, as_operator_expr
 from quchip.declarative.ops import LocalOps
 from quchip.declarative.parameters import (
-    DriveDeclarativeMeta,
+    KeywordOnlyDeclarativeMeta,
     Parameter,
     constructor_field,
     parameter_fields,
@@ -71,7 +71,8 @@ def _synthesize_drive_init(cls: type["BaseDrive"]) -> Any:
         )
         for name, spec in parameter_fields(cls).items()
     ) + tuple(
-        inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=spec.default)
+        inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY,
+                          default=inspect.Parameter.empty if spec.required else spec.default)
         for name, spec in setting_fields(cls).items()
     ) + (
         inspect.Parameter("label", inspect.Parameter.KEYWORD_ONLY, default=None),
@@ -99,7 +100,7 @@ def _synthesize_drive_init(cls: type["BaseDrive"]) -> Any:
     return __init__
 
 
-class BaseDrive(Registrable, registry_root=True, metaclass=DriveDeclarativeMeta):
+class BaseDrive(Registrable, registry_root=True, metaclass=KeywordOnlyDeclarativeMeta):
     """Base class for classical control lines attached to one quantum target.
 
     Drives own their local Hamiltonian contribution and

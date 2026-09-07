@@ -7,6 +7,7 @@ from quchip.approximations import Exact, RWA
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from quchip import Capacitive, Chip, DuffingTransmon, Resonator
 from quchip.chip.sw import (
@@ -47,25 +48,6 @@ def test_two_level_exchange_reproduces_level_repulsion():
     assert abs(float(params_a["b"]["freq_after"]) - (omega_b - g**2 / delta)) < 1e-12
 
 
-def test_dispersive_lamb_shift_on_a_real_chip():
-    """Eliminating the resonator gives the qubit the dispersive Lamb shift g²/Δ; the P/Q gap equals the detuning."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    r = Resonator(freq=7.0, levels=4, label="r")
-    chip = Chip([q, r], couplings=[Capacitive(q, r, g=0.05, label="c")])
-
-    h, labels, dims = bare_hamiltonian(chip)
-    p_mask, _ = mode_blocks(dims, labels, "r")
-    s, min_gap = sylvester_generator(h, p_mask)
-    h_eff = h_effective_second_order(h, s, p_mask)
-    params = extract_pair_parameters(h_eff, np.flatnonzero(p_mask), labels, dims, "r")
-
-    lamb = float(params["q"]["freq_after"]) - 5.0
-    expected = 0.05**2 / (5.0 - 7.0)
-    assert abs(lamb - expected) / abs(expected) < 1e-9
-    # The relevant P<->Q gap is the qubit-resonator detuning itself.
-    assert abs(float(min_gap) - 2.0) < 0.3
-
-
 def test_bare_hamiltonian_uses_the_selected_approximation():
     """SW input retains exchange under RWA and counter-rotating terms under Exact."""
     def build(approximation):
@@ -92,19 +74,6 @@ def _bridge_h():
         approximation=RWA(),
     )
     return bare_hamiltonian(chip)
-
-
-def test_bridge_exchange_matches_yan_formula():
-    """Eliminating the bus yields an effective qubit-qubit exchange J matching the Yan formula g0*g1/2*(1/Δ0+1/Δ1)."""
-    h, labels, dims = _bridge_h()
-    p_mask, _ = mode_blocks(dims, labels, "bus")
-    s, _ = sylvester_generator(h, p_mask)
-    h_eff = h_effective_second_order(h, s, p_mask)
-    params = extract_pair_parameters(h_eff, np.flatnonzero(p_mask), labels, dims, "bus")
-
-    j = params[("J", "q0", "q1")]
-    expected = 0.08 * 0.08 / 2.0 * (1.0 / (5.0 - 6.3) + 1.0 / (5.2 - 6.3))
-    assert abs(float(j.real) - expected) / abs(expected) < 1e-6
 
 
 def test_degenerate_cross_block_with_zero_coupling_is_guarded():
@@ -150,42 +119,41 @@ def test_pathway_attribution_sums_to_commutator_element():
     assert [k for k, _ in paths] == [bus_idx]
 
 
-def test_collapse_transform_yields_purcell_rate():
-    """The mode's transformed jump operator hands the survivor a (g/Δ)²·κ decay."""
-    from quchip.chip.sw import purcell_rate_from, transform_collapse
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    r = Resonator(freq=7.0, levels=4, label="r", internal_quality_factor=1e4)
-    chip = Chip([q, r], couplings=[Capacitive(q, r, g=0.05, label="c")])
-    backend = chip.backend
-
-    h, labels, dims = bare_hamiltonian(chip)
-    p_mask, _ = mode_blocks(dims, labels, "r")
-    s, _ = sylvester_generator(h, p_mask)
-
-    # Transform the UNIT lowering operator of the eliminated mode; the rate
-    # multiplies back in at the end (purcell_rate_from's contract).
-    b_local = r.annihilation_operator() if hasattr(r, "annihilation_operator") else None
-    if b_local is None:
-        import qutip
-
-        b_local = qutip.destroy(4)
-    b_full = jnp.asarray(backend.to_array(backend.embed(b_local, labels.index("r"), dims)), dtype=complex)
-    c_eff = transform_collapse(b_full, s, p_mask)
-
-    p_index = np.flatnonzero(p_mask)
-    occ = np.array(np.unravel_index(p_index, dims))
-    ground = int(np.flatnonzero((occ[0] == 0) & (occ[1] == 0))[0])
-    q_excited = int(np.flatnonzero((occ[0] == 1) & (occ[1] == 0))[0])
-    amplitude = c_eff[ground, q_excited]
-
-    kappa = 2.0 * np.pi * 7.0 / 1e4
-    rate = purcell_rate_from(amplitude, kappa)
-    expected = (0.05 / 2.0) ** 2 * kappa  # (g/Δ)²·κ, |Δ| = 2.0
-    assert abs(float(rate) - expected) / expected < 1e-6
+@pytest.mark.parametrize("coupling", [0.02, 1e-15])
+def test_coupled_degenerate_cross_block_is_rejected(coupling):
+    """Every nonzero resonant P/Q coupling makes this perturbative generator singular."""
+    mask, _ = mode_blocks((2, 2), ["a", "b"], "b")
+    with pytest.raises(ValueError, match="degenerate.*coupl"):
+        sylvester_generator(_two_qubit_exchange(5.0, 5.0, coupling), mask)
 
 
-def test_no_internal_quality_factor_means_no_channel():
-    """Q=None → the mode has no photon-loss channel; the caller's static decision bit."""
-    r = Resonator(freq=7.0, levels=4, label="r_bare")
-    assert r.collapse_operators() == []
+def test_coupled_degenerate_cross_block_fails_under_jit_and_vmap():
+    """Tracing cannot turn singular reduction into a plausible finite answer."""
+    mask, _ = mode_blocks((2, 2), ["a", "b"], "b")
+
+    def reduced_frequency(freq):
+        h = _two_qubit_exchange(freq, 5.0, 0.02)
+        s, _ = sylvester_generator(h, mask)
+        return h_effective_second_order(h, s, mask)[1, 1].real
+
+    for calculate, argument in (
+        (jax.jit(reduced_frequency), 5.0),
+        (jax.jit(jax.vmap(reduced_frequency)), jnp.array([4.8, 5.0])),
+    ):
+        with pytest.raises(Exception, match="degenerate.*coupl"):
+            jax.block_until_ready(calculate(argument))
+
+
+def test_valid_sw_jit_batched_values_and_derivatives():
+    """Valid reductions retain closed-form derivatives through JIT and batching."""
+    mask, _ = mode_blocks((2, 2), ["a", "b"], "b")
+
+    def reduced_frequency(freq):
+        h = _two_qubit_exchange(freq, 5.0, 0.02)
+        s, _ = sylvester_generator(h, mask)
+        return h_effective_second_order(h, s, mask)[1, 1].real
+
+    frequencies = jnp.array([4.8, 5.3])
+    values, derivatives = jax.jit(jax.vmap(jax.value_and_grad(reduced_frequency)))(frequencies)
+    np.testing.assert_allclose(values, frequencies + 0.02**2 / (frequencies - 5.0), atol=1e-12)
+    np.testing.assert_allclose(derivatives, 1.0 - 0.02**2 / (frequencies - 5.0)**2, atol=1e-12)

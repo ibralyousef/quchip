@@ -35,7 +35,7 @@ Examples
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Mapping, Self
 
 import jax.tree_util as jtu
 
@@ -116,10 +116,36 @@ class Envelope(Registrable, ABC, registry_root=True, metaclass=DeclarativeMeta):
     def validate(self) -> None:
         """Validate relations between concrete parameters."""
 
+    def parameter_values(self) -> dict[str, Any]:
+        """Return declared numerical fields available for rebinding."""
+        names = parameter_fields(type(self)) or tuple(name for name in vars(self) if not name.startswith("_"))
+        return {name: getattr(self, name) for name in names}
+
+    def with_params(self, bindings: Mapping[str, Any]) -> Self:
+        """Return an independent envelope validated after all values are applied."""
+        from quchip.utils.values import copy_value
+
+        unknown = set(bindings) - self.parameter_values().keys()
+        if unknown:
+            raise ValueError(f"Envelope {type(self).__name__!r} has no parameter fields {sorted(unknown)}")
+        candidate = copy_value(self)
+        for name, value in bindings.items():
+            setattr(candidate, name, copy_value(value))
+        candidate.validate()
+        return candidate
+
     @abstractmethod
     def value(self, local_time: Any) -> Any:
         """Return complex I/Q shape at time relative to the pulse start."""
         ...
+
+    def sampling_times(self) -> Any:
+        """Local feature samples for automatic grids; override for narrow shapes.
+
+        The default probes 65 evenly spaced points. Built-in envelopes refine
+        their characteristic widths. This guides sampling, not solver accuracy.
+        """
+        return qnp.linspace(0.0, self.duration, 65)
 
     def sample(self, local_time: Any, *, real: bool = False) -> Any:
         """Evaluate the shape on an array, optionally returning only I."""
@@ -190,6 +216,20 @@ def _gaussian_flat_top(t: Any, duration: Any, edge_duration: Any, sigmas: Any, a
     return qnp.asarray(out, dtype=complex)
 
 
+def _gaussian_sampling_times(duration: Any, sigmas: Any) -> Any:
+    sigma = duration / (2 * sigmas)
+    half_width = qnp.minimum(duration / 2, 6 * sigma)
+    return qnp.concatenate((qnp.asarray([0.0]),
+                            duration / 2 + qnp.linspace(-half_width, half_width, 65),
+                            qnp.asarray([duration])))
+
+
+def _gaussian_edge_sampling_times(duration: Any, edge_duration: Any, sigmas: Any) -> Any:
+    width = qnp.minimum(edge_duration, 6 * edge_duration / (2 * sigmas))
+    rising = qnp.linspace(edge_duration - width, edge_duration, 33)
+    return qnp.concatenate((qnp.asarray([0.0]), rising, duration - rising, qnp.asarray([duration])))
+
+
 class Gaussian(Envelope):
     r"""Centered Gaussian pulse.
 
@@ -214,6 +254,9 @@ class Gaussian(Envelope):
     duration: Scalar = parameter(positive=True, unit="ns")
     sigmas: Scalar = parameter(default=3, positive=True)
     amplitude: Scalar = parameter(default=1.0)
+
+    def sampling_times(self) -> Any:
+        return _gaussian_sampling_times(self.duration, self.sigmas)
 
     def value(self, t: Any) -> Any:
         """Evaluate the centered Gaussian envelope at time points *t*."""
@@ -241,6 +284,9 @@ class GaussianDRAG(Envelope):
     sigmas: Scalar = parameter(default=3, positive=True)
     amplitude: Scalar = parameter(default=1.0)
     beta: Scalar = parameter(default=0.0, unit="ns")
+
+    def sampling_times(self) -> Any:
+        return _gaussian_sampling_times(self.duration, self.sigmas)
 
     def value(self, t: Any) -> Any:
         center = self.duration / 2.0
@@ -294,6 +340,9 @@ class GaussianEdge(Envelope):
         if edge is not None and dur is not None and 2 * edge > dur:
             raise ValueError(f"2 * edge_duration ({2 * self.edge_duration}) exceeds duration ({self.duration})")
 
+    def sampling_times(self) -> Any:
+        return _gaussian_edge_sampling_times(self.duration, self.edge_duration, self.sigmas)
+
     def value(self, t: Any) -> Any:
         """Evaluate the flat-top Gaussian-edge envelope at time points *t*."""
         return _gaussian_flat_top(t, self.duration, self.edge_duration, self.sigmas, self.amplitude)
@@ -342,6 +391,9 @@ class SquareWithGaussianEdges(Envelope):
     def edge_duration(self) -> float:
         """Ramp duration in ns (``edge_frac * duration``)."""
         return self.edge_frac * self.duration
+
+    def sampling_times(self) -> Any:
+        return _gaussian_edge_sampling_times(self.duration, self.edge_duration, self.sigmas)
 
     def value(self, t: Any) -> Any:
         """Evaluate the fraction-parameterized Gaussian-edge envelope."""
@@ -403,6 +455,9 @@ class LinearRamp(Envelope):
         if ramp is not None and dur is not None and ramp > dur:
             raise ValueError(f"ramp_duration ({self.ramp_duration}) must be <= duration ({self.duration})")
 
+    def sampling_times(self) -> Any:
+        return qnp.concatenate((qnp.linspace(0.0, self.ramp_duration, 33), qnp.asarray([self.duration])))
+
     def value(self, t: Any) -> Any:
         """Evaluate the linear-ramp envelope at time points *t* (ns).
 
@@ -440,6 +495,9 @@ class Square(Envelope):
 
     duration: Scalar = parameter(positive=True, unit="ns")
     amplitude: Scalar = parameter(default=1.0)
+
+    def sampling_times(self) -> Any:
+        return qnp.asarray([0.0, self.duration])
 
     def value(self, t: Any) -> Any:
         """Evaluate the constant envelope at time points *t*."""

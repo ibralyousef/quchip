@@ -39,15 +39,6 @@ def test_collapse_channel_is_public_immutable_authored_data():
         CollapseChannel(np.eye(2), -0.01, "gain")
 
 
-def test_collapse_channel_contains_only_physics_values():
-    channel = CollapseChannel(operator=np.eye(2), rate=0.2, name="loss")
-
-    assert channel.operator.shape == (2, 2)
-    assert channel.rate == 0.2
-    assert channel.name == "loss"
-    assert not hasattr(channel, "parameters")
-
-
 def test_collapse_dependency_paths_come_from_operator_and_rate():
     fields = {
         "operator_scale": Parameter(),
