@@ -1,0 +1,20 @@
+{% extends "!page.html" %}
+
+{% block body %}
+{#- Keep the skip link first in tab order; the theme's own copy is hidden in CSS. -#}
+<a class="skip-to-content muted-link" href="#furo-main-content">{{ _("Skip to content") }}</a>
+<header class="docs-header">
+  <a class="docs-brand" href="{{ pathto(master_doc) }}" aria-label="quchip documentation home">
+    <img class="only-light" src="{{ pathto('_static/' + theme_light_logo, 1) }}" alt="quchip" width="114" height="32">
+    <img class="only-dark" src="{{ pathto('_static/' + theme_dark_logo, 1) }}" alt="quchip" width="114" height="32">
+    <span>docs <span class="docs-version">{{ version }}</span></span>
+  </a>
+  <nav class="docs-tabs" aria-label="Documentation sections">
+    {% for section in docs_sections %}
+    <a href="{{ pathto(section.doc) }}"{% if section.active %} class="active" aria-current="{{ 'page' if pagename == section.doc else 'location' }}"{% endif %}>{{ section.title }}</a>
+    {% endfor %}
+  </nav>
+  <a class="docs-repository" href="https://github.com/quchip/quchip">GitHub <span aria-hidden="true">↗</span></a>
+</header>
+{{ super() }}
+{% endblock %}

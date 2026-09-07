@@ -22,6 +22,7 @@ extensions = [
     "myst_parser",
     "sphinx_copybutton",
     "themed_images",
+    "section_navigation",
 ]
 
 templates_path = ["_templates"]
@@ -63,7 +64,7 @@ suppress_warnings = ["docutils", "ref.python", "myst.xref_missing", "ref.ref", "
 html_theme = "furo"
 html_title = f"quchip {version}"
 html_static_path = ["_static"]
-html_css_files = ["figures.css"]
+html_css_files = ["figures.css", "navigation.css"]
 html_favicon = "_static/favicon.png"
 # Colors come from the quchip identity system (see the wordmark assets):
 # ink #16181c / paper #fafbfc, #f2f4f6 / accent #c92f33 in light mode;
