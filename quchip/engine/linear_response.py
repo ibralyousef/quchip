@@ -81,6 +81,8 @@ def _build_linear_response_problem(
         raw_ports[port.label] = _port_coupling_vector(port, chip, mode_index, backend)
 
     compiled = network._compile()
+    if compiled.output_network is not None:
+        raise _UnsupportedLinearModel
     exposure_couplings = xp.stack(
         [
             sum(

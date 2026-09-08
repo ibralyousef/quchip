@@ -269,8 +269,8 @@ def test_delay_section_after_a_circulator_decorates_only_the_reached_legs() -> N
     assert rebound.external_channels[1].reference.outbound[0].duration == 2.5
 
 
-def test_reference_section_between_core_components_is_rejected() -> None:
-    """A delay must sit between an exposure and the Markov boundary, never inside the core."""
+def test_reference_section_and_downstream_loss_share_an_external_run() -> None:
+    """A delay followed by matched loss retains the exact external CW transmission."""
     resonator = Resonator(freq=6.0, levels=2, label="r")
     interior = PortNetwork(label="interior")
     inner_port = interior.port("chip_port", target=resonator, rate=0.04)
@@ -278,8 +278,10 @@ def test_reference_section_between_core_components_is_rejected() -> None:
     inner_cable = interior.delay("cable", duration=0.1)
     interior.link(inner_port, inner_cable, inner_loss)
     interior.expose("readout", at=inner_loss.side(2))
-    with pytest.raises(ValueError, match="Reference components"):
-        Chip([resonator], port_network=interior).resolve()
+    chip = Chip([resonator], port_network=interior)
+    from quchip import VNA
+    actual = VNA(chip).sweep([6.0]).s("readout", "readout")[0]
+    np.testing.assert_allclose(actual, -0.5*np.exp(4j*np.pi*6.0*0.1), atol=1e-10)
 
 
 def test_attenuator_is_a_reciprocal_two_sided_vacuum_dilation() -> None:

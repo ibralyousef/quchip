@@ -130,3 +130,15 @@ def test_qutip_output_analysis_is_not_capped_by_engine_dense_dimension() -> None
     result = vna.output_spectrum(port, frequencies=[0.0])
 
     np.testing.assert_allclose(result.total_fluctuation_spectrum, 0.0, atol=1e-10)
+
+
+def test_detuned_thermal_spectrum_uses_the_physical_upper_sideband() -> None:
+    """Thermal fluorescence peaks at the mode frequency relative to the chosen carrier."""
+    resonator = Resonator(freq=6.01, levels=12, label="r", T1=20.0, thermal_population=0.2)
+    port = Port(resonator, rate=0.03, label="p")
+    vna = VNA(Chip([resonator], port_network=PortNetwork.from_ports([port])))
+    vna.pump(port, freq=6.0, amplitude=0.0)
+    offsets = np.array([-0.01, 0.0, 0.01])
+    result = vna.output_spectrum(port, frequencies=offsets)
+    expected = 0.03*0.05*0.2 / ((0.08/2)**2 + (2*np.pi*(offsets-0.01))**2)
+    np.testing.assert_allclose(result.total_fluctuation_spectrum, expected, atol=1e-9)

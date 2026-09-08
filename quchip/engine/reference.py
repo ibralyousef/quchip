@@ -41,11 +41,13 @@ class ReferenceFilter:
     label: str
     transfer: Callable[..., Any]
     parameters: Mapping[str, Any]
+    loss_occupation: Any = None
+    noise_frequency: Any = None
 
     @property
     def tracked_values(self) -> tuple[Any, ...]:
         """Return the values that may carry JAX tracers."""
-        return tuple(self.parameters.values())
+        return (*self.parameters.values(), self.loss_occupation, self.noise_frequency)
 
     def __call__(self, frequency: Any) -> Any:
         """Evaluate the complex transfer at ``frequency`` in GHz.
@@ -104,7 +106,21 @@ class ReferenceAmplifier:
         return self.gain * self.added_noise + (self.gain - 1.0) / 2.0
 
 
-ReferenceElement = ReferenceDelay | ReferenceFilter | ReferenceAmplifier
+@dataclass(frozen=True)
+class ReferenceLoss:
+    """One directed traversal of a matched passive output-line component."""
+
+    label: str
+    eta: Any
+    occupation: Any = None
+
+    @property
+    def tracked_values(self) -> tuple[Any, ...]:
+        """Return numerical source and transmission parameters."""
+        return (self.eta, self.occupation)
+
+
+ReferenceElement = ReferenceDelay | ReferenceFilter | ReferenceAmplifier | ReferenceLoss
 
 
 @dataclass(frozen=True)
@@ -141,6 +157,8 @@ def cw_transfer(elements: tuple[ReferenceElement, ...], frequency: Any, xp: Any 
             )
         elif isinstance(element, ReferenceFilter):
             transfer = transfer * xp.asarray(element(frequency))
+        elif isinstance(element, ReferenceLoss):
+            transfer = transfer * xp.sqrt(xp.asarray(element.eta))
         else:
             transfer = transfer * xp.sqrt(xp.asarray(element.gain))
     return transfer
@@ -157,7 +175,7 @@ def carrier_transfer(elements: tuple[ReferenceElement, ...], carrier: Any, xp: A
     return cw_transfer(flat, carrier, xp)
 
 
-def noise_density(elements: tuple[ReferenceElement, ...], frequency: Any, xp: Any = None) -> Any:
+def noise_contributions(elements: tuple[ReferenceElement, ...], frequency: Any, xp: Any = None) -> dict[str, Any]:
     """Return the chain's output-referred normally ordered added noise density.
 
     At ``frequency`` in GHz, walk ``elements`` in propagation order. A filter
@@ -165,13 +183,27 @@ def noise_density(elements: tuple[ReferenceElement, ...], frequency: Any, xp: An
     ``N <- G N + G n_add + (G - 1) / 2``.
     """
     xp = _array_module(elements, frequency, xp)
-    density = xp.zeros_like(xp.asarray(frequency, dtype=float))
+    contributions: dict[str, Any] = {}
     for element in elements:
-        if isinstance(element, ReferenceFilter):
-            density = density * xp.abs(xp.asarray(element(frequency))) ** 2
-        elif isinstance(element, ReferenceAmplifier):
-            density = element.gain * density + element.added_noise_density
-    return density
+        if isinstance(element, ReferenceDelay):
+            continue
+        if isinstance(element, ReferenceAmplifier):
+            gain, added = element.gain, element.added_noise_density
+        else:
+            gain = (xp.abs(xp.asarray(element(frequency))) ** 2 if isinstance(element, ReferenceFilter)
+                    else element.eta)
+            occupation = element.loss_occupation if isinstance(element, ReferenceFilter) else element.occupation
+            added = (1 - gain) * (0.0 if occupation is None else occupation)
+        contributions = {label: gain * value for label, value in contributions.items()}
+        contributions[element.label] = xp.zeros_like(xp.asarray(frequency, dtype=float)) + added
+    return contributions
+
+
+def noise_density(elements: tuple[ReferenceElement, ...], frequency: Any, xp: Any = None) -> Any:
+    """Return total normally ordered added noise from the source-wise propagation."""
+    xp = _array_module(elements, frequency, xp)
+    return sum(noise_contributions(elements, frequency, xp).values(),
+               xp.zeros_like(xp.asarray(frequency, dtype=float)))
 
 
 def has_filter(elements: tuple[ReferenceElement, ...]) -> bool:
