@@ -758,6 +758,18 @@ nonlinear or active terms, fixed pump configurations, branched output graphs,
 and explicit solver options retain the operator-space acquisition. Passing
 `options={}` requests that general route for cross-checks.
 
+Measurements also capture internal Fock-mode observables. `mode_amplitude(r)`
+returns `<a_r>` in the stationary frame reported by `mode_frequency(r)`;
+`photon_number(r)` returns `<a_r† a_r>`. Both follow the measurement sweep
+axes and retain the full declared input wiring. The compact backend solves
+`A N + N A† + B diag(n) B† = 0` for the centered normal covariance
+`N_ij = <delta a_j† delta a_i>` and adds its diagonal to the coherent
+occupation `|<a_r>|²`. This covariance is independent of the output spectral
+grid. The general path evaluates the authored `a` and `n` operators in the
+resolved basis against the solved reduced density matrix, retaining nonlinear
+and active physics and the declared truncation. These queries use captured
+arrays; receiver processing does not change internal occupation.
+
 An attenuator, isolator load, or `network.termination()` can declare
 `occupation=n` or `temperature=T, noise_frequency=f`. Temperature is mK and
 `f` is a positive physical frequency in GHz. The Markov occupation is evaluated

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -11,6 +11,7 @@ from quchip.analysis.field_statistics import (
     block_diagonal, complex_covariance, field_transfer, proper_spectrum, quadrature_spectrum, quadrature_transfer,
 )
 from quchip.engine.ir import LinearResponseProblem
+from quchip.devices.spaces import FockSpace
 from quchip.engine.linear_response import try_build_linear_response_problem
 from quchip.engine.output_network import pad_mixing
 from quchip.engine.reference import (
@@ -20,6 +21,34 @@ from quchip.results.measurement import MeasurementResult
 from quchip.sweep import Sweep, ZippedSweep, _iter_axis_points
 from quchip.utils.jax_utils import contains_tracer
 from quchip.utils.labeling import resolve_label
+
+
+@dataclass(frozen=True)
+class _Acquisition:
+    mean: Any
+    components: dict[str, tuple[Any, Any]]
+    delays: Any
+    diagnostics: Any
+    mode_amplitudes: Any
+    photon_numbers: Any
+    mode_frequencies: Any
+
+
+def capture_modes(chip: Any, operating: Any, modes: tuple[str, ...]) -> tuple[Any, Any, Any]:
+    """Read authored Fock-mode observables in the solved stationary frames."""
+    from quchip.chip.observables import prepare_local_op
+
+    backend = chip.backend
+    xp = backend.array_module
+    amplitudes, numbers, frequencies = [], [], []
+    for label in modes:
+        device = chip.device_map[label]
+        basis = operating.engine.bases[label]
+        state = operating.state.reduced_state(label)
+        amplitudes.append(backend.expect(prepare_local_op(device, "a", basis, backend), state))
+        numbers.append(xp.real(backend.expect(prepare_local_op(device, "n", basis, backend), state)))
+        frequencies.append(operating.engine.resolved_frame.frequencies[label])
+    return xp.asarray(amplitudes), xp.asarray(numbers), xp.asarray(frequencies)
 
 
 def capture_noise(operating: Any, backend: Any, labels: tuple[str, ...], frequency: Any, offsets: Any) -> Any:
@@ -122,7 +151,7 @@ def propagate_noise(
 def capture_linear(
     problem: LinearResponseProblem, backend: Any, labels: tuple[str, ...], input_label: str,
     frequency: Any, amplitude: Any, offsets: Any,
-) -> tuple[Any, dict[str, tuple[Any, Any]], Any, dict[str, Any]]:
+) -> _Acquisition:
     """Acquire harmonic means and normal spectra without a Fock-space truncation."""
     xp = backend.array_module
     count = problem.scattering.shape[0]
@@ -145,8 +174,12 @@ def capture_linear(
     excess = proper_spectrum(normal-background, normal[::-1]-background, xp)
     components, delays = propagate_noise(problem.field_channels, problem.scattering, None, excess,
                                          labels, frequency, offsets, xp)
-    return mean, components, delays, {"solver": "linear_response", "mode_count": len(problem.mode_labels),
-                                       "residual": xp.max(solved.residuals)}
+    mode_amplitudes = solved.mode_amplitudes[len(offsets)//2, :, probe] * incoming * amplitude
+    numbers = xp.abs(mode_amplitudes)**2 + xp.real(xp.diag(solved.mode_covariance))
+    return _Acquisition(mean, components, delays,
+                        {"solver": "linear_response", "mode_count": len(problem.mode_labels),
+                         "residual": xp.max(solved.residuals)},
+                        mode_amplitudes, numbers, xp.full((len(problem.mode_labels),), frequency))
 
 
 def measure(
@@ -192,7 +225,9 @@ def measure(
             or not np.allclose(offsets, -offsets[::-1], atol=0, rtol=1e-12)):
         raise ValueError("noise_frequencies must be finite, increasing, symmetric offsets including zero (GHz).")
     xp = vna.chip.backend.array_module
+    modes = tuple(device.label for device in vna.chip.devices if isinstance(device.local_space(), FockSpace))
     captured, means, incident, diagnostics, delays, parameters = [], [], [], [], [], []
+    mode_amplitudes, photon_numbers, mode_frequencies = [], [], []
     points: list[Any] = []
     for _, params in variation_points:
         chip = vna._chip_at(params)
@@ -215,15 +250,20 @@ def measure(
             operating = _operating_point(chip, tones, frequency, (), options)
             mean = _plane_means(operating.engine, operating.state.state, chip.backend, labels, tones, frequency)
             components, output_delays = capture_noise(operating, chip.backend, labels, frequency, xp.asarray(offsets))
-            diagnostic = operating.diagnostics
+            amplitudes_at_point, numbers_at_point, frames_at_point = capture_modes(chip, operating, modes)
+            acquired = _Acquisition(mean, components, output_delays, operating.diagnostics,
+                                    amplitudes_at_point, numbers_at_point, frames_at_point)
         else:
-            mean, components, output_delays, diagnostic = capture_linear(
+            acquired = capture_linear(
                 linear, chip.backend, labels, input_label, frequency, amplitude, xp.asarray(offsets))
-        means.append(mean)
-        captured.append(components)
-        delays.append(output_delays)
+        means.append(acquired.mean)
+        captured.append(acquired.components)
+        delays.append(acquired.delays)
+        mode_amplitudes.append(acquired.mode_amplitudes)
+        photon_numbers.append(acquired.photon_numbers)
+        mode_frequencies.append(acquired.mode_frequencies)
         incident.append(xp.asarray(amplitude))
-        diagnostics.append(diagnostic)
+        diagnostics.append(acquired.diagnostics)
     size = 2 * len(labels)
     names = tuple(captured[0])
     if any(tuple(point) != names for point in captured):
@@ -240,4 +280,7 @@ def measure(
         diagnostics=tuple(diagnostics), values=xp.stack(means).reshape((*shape, len(labels))),
         incident=xp.stack(incident).reshape(shape), noise_frequencies=offsets, noise_components=components,
         output_delays=xp.stack(delays).reshape((*shape, len(labels))), parameters=tuple(parameters),
+        modes=modes, mode_amplitudes=xp.stack(mode_amplitudes).reshape((*shape, len(modes))),
+        photon_numbers=xp.stack(photon_numbers).reshape((*shape, len(modes))),
+        mode_frequencies=xp.stack(mode_frequencies).reshape((*shape, len(modes))),
     )

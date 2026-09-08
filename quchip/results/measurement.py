@@ -181,6 +181,10 @@ class MeasurementResult(MeanFieldResponseResult):
     noise_components: Mapping[str, tuple[Any, Any]]
     output_delays: Any
     parameters: tuple[Mapping[str, Any], ...]
+    modes: tuple[str, ...]
+    mode_amplitudes: Any
+    photon_numbers: Any
+    mode_frequencies: Any
     conventions: tuple[str, ...] = (
         "b=I+iQ; frequencies in GHz; time in ns",
         "Physical normal-order spectra; detector vacuum added by the receiver",
@@ -190,13 +194,42 @@ class MeasurementResult(MeanFieldResponseResult):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        for name in ("values", "incident", "noise_frequencies", "frequencies", "amplitudes", "output_delays"):
+        for name in ("values", "incident", "noise_frequencies", "frequencies", "amplitudes", "output_delays",
+                     "mode_amplitudes", "photon_numbers", "mode_frequencies"):
             object.__setattr__(self, name, _capture(getattr(self, name)))
         object.__setattr__(self, "axes", tuple((name, _capture(value)) for name, value in self.axes))
         object.__setattr__(self, "parameters", tuple(MappingProxyType(
             {name: _capture(value) for name, value in point.items()}) for point in self.parameters))
         object.__setattr__(self, "noise_components", MappingProxyType({
             name: (_capture(white), _capture(excess)) for name, (white, excess) in self.noise_components.items()}))
+
+    def _mode_index(self, mode: Any) -> int:
+        label = resolve_label(mode)
+        if label not in self.modes:
+            raise KeyError(f"Unknown Fock mode {label!r}; available: {list(self.modes)}")
+        return self.modes.index(label)
+
+    def mode_amplitude(self, mode: Any) -> Any:
+        """Return captured <a> in the mode's stationary frame, in sqrt(photons).
+
+        Use ``mode_frequency(mode)`` for that frame's frequency in GHz.
+        This is the internal field with the full declared wiring included.
+        The returned array follows the measurement's sweep axes.
+        """
+        return self.mode_amplitudes[..., self._mode_index(mode)]
+
+    def photon_number(self, mode: Any) -> Any:
+        """Return captured <a†a>, including coherent and incoherent occupation.
+
+        Available for authored Fock modes, including nonlinear modes. The
+        general solver retains the declared basis projection and truncation.
+        Receiver integration and calibration do not change this occupation.
+        """
+        return self.photon_numbers[..., self._mode_index(mode)]
+
+    def mode_frequency(self, mode: Any) -> Any:
+        """Return the captured stationary frame frequency of a mode in GHz."""
+        return self.mode_frequencies[..., self._mode_index(mode)]
 
     def noise_contributions(self, output: Any) -> Mapping[str, Any]:
         """Return physical IQ spectral contributions at the captured offsets."""

@@ -325,6 +325,8 @@ class VNA:
         down to 1 Hz. Choose a grid covering the model's noise features.
         Returned data supports receiver integration and Gaussian sampling
         without another solve; it is not a quantum-trajectory distribution.
+        Internal Fock-mode amplitudes and occupations are captured as well;
+        query them with mode_amplitude(device) and photon_number(device).
         """
         from quchip.analysis.measurement import measure
         return measure(self, frequencies, amplitudes, variations, input=input, outputs=outputs,

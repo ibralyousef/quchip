@@ -130,6 +130,36 @@ def test_squeezed_output_retains_anomalous_quadrature_noise() -> None:
     # Heterodyne adds a half per quadrature to normal-order excess.
     expected = np.diag([(ratio**2 + 1)/4, (ratio**-2 + 1)/4])
     np.testing.assert_allclose(physical + np.eye(2)/2, expected, atol=2e-7)
+    np.testing.assert_allclose(measured.mode_amplitude(mode), 0., atol=1e-12)
+    np.testing.assert_allclose(measured.photon_number(mode),
+                               2*.005**2/(.04**2-4*.005**2), atol=2e-8)
+
+
+@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
+def test_internal_moments_retain_projected_authored_operators(backend):
+    """Mode capture matches stationary observables after a nontrivial basis projection."""
+    from quchip import DeviceModel, parameter
+    if backend == "dynamiqs":
+        pytest.importorskip("dynamiqs")
+    class DisplacedMode(DeviceModel):
+        freq: float = parameter(default=.06)
+        force: float = parameter(default=.01)
+        approximation = None
+        def local_hamiltonian(self, op, p):
+            return p.freq*op.n + p.force*(op.a + op.adag)
+    mode = DisplacedMode(levels=6, label="r")
+    mode.basis = "eigen"
+    mode.projection_levels = 3
+    net = PortNetwork()
+    port = net.port("p", target=mode, rate=.04)
+    chip = Chip([mode], port_network=net, frame="lab", backend=backend)
+    state = chip.steadystate(e_ops={mode: ["a", "n"]})
+    measured = VNA(chip).measure(0., 0., input=port, outputs=[port],
+                                noise_frequencies=[-.04, -.004, 0., .004, .04])
+    np.testing.assert_allclose(measured.mode_amplitude(mode), state.expect(mode, index=0), atol=1e-12)
+    np.testing.assert_allclose(measured.photon_number(mode), state.expect(mode, index=1).real, atol=1e-12)
+    assert measured.photon_number(mode) > .02
+    assert measured.mode_frequency(mode) == 0.
 
 
 def split_thermal(*, delay=0.0, backend="qutip"):
