@@ -287,12 +287,12 @@ attenuation. `measure()` calculates the mean and noise spectra for this drive.
 ```python
 measurement = vna.measure(frequencies, amplitudes=20, input=drive, outputs=[readout])
 short = measurement.sample(1, receiver=IQReceiver(integration_time=1_000_000), seed=19)
-long = measurement.sample(1, receiver=IQReceiver(integration_time=10_000_000), seed=19)
+long = measurement.sample(1, receiver=IQReceiver(integration_time=100_000_000), seed=19)
 np.testing.assert_allclose(measurement.ratio(readout), ideal, atol=1e-10)
 ```
 
 The two samples use the same physical calculation. Increasing the integration
-time from 1 ms to 10 ms reduces the noise variance by about a factor of ten.
+time from 1 ms to 100 ms reduces the noise variance by about a factor of 100.
 The common random seed makes that change visible point by point.
 
 <details>
@@ -302,7 +302,7 @@ The common random seed makes that change visible point by point.
 fig, axes = plt.subplots(2, 2, figsize=(7.2, 4.6), sharex=True, sharey="row", layout="constrained")
 fig.get_layout_engine().set(h_pad=0.02, w_pad=0.02)
 ideal_phase = np.unwrap(np.angle(ideal))
-for column, (samples, title) in enumerate(zip((short, long), ("1 ms integration", "10 ms integration"))):
+for column, (samples, title) in enumerate(zip((short, long), ("1 ms integration", "100 ms integration"))):
     observed = samples.ratio(readout)[0]
     axes[0, column].plot(frequencies, 20 * np.log10(np.abs(observed)), ".", color="#C92F33", ms=2.6, alpha=0.7,
                          label="sampled IQ")
@@ -323,7 +323,7 @@ plt.close(fig)
 </details>
 
 ```{figure} ../images/fridge_measurement.svg
-:alt: Magnitude and phase of all three resonances, comparing the ideal mean with sampled IQ at 1 ms and 10 ms integration.
+:alt: Magnitude and phase of all three resonances, comparing the ideal mean with sampled IQ at 1 ms and 100 ms integration.
 
 Solid lines show the stationary mean; red points are sampled IQ. The phase is
 shown on the mean's unwrapped branch. Longer integration reduces the scatter
@@ -353,7 +353,7 @@ Output:
 ```text
 RESULT receiver_noise_dBm_per_Hz=-132.467086
 RESULT short_complex_ratio_rmse=0.175733
-RESULT long_complex_ratio_rmse=0.055572
+RESULT long_complex_ratio_rmse=0.017573
 ```
 
 <details>
