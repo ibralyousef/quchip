@@ -235,7 +235,7 @@ appears in S21.
 ```python
 frequencies = np.linspace(6.34, 6.66, 401)
 vna = VNA(readout_chip, ports=[drive, readout])
-ideal = vna.sweep(frequencies).s(readout, drive)
+steady_state = vna.sweep(frequencies).s(readout, drive)
 ```
 
 <details>
@@ -245,8 +245,8 @@ ideal = vna.sweep(frequencies).s(readout, drive)
 fig, magnitude_axis = plt.subplots(figsize=(6.4, 3.2), layout="constrained")
 phase_axis = magnitude_axis.twinx()
 phase_axis.grid(False)
-magnitude_axis.plot(frequencies, 20 * np.log10(np.abs(ideal)), color="#C92F33")
-phase_axis.plot(frequencies, np.unwrap(np.angle(ideal)) * 180 / np.pi, color="#246FA8", ls="--")
+magnitude_axis.plot(frequencies, 20 * np.log10(np.abs(steady_state)), color="#C92F33")
+phase_axis.plot(frequencies, np.unwrap(np.angle(steady_state)) * 180 / np.pi, color="#246FA8", ls="--")
 magnitude_axis.set(xlabel="Probe frequency (GHz)", ylabel=r"$|S_{21}|$ (dB)",
                    xlim=(frequencies[0], frequencies[-1]))
 phase_axis.set(ylabel=r"Phase of $S_{21}$ (degrees)", yticks=[0, 180, 360, 540, 720, 900, 1080])
@@ -273,8 +273,8 @@ the 60 dB input attenuation; isolator and cable loss give an approximately
 [PDF](../images/fridge_s21.pdf)
 ```
 
-`ideal` includes the bus, resonators, losses, filters, and amplifier gain.
-It is the stationary mean response of the whole setup. Added amplifier noise
+`steady_state` includes the bus, resonators, losses, filters, and amplifier gain.
+It is the steady-state response of the whole setup. Added amplifier noise
 raises the fluctuation level without changing this curve.
 
 ## Sample a VNA trace
@@ -288,7 +288,7 @@ attenuation. `measure()` calculates the mean and noise spectra for this drive.
 measurement = vna.measure(frequencies, amplitudes=20, input=drive, outputs=[readout])
 short = measurement.sample(1, receiver=IQReceiver(integration_time=1_000_000), seed=19)
 long = measurement.sample(1, receiver=IQReceiver(integration_time=100_000_000), seed=19)
-np.testing.assert_allclose(measurement.ratio(readout), ideal, atol=1e-10)
+np.testing.assert_allclose(measurement.ratio(readout), steady_state, atol=1e-10)
 ```
 
 The two samples use the same physical calculation. Increasing the integration
@@ -301,15 +301,15 @@ The common random seed makes that change visible point by point.
 ```python
 fig, axes = plt.subplots(2, 2, figsize=(7.2, 4.6), sharex=True, sharey="row", layout="constrained")
 fig.get_layout_engine().set(h_pad=0.02, w_pad=0.02)
-ideal_phase = np.unwrap(np.angle(ideal))
+steady_state_phase = np.unwrap(np.angle(steady_state))
 for column, (samples, title) in enumerate(zip((short, long), ("1 ms integration", "100 ms integration"))):
     observed = samples.ratio(readout)[0]
     axes[0, column].plot(frequencies, 20 * np.log10(np.abs(observed)), ".", color="#C92F33", ms=2.6, alpha=0.7,
                          label="sampled IQ")
-    axes[0, column].plot(frequencies, 20 * np.log10(np.abs(ideal)), color="#16181C", lw=1.2, label="ideal mean")
-    axes[1, column].plot(frequencies, (ideal_phase + np.angle(observed / ideal)) * 180 / np.pi, ".",
+    axes[0, column].plot(frequencies, 20 * np.log10(np.abs(steady_state)), color="#16181C", lw=1.2, label="steady state")
+    axes[1, column].plot(frequencies, (steady_state_phase + np.angle(observed / steady_state)) * 180 / np.pi, ".",
                          color="#C92F33", ms=2.6, alpha=0.7)
-    axes[1, column].plot(frequencies, ideal_phase * 180 / np.pi, color="#16181C", lw=1.2)
+    axes[1, column].plot(frequencies, steady_state_phase * 180 / np.pi, color="#16181C", lw=1.2)
     axes[0, column].set_title(title)
     axes[1, column].set_xlabel("Probe frequency (GHz)")
 axes[0, 0].set_ylabel("Output / input (dB)")
@@ -323,10 +323,10 @@ plt.close(fig)
 </details>
 
 ```{figure} ../images/fridge_measurement.svg
-:alt: Magnitude and phase of all three resonances, comparing the ideal mean with sampled IQ at 1 ms and 100 ms integration.
+:alt: Magnitude and phase of all three resonances, comparing the steady state with sampled IQ at 1 ms and 100 ms integration.
 
-Solid lines show the stationary mean; red points are sampled IQ. The phase is
-shown on the mean's unwrapped branch. Longer integration reduces the scatter
+Solid lines show the steady state; red points are sampled IQ. The phase is
+shown on the steady-state curve's unwrapped branch. Longer integration reduces the scatter
 in both magnitude and phase. [PDF](../images/fridge_measurement.pdf)
 ```
 
@@ -341,8 +341,8 @@ budget = statistics.noise_contributions(readout)
 np.testing.assert_allclose(sum(budget.values()), statistics.covariance(readout), atol=1e-12)
 noise_dbm_hz = measurement.noise_spectrum(readout, unit="dBm/Hz")
 carrier_noise = noise_dbm_hz[..., len(measurement.noise_frequencies) // 2]
-short_error = np.sqrt(np.mean(np.abs(short.ratio(readout)[0] - ideal)**2))
-long_error = np.sqrt(np.mean(np.abs(long.ratio(readout)[0] - ideal)**2))
+short_error = np.sqrt(np.mean(np.abs(short.ratio(readout)[0] - steady_state)**2))
+long_error = np.sqrt(np.mean(np.abs(long.ratio(readout)[0] - steady_state)**2))
 print(f"RESULT receiver_noise_dBm_per_Hz={np.mean(carrier_noise):.6f}")
 print(f"RESULT short_complex_ratio_rmse={short_error:.6f}")
 print(f"RESULT long_complex_ratio_rmse={long_error:.6f}")
