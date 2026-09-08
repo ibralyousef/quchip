@@ -356,6 +356,43 @@ RESULT short_complex_ratio_rmse=0.175733
 RESULT long_complex_ratio_rmse=0.017573
 ```
 
+The same calculation gives the field and mean photon number inside each
+resonator. These include the input attenuation, filters, coupling through the
+bus, and thermal noise reaching the chip. They are independent of receiver
+integration time.
+
+```python
+r2 = resonators[1]
+alpha = measurement.mode_amplitude(r2)
+photons = measurement.photon_number(r2)
+incoherent = photons - np.abs(alpha)**2
+```
+
+For this passive harmonic model, the coherent field scales with source
+amplitude while the incoherent occupation stays fixed. At each frequency,
+the source amplitude for one stored photon on average is therefore:
+
+```python
+single_photon_amplitude = 20 * np.sqrt((1 - incoherent) / np.abs(alpha)**2)
+peak = np.argmax(np.abs(alpha)**2)
+one_photon = vna.measure(frequencies[peak], single_photon_amplitude[peak],
+                        input=drive, outputs=[readout])
+np.testing.assert_allclose(one_photon.photon_number(r2), 1.0, atol=1e-10)
+print(f"RESULT r2_single_photon_amplitude={single_photon_amplitude[peak]:.2f}")
+```
+
+Output:
+
+```text
+RESULT r2_single_photon_amplitude=144.04
+```
+
+The amplitude is in `sqrt(photons/ns)` at the source. Each frequency gives a
+separate drive setting. This rescaling requires a nonzero coherent response
+and an incoherent occupation below one; nonlinear modes require solving at
+the new drive amplitude. `photon_number()` still reports their full mean
+occupation from the density-matrix calculation.
+
 <details>
 <summary>Noise units and model limits</summary>
 

@@ -33,6 +33,9 @@ def test_compact_capture_matches_density_matrix_with_thermal_input_and_upstream_
     general = vna.measure([5.997, 6., 6.003], .002, input=drive, outputs=[readout],
                           noise_frequencies=offsets, options={})
     np.testing.assert_allclose(compact.values, general.values, atol=1e-8)
+    np.testing.assert_allclose(compact.mode_amplitude("r"), general.mode_amplitude("r"), atol=1e-8)
+    np.testing.assert_allclose(compact.photon_number("r"), general.photon_number("r"), atol=1e-8)
+    np.testing.assert_allclose(compact.mode_frequency("r"), general.mode_frequency("r"), atol=1e-12)
     assert compact.noise_components.keys() == general.noise_components.keys()
     for source in compact.noise_components:
         np.testing.assert_allclose(compact.noise_components[source][0], general.noise_components[source][0], atol=1e-8)
@@ -166,3 +169,70 @@ def test_linear_measurement_datasheet_noise_gradient():
     gradient = jax.jit(jax.grad(variance))(2000.)
     expected = 100*1.380649e-26/(6.62607015e-34*6e9)/(2e6)
     np.testing.assert_allclose(gradient, expected, rtol=1e-9)
+
+
+def test_internal_occupation_includes_filtered_drive_and_thermal_bath(monkeypatch):
+    """Captured mode moments obey the cavity susceptibility and thermal balance."""
+    chip, drive, readout = thermal_fridge()
+    mode = chip.devices[0]
+    frequencies = np.array([5.99, 6., 6.01])
+    amplitudes = np.array([0., .002, .01j])
+    result = VNA(chip).measure(frequencies, amplitudes, input=drive, outputs=[readout],
+                               noise_frequencies=[-.04, -.004, 0., .004, .04])
+    kappa = .04 + 2*np.pi*6/10_000
+    field = -np.sqrt(.04*.1)*amplitudes[:, None]/(
+        (1-1j*(frequencies-6)/.1)*(kappa/2+2j*np.pi*(6-frequencies)))
+    thermal = .04*.9*.02/kappa
+    np.testing.assert_allclose(result.mode_amplitude(mode), field, atol=1e-12)
+    np.testing.assert_allclose(result.photon_number(mode), abs(field)**2+thermal, atol=1e-12)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Captured observable invoked a physical solve")
+    monkeypatch.setattr(chip.backend, "linear_response", forbidden)
+    monkeypatch.setattr(chip.backend, "steadystate", forbidden)
+    mode.freq = 8.
+    np.testing.assert_allclose(result.photon_number("r"), abs(field)**2+thermal, atol=1e-12)
+    np.testing.assert_allclose(result.mode_frequency("r"), np.broadcast_to(frequencies, (3, 3)))
+    for values in (result.mode_amplitudes, result.photon_numbers, result.mode_frequencies):
+        with pytest.raises(ValueError):
+            values[0, 0, 0] = 1
+    with pytest.raises(KeyError, match="Unknown Fock mode"):
+        result.photon_number("missing")
+
+
+def test_coupled_modes_share_thermal_noise_and_match_general_solver():
+    """Thermal correlations through a bus give the same occupations in both solvers."""
+    bus = Resonator(freq=6., levels=5, label="bus")
+    r = Resonator(freq=6.01, levels=5, internal_quality_factor=6000, label="r")
+    net = PortNetwork()
+    port = net.port("p", target=bus, rate=.04)
+    att = net.attenuator("att", loss_db=10., occupation=.01)
+    net.link(att, port)
+    drive = net.expose("drive", at=att.side(1))
+    chip = Chip([bus, r], [Capacitive(bus, r, g=.005)], port_network=net, approximation=RWA())
+    results = [VNA(chip).measure(6.005, .003, input=drive, outputs=[drive],
+                                noise_frequencies=[-.04, -.004, 0., .004, .04], options=options)
+               for options in (None, {})]
+    # Five levels leave O(n^5) thermal tails at n < .01.
+    for mode in (bus, r):
+        np.testing.assert_allclose(results[0].photon_number(mode), results[1].photon_number(mode), atol=2e-8)
+        np.testing.assert_allclose(results[0].mode_amplitude(mode), results[1].mode_amplitude(mode), atol=2e-8)
+        assert results[0].photon_number(mode) > abs(results[0].mode_amplitude(mode))**2
+
+
+@pytest.mark.optional_backend
+def test_internal_photon_number_jit_gradients_follow_drive_and_thermal_balance():
+    """JAX mode occupations differentiate through drive, loss, and bath diffusion."""
+    jax = pytest.importorskip("jax")
+    pytest.importorskip("dynamiqs")
+    chip, drive, readout = thermal_fridge(backend="dynamiqs")
+    def occupation(amplitude, bath):
+        changed = chip.with_params({"network.component.att.occupation": bath})
+        result = VNA(changed).measure(6., amplitude, input=drive, outputs=[readout],
+                                     noise_frequencies=[-.04, -.004, 0., .004, .04])
+        return result.photon_number("r")
+    value, gradients = jax.jit(jax.value_and_grad(occupation, argnums=(0, 1)))(.002, .02)
+    kappa = .04 + 2*np.pi*6/10_000
+    expected = .04*.1*.002**2/(kappa/2)**2 + .04*.9*.02/kappa
+    np.testing.assert_allclose(value, expected, rtol=1e-10)
+    np.testing.assert_allclose(gradients, [2*.04*.1*.002/(kappa/2)**2, .04*.9/kappa], rtol=1e-10)
