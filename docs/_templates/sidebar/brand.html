@@ -1,0 +1,7 @@
+<div class="docs-sidebar-heading">
+  {% if docs_section_root %}
+  <a href="{{ pathto(docs_section_root) }}"{% if pagename == docs_section_root %} aria-current="page"{% endif %}>{{ docs_section }}</a>
+  {% else %}
+  <span>{{ docs_section }}</span>
+  {% endif %}
+</div>
