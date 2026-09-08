@@ -140,7 +140,7 @@ def test_active_patch_stops_gracefully_on_an_unsupported_device_elimination():
     """active_patch downgrades a declined device elimination to a note and keeps that spectator on the patch chip."""
     # Joint elimination of a nonlinear accessible boundary is unsupported.
     # Keep that spectator and report why the reduction stopped.
-    q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0", thermal_population=0.02)
+    q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0", thermal_occupation=0.02)
     spec = DuffingTransmon(freq=5.4, anharmonicity=-0.25, levels=3, label="spec", T1=20_000.0)
     network = PortNetwork()
     network.port("probe", target=spec, rate=.01)

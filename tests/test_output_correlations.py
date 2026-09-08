@@ -74,7 +74,7 @@ def test_thermal_output_has_g2_zero_near_two() -> None:
         levels=14,
         label="r",
         T1=20.0,
-        thermal_population=0.2,
+        thermal_occupation=0.2,
     )
     port = Port(resonator, rate=0.03, label="p")
     vna = VNA(
@@ -97,7 +97,7 @@ def test_qutip_and_dynamiqs_stationary_output_analysis_agree() -> None:
             levels=6,
             label="r",
             T1=20.0,
-            thermal_population=0.15,
+            thermal_occupation=0.15,
         )
         port = Port(resonator, rate=0.03, label="p")
         vna = VNA(
@@ -134,7 +134,7 @@ def test_qutip_output_analysis_is_not_capped_by_engine_dense_dimension() -> None
 
 def test_detuned_thermal_spectrum_uses_the_physical_upper_sideband() -> None:
     """Thermal fluorescence peaks at the mode frequency relative to the chosen carrier."""
-    resonator = Resonator(freq=6.01, levels=12, label="r", T1=20.0, thermal_population=0.2)
+    resonator = Resonator(freq=6.01, levels=12, label="r", T1=20.0, thermal_occupation=0.2)
     port = Port(resonator, rate=0.03, label="p")
     vna = VNA(Chip([resonator], port_network=PortNetwork.from_ports([port])))
     vna.pump(port, freq=6.0, amplitude=0.0)

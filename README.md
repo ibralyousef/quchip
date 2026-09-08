@@ -125,14 +125,19 @@ The [dynamics guide](https://docs.quchip.org/guides/dynamics-pulses-and-readout)
 
 ## Guides
 
-- [Define and inspect a chip](https://docs.quchip.org/guides/defining-and-inspecting-a-chip): build a model, inspect its Hamiltonian, and see how frames and approximations change it.
-- [Statics and parameter studies](https://docs.quchip.org/guides/statics-and-parameter-studies): read dressed observables, sweep parameters, and follow states through an avoided crossing.
-- [Dynamics, pulses, observables, and readout](https://docs.quchip.org/guides/dynamics-pulses-and-readout): build pulse schedules, batch experiments, inspect states, and simulate resonator readout.
-- [Chip transformations](https://docs.quchip.org/guides/chip-transformations): rebind, serialize, partition, eliminate, fit, and replay reduced models.
-- [Differentiability](https://docs.quchip.org/guides/differentiability): differentiate static and dynamic losses, fit a published fluxonium spectrum, and combine experiments that share parameters.
-- [Extension guide](https://docs.quchip.org/extensions): define new devices, couplings, drives, envelopes, dissipation, local spaces, and interoperability mappings.
-- [Cookbook](https://docs.quchip.org/cookbook): the conventions used throughout quchip's examples.
-- [From the SQA 2026 talk](https://docs.quchip.org/guides/from-sqa-2026): short, runnable entry points into the main topics.
+- [Your first chip](https://docs.quchip.org/guides/defining-and-inspecting-a-chip): build a coupled model, inspect its Hamiltonian, and fit dressed targets.
+- [Spectra and parameter sweeps](https://docs.quchip.org/guides/statics-and-parameter-studies): follow an avoided crossing and compare a fluxonium model with measured spectroscopy.
+- [Pulses, leakage, and readout](https://docs.quchip.org/guides/dynamics-pulses-and-readout): compare pulse selectivity, conditional resonator response, and cavity depletion.
+- [Readout and fridge wiring](https://docs.quchip.org/guides/steady-state-and-vna): calculate VNA traces and qubit readout with receiver noise.
+- [Model reduction](https://docs.quchip.org/guides/chip-transformations): compare a reduced model with the full pulse simulation.
+- [Gradients and parameter fitting](https://docs.quchip.org/guides/differentiability): differentiate spectra and pulse responses, and fit measured circuit parameters.
+- [Extending quchip](https://docs.quchip.org/extensions): define custom models, controls, dissipation and interoperability mappings.
+- [Cookbook](https://docs.quchip.org/cookbook): practical API choices, tips and common pitfalls.
+- [SQA 2026 examples](https://docs.quchip.org/guides/from-sqa-2026): five short calculations from the talk.
+
+## Focused studies
+
+- [Purcell filtering and T1](https://docs.quchip.org/guides/slh-networks): how much can a Purcell filter suppress qubit decay while preserving readout bandwidth?
 
 ## Project status and contributing
 

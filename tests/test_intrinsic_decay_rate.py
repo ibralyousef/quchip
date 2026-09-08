@@ -35,24 +35,24 @@ def test_resonator_intrinsic_decay_rate_is_none_without_q_or_t1():
     assert r.intrinsic_decay_rate() is None
 
 
-def test_base_device_intrinsic_decay_rate_with_t1_and_thermal_population():
-    """T1 plus a nonzero thermal_population boosts the downward rate to (n_bar+1)/T1."""
+def test_base_device_intrinsic_decay_rate_with_t1_and_thermal_occupation():
+    """T1 plus a nonzero thermal_occupation boosts the downward rate to (n_bar+1)/T1."""
     q = DuffingTransmon(
-        freq=5.0, anharmonicity=-0.25, levels=3, label="q", T1=20_000.0, thermal_population=0.05
+        freq=5.0, anharmonicity=-0.25, levels=3, label="q", T1=20_000.0, thermal_occupation=0.05
     )
     assert q.intrinsic_decay_rate() == pytest.approx((0.05 + 1.0) / 20_000.0)
 
 
-def test_base_device_intrinsic_decay_rate_thermal_population_only():
-    """With T1 unset, thermal_population alone drives the gamma=1 channel's downward rate n_bar+1."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q", thermal_population=0.05)
+def test_base_device_intrinsic_decay_rate_thermal_occupation_only():
+    """With T1 unset, thermal_occupation alone drives the gamma=1 channel's downward rate n_bar+1."""
+    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q", thermal_occupation=0.05)
     assert q.intrinsic_decay_rate() == pytest.approx(0.05 + 1.0)
 
 
-def test_resonator_intrinsic_decay_rate_combines_q_t1_and_thermal_population():
-    """Resonator's Q-derived kappa is unaffected by thermal_population; only the T1 channel is boosted."""
+def test_resonator_intrinsic_decay_rate_combines_q_t1_and_thermal_occupation():
+    """Resonator's Q-derived kappa is unaffected by thermal_occupation; only the T1 channel is boosted."""
     r = Resonator(
-        freq=7.0, internal_quality_factor=5000.0, levels=6, label="r", T1=15_000.0, thermal_population=0.05
+        freq=7.0, internal_quality_factor=5000.0, levels=6, label="r", T1=15_000.0, thermal_occupation=0.05
     )
     kappa = 2 * np.pi * 7.0 / 5000.0
     t1_rate = (0.05 + 1.0) / 15_000.0

@@ -27,6 +27,7 @@ from quchip.engine.reference import (
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar, select_array_module
 from quchip.utils.labeling import auto_label, resolve_label
 from quchip.utils.values import copy_value
+from quchip.utils.deprecation import warn_renamed
 
 if TYPE_CHECKING:
     from quchip.control.field import CoherentInput
@@ -72,17 +73,22 @@ class SLHComponent:
     _parameters: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     _transfer: Callable[..., Any] | None = field(default=None, repr=False, compare=False)
 
-    def side(self, name: str | int) -> "FieldSide":
-        """Return the physical side whose input and output terminals share ``name``."""
+    def port(self, name: str | int) -> "ComponentPort":
+        """Return a component port with incoming and outgoing field connections."""
         label = str(name)
         if not self.sides:
             raise ValueError(
-                f"Component {self.label!r} is directional and has no physical sides; use "
+                f"Component {self.label!r} is directional and has no component ports; use "
                 "input_terminal()/output_terminal() or cascade()."
             )
         if label not in self.sides:
-            raise KeyError(f"No side {label!r} on component {self.label!r}; available: {list(self.sides)}")
-        return FieldSide(self.input_terminal(label), self.output_terminal(label))
+            raise KeyError(f"No port {label!r} on component {self.label!r}; available: {list(self.sides)}")
+        return ComponentPort(self.input_terminal(label), self.output_terminal(label))
+
+    def side(self, name: str | int) -> "ComponentPort":
+        """Deprecated alias for :meth:`port`."""
+        warn_renamed("component.side()", "component.port()")
+        return self.port(name)
 
     @property
     def inputs(self) -> tuple[FieldTerminal, ...]:
@@ -144,16 +150,20 @@ class SLHComponent:
 
 
 @dataclass(frozen=True)
-class FieldSide:
-    """One physical connector pairing a component side's input and output terminals."""
+class ComponentPort:
+    """A component port pairing its incoming and outgoing field connections."""
 
     input: FieldTerminal
     output: FieldTerminal
 
 
 @dataclass(frozen=True, eq=False)
-class FieldExposure:
-    """One named reciprocal reference plane on a :class:`PortNetwork`."""
+class NetworkPort:
+    """A named external network port with incoming and outgoing fields.
+
+    The reference plane specifies where these fields are defined. A device's
+    :class:`Port` instead specifies its coupling to the network.
+    """
 
     label: str
     _input_key: TerminalKey = field(repr=False)
@@ -164,7 +174,7 @@ class FieldExposure:
     def __eq__(self, other: object) -> bool:
         """Compare stable plane identity within one network."""
         return (
-            isinstance(other, FieldExposure)
+            isinstance(other, NetworkPort)
             and self._network_token is other._network_token
             and self.label == other.label
         )
@@ -247,22 +257,27 @@ class IncludedNetwork:
         return self._host._components[label]
 
     def input(self, name: str) -> FieldTerminal:
-        """Return the input terminal of the template exposure ``name``."""
+        """Return the input terminal of the exported network port ``name``."""
         key = self._interface(name)[0]
         return self._host._components[key[0]].input_terminal(key[1])
 
     def output(self, name: str) -> FieldTerminal:
-        """Return the output terminal of the template exposure ``name``."""
+        """Return the output terminal of the exported network port ``name``."""
         key = self._interface(name)[1]
         return self._host._components[key[0]].output_terminal(key[1])
 
-    def side(self, name: str) -> FieldSide:
-        """Return the physical side behind a template exposure made with ``expose(..., at=)``."""
+    def port(self, name: str) -> ComponentPort:
+        """Return a component port exported by the network block."""
         input_key, output_key = self._interface(name)
         component = self._host._components[input_key[0]]
         if input_key != output_key or input_key[1] not in component.sides:
             raise ValueError(f"Interface {name!r} of block {self.prefix!r} is asymmetric; use input() and output().")
-        return component.side(input_key[1])
+        return component.port(input_key[1])
+
+    def side(self, name: str) -> ComponentPort:
+        """Deprecated alias for :meth:`port`."""
+        warn_renamed("block.side()", "block.port()")
+        return self.port(name)
 
     def _interface(self, name: str) -> tuple[TerminalKey, TerminalKey]:
         if name not in self._interfaces:
@@ -300,7 +315,7 @@ class _AffineField:
 
 @dataclass(frozen=True)
 class _CompiledChannel:
-    exposure: FieldExposure
+    exposure: NetworkPort
     coupling: Mapping[str, Any]
     reference: ReferencePlane
 
@@ -345,7 +360,7 @@ class PortNetwork:
         self._ports: list[Port] = []
         self._connections: dict[TerminalKey, TerminalKey] = {}
         self._used_outputs: dict[TerminalKey, TerminalKey] = {}
-        self._exposures: list[FieldExposure] = []
+        self._exposures: list[NetworkPort] = []
 
     @classmethod
     def from_ports(
@@ -372,16 +387,27 @@ class PortNetwork:
         return tuple(self._components.values())
 
     @property
-    def exposures(self) -> tuple[FieldExposure, ...]:
-        """Return the complete external reference planes in channel order."""
+    def external_ports(self) -> tuple[NetworkPort, ...]:
+        """Return the external network ports in channel order."""
         return tuple(exposure for exposure in self._effective_exposures() if not exposure._hidden)
 
-    def exposure(self, exposure: str | FieldExposure) -> FieldExposure:
-        """Return one external reference plane by object or label."""
-        if isinstance(exposure, FieldExposure) and exposure._network_token is not self._token:
-            raise ValueError(f"Exposure {exposure.label!r} belongs to another PortNetwork.")
+    @property
+    def exposures(self) -> tuple[NetworkPort, ...]:
+        """Deprecated alias for :attr:`external_ports`."""
+        warn_renamed("network.exposures", "network.external_ports")
+        return self.external_ports
+
+    def exposure(self, exposure: str | NetworkPort) -> NetworkPort:
+        """Deprecated alias for :meth:`external_port`."""
+        warn_renamed("network.exposure()", "network.external_port()")
+        return self.external_port(exposure)
+
+    def external_port(self, exposure: str | NetworkPort) -> NetworkPort:
+        """Return one external network port by object or label."""
+        if isinstance(exposure, NetworkPort) and exposure._network_token is not self._token:
+            raise ValueError(f"Network port {exposure.label!r} belongs to another PortNetwork.")
         label = resolve_label(exposure)
-        exposures = self.exposures
+        exposures = self.external_ports
         for candidate in exposures:
             if candidate.label == label:
                 return candidate
@@ -505,7 +531,7 @@ class PortNetwork:
 
         ``eta`` is the power from input ``k`` to output ``k``. With
         ``t = sqrt(eta)`` and ``r = sqrt(1 - eta)``, the scattering matrix is
-        ``[[t, r], [-r, t]]``. This component has no physical sides; use
+        ``[[t, r], [-r, t]]``. This component has no component ports; use
         ``input_terminal()``, ``output_terminal()``, or ``cascade()``.
         """
         matrix = self._transmission_matrix(eta)
@@ -517,7 +543,7 @@ class PortNetwork:
         """Add a directional two-input/two-output ideal 90-degree hybrid.
 
         The scattering matrix is ``[[1, 1j], [1j, 1]] / sqrt(2)``. This
-        component has no physical sides; use ``input_terminal()``,
+        component has no component ports; use ``input_terminal()``,
         ``output_terminal()``, or ``cascade()``.
         """
         return self._scattering_component(
@@ -757,11 +783,11 @@ class PortNetwork:
         self._connections[input.key] = output.key
         self._used_outputs[output.key] = input.key
 
-    def link(self, *items: Port | SLHComponent | FieldSide) -> None:
-        """Link consecutive physical sides in both directions.
+    def link(self, *items: Port | SLHComponent | ComponentPort) -> None:
+        """Link consecutive component ports in both directions.
 
         When a two-sided component is passed directly, the chain enters side 1
-        and leaves side 2. Pass ``component.side(k)`` to select a side
+        and leaves side 2. Pass ``component.port(k)`` to select a side
         explicitly.
         """
         for first, second in self._pairs("link", items):
@@ -785,14 +811,14 @@ class PortNetwork:
         self,
         label: str,
         *,
-        at: Port | SLHComponent | FieldSide | None = None,
+        at: Port | SLHComponent | ComponentPort | None = None,
         input: FieldTerminal | Port | SLHComponent | None = None,
         output: FieldTerminal | Port | SLHComponent | None = None,
-    ) -> FieldExposure:
-        """Name and return an external input/output reference plane.
+    ) -> NetworkPort:
+        """Name and return an external network port.
 
-        Pass ``at=`` to expose one physical side. Use ``input=`` and
-        ``output=`` for an asymmetric plane; ports and components then select
+        Pass ``at=`` to expose one component port. Use ``input=`` and
+        ``output=`` for separate input and output connections; ports and components then select
         their sole or ``signal`` terminal unless explicit terminals are passed.
         """
         if at is not None:
@@ -809,12 +835,12 @@ class PortNetwork:
         self._reject_hidden_terminal(input)
         self._reject_hidden_terminal(output)
         if label in {exposure.label for exposure in self._exposures}:
-            raise ValueError(f"Duplicate PortNetwork exposure label {label!r}.")
+            raise ValueError(f"Duplicate external network port label {label!r}.")
         if input.key in self._connections or output.key in self._used_outputs:
             raise ValueError("Connected terminals cannot also be exposed.")
         if self._terminal_is_exposed(input) or self._terminal_is_exposed(output):
-            raise ValueError("A terminal cannot belong to more than one exposure.")
-        exposure = FieldExposure(label, input.key, output.key, _network_token=self._token)
+            raise ValueError("A terminal cannot belong to more than one external network port.")
+        exposure = NetworkPort(label, input.key, output.key, _network_token=self._token)
         self._exposures.append(exposure)
         return exposure
 
@@ -1063,7 +1089,7 @@ class PortNetwork:
             network._used_outputs[output_key] = input_key
         for payload in data.get("exposures", []):
             network._exposures.append(
-                FieldExposure(
+                NetworkPort(
                     payload["label"],
                     tuple(payload["input"]),
                     tuple(payload["output"]),
@@ -1425,7 +1451,7 @@ class PortNetwork:
         self._components[component.label] = component
         return component
 
-    def _effective_exposures(self) -> tuple[FieldExposure, ...]:
+    def _effective_exposures(self) -> tuple[NetworkPort, ...]:
         exposed = list(self._exposures)
         used = {
             key
@@ -1445,20 +1471,20 @@ class PortNetwork:
             )
             if not touched:
                 exposed.append(
-                    FieldExposure(
+                    NetworkPort(
                         component.label,
                         input_key,
                         output_key,
                         _network_token=self._token,
                     )
                 )
-        hidden: list[FieldExposure] = []
+        hidden: list[NetworkPort] = []
         for component in self.components:
             if self._is_reference(component.label):
                 continue
             for input_name, output_name, label in component._hidden_pairs:
                 hidden.append(
-                    FieldExposure(
+                    NetworkPort(
                         label,
                         (component.label, input_name),
                         (component.label, output_name),
@@ -1509,7 +1535,7 @@ class PortNetwork:
                                noise)
 
     def _peel(
-        self, exposure: FieldExposure, *, traversals: set[TerminalKey] | None = None,
+        self, exposure: NetworkPort, *, traversals: set[TerminalKey] | None = None,
     ) -> tuple[TerminalKey, TerminalKey, ReferencePlane]:
         """Peel adjacent reference runs from ``exposure`` to the Markov boundary.
 
@@ -2096,26 +2122,26 @@ class PortNetwork:
         raise ValueError(f"Port {port.label!r} is not owned by this PortNetwork.")
 
     def _side_of(
-        self, value: Port | SLHComponent | FieldSide, *, leaving: bool | None
-    ) -> FieldSide:
-        """Resolve a physical side for ``link`` or ``expose``.
+        self, value: Port | SLHComponent | ComponentPort, *, leaving: bool | None
+    ) -> ComponentPort:
+        """Resolve a component port for ``link`` or ``expose``.
 
         For a two-sided component, ``leaving=True`` selects side 2,
         ``leaving=False`` selects side 1, and ``leaving=None`` requires an
         explicit side.
         """
-        if isinstance(value, FieldSide):
+        if isinstance(value, ComponentPort):
             self._validate_terminal(value.input, "input")
             self._validate_terminal(value.output, "output")
             return value
         component = self._component_of(value)
         if len(component.sides) == 1:
-            return component.side(component.sides[0])
+            return component.port(component.sides[0])
         if len(component.sides) == 2 and leaving is not None:
-            return component.side(component.sides[1 if leaving else 0])
+            return component.port(component.sides[1 if leaving else 0])
         raise ValueError(
-            f"Cannot infer a physical side for component {component.label!r} with "
-            f"{len(component.sides)} sides; pass component.side(k) for a "
+            f"Cannot infer a component port for component {component.label!r} with "
+            f"{len(component.sides)} ports; pass component.port(k) for a "
             "multi-sided component or use cascade() for a directional one."
         )
 
@@ -2169,3 +2195,8 @@ class PortNetwork:
 
 
 __all__ = ["PortNetwork"]
+
+
+# Compatibility class names; remove in quchip 0.5.
+FieldExposure = NetworkPort
+FieldSide = ComponentPort

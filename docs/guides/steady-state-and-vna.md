@@ -1,4 +1,4 @@
-# Resonator readout and fridge wiring
+# Readout and fridge wiring
 
 Measure three resonators through a common bus and a fridge readout line, then
 sample the VNA trace at two integration times. Frequencies are in GHz, times
@@ -96,16 +96,17 @@ the noise emitted by absorbed power in the output filter. Here the input
 filter sees a vacuum source, with the thermal attenuators downstream of it.
 The resonators' intrinsic loss baths are also vacuum.
 
-Connect the input chain to circulator side 1, the bus to side 2, and the
-receiver chain to side 3. Expose `drive` for the source and `readout` for the
-receiver.
+Connect the input chain to circulator port 1, the bus to port 2, and the
+receiver chain to port 3. Name the external network ports `drive` for the source and `readout` for the
+receiver. Each port defines a reference plane: the location where its incoming
+and outgoing fields are specified.
 
 ```python
-fridge.link(input_filter, att_4k, att_cp, att_mxc, circ.side(1))
-fridge.link(circ.side(2), port)
-fridge.link(circ.side(3), iso_1, iso_loss, iso_2, output_filter, coax, hemt, room_amp)
-drive = fridge.expose("drive", at=input_filter.side(1))
-readout = fridge.expose("readout", at=room_amp.side(2))
+fridge.link(input_filter, att_4k, att_cp, att_mxc, circ.port(1))
+fridge.link(circ.port(2), port)
+fridge.link(circ.port(3), iso_1, iso_loss, iso_2, output_filter, coax, hemt, room_amp)
+drive = fridge.expose("drive", at=input_filter.port(1))
+readout = fridge.expose("readout", at=room_amp.port(2))
 readout_chip = Chip([bus, *resonators], couplings, port_network=fridge,
                     approximation=RWA(), frame="rotating")
 ```
@@ -431,8 +432,9 @@ amplifier saturation, finite reverse isolation, and reverse amplifier noise.
 ## Read a prepared qubit through the same line
 
 A Rabi calculation can stop after state preparation. To describe an omitted
-readout stage, supply its conditional coherent fields at the Markov boundary
-and let the fridge determine the downstream gain and noise.
+readout stage, supply the mean output field for each qubit state before the
+downstream output components. The fridge then determines the receiver gain
+and noise.
 
 This two-level qubit undergoes one Rabi period. Its preparation is closed and
 uses `sesolve`; the readout model below does not change that evolution.
@@ -458,7 +460,8 @@ shots = measurement.sample(1000, readout=detector, seed=7)
 ```
 
 The supplied means are representative fields for outcomes 0 and 1, in
-$1/\sqrt{\mathrm{ns}}$, before the selected channel's output reference sections.
+$1/\sqrt{\mathrm{ns}}$, before the selected channel's downstream output components.
+These fields are defined at the output of the memoryless quantum network.
 They summarize the readout interaction; qubit populations alone cannot determine
 them. The detector includes downstream filter, cable and amplifier noise,
 plus heterodyne vacuum, integrated for 100 μs. `detector.contributions` gives
@@ -525,18 +528,18 @@ IQ distributions. Colors mark physical outcomes; the threshold determines
 the recorded labels. [PDF](../images/terminal_rabi.pdf)
 ```
 
-`result.measure()` works with either kets or density matrices, using captured
-local energy bases. Pass several devices for joint outcomes or `t=` for an
+`result.measure()` works with either kets or density matrices, using the local energy bases saved with the simulation. Pass several devices for joint outcomes or `t=` for an
 exact saved state. Final measurement works with `states="final"`; different
 measurement times represent separate terminated experiments.
 
 If a simulation already includes the fridge, `result.iq_readout(...)` reuses
-its captured wiring. `IQReadout.from_wiring(...)` resolves the current wiring
-without quantum evolution. Both assume coherent boundary fields and vacuum in
-unspecified channels; occupied boundary inputs and device field correlations
-need a fuller field calculation or a detector calibration that includes them.
+the wiring saved with that simulation. `IQReadout.from_wiring(...)` resolves
+the current wiring without quantum evolution. Both assume coherent fields at
+the quantum-network output and vacuum in unspecified input channels.
+Thermal input fields and correlations with the
+devices require a field calculation or a detector calibration that includes them.
 Use a calibrated `IQReadout(means, iq_covariance)` directly in that case,
 without adding the same apparatus noise again.
 
-For lifetime design, continue with [Purcell filtering and the T1 budget](slh-networks.md).
+For lifetime design, continue with [Purcell filtering and T1](slh-networks.md).
 For pulse shaping and cavity depletion, see [pulses, leakage, and readout](dynamics-pulses-and-readout.md#empty-the-resonator-after-readout).

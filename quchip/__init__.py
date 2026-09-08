@@ -47,6 +47,8 @@ from quchip.chip import (
     Bath,
     Port,
     PortNetwork,
+    ComponentPort,
+    NetworkPort,
     Capacitive,
     Chip,
     ChipTransform,
@@ -138,7 +140,7 @@ from quchip.results import (
     OutputSpectrumResult,
 )
 from quchip.results.receiver import IQReceiver
-from quchip.results.measurement import MeasurementResult, MeasurementStatistics, MeasurementSamples
+from quchip.results.measurement import VNAMeasurement, VNAMeasurementStatistics, VNAMeasurementSamples
 from quchip.sweep import SpectrumSweep, Sweep, ZippedSweep
 from quchip.utils.constants import Phi_0, hbar, k_B
 
@@ -158,12 +160,12 @@ _LAZY_VIZ_EXPORTS = {
     "plot_wigner": ("quchip.viz.results", "plot_wigner"),
 }
 
-from quchip.results.terminal import IQReadout, TerminalMeasurement, TerminalSamples
+from quchip.results.terminal import IQReadout, StateMeasurement, StateSamples
 
 __all__ = [
     "IQReadout",
-    "TerminalMeasurement",
-    "TerminalSamples",
+    "StateMeasurement",
+    "StateSamples",
     # Version
     "__version__",
     # Engine approximation strategies
@@ -220,6 +222,8 @@ __all__ = [
     "Bath",
     "Port",
     "PortNetwork",
+    "ComponentPort",
+    "NetworkPort",
     "ChipTransform",
     "EliminationResult",
     "ReductionMap",
@@ -251,9 +255,9 @@ __all__ = [
     "SteadyStateBatchResult",
     "MeanFieldResponseResult",
     "IQReceiver",
-    "MeasurementResult",
-    "MeasurementStatistics",
-    "MeasurementSamples",
+    "VNAMeasurement",
+    "VNAMeasurementStatistics",
+    "VNAMeasurementSamples",
     "SParameterResult",
     "OutputSpectrumResult",
     "OutputCorrelationResult",

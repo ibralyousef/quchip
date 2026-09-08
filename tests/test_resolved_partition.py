@@ -57,7 +57,7 @@ def test_active_cascade_partitions_away_from_an_independent_line() -> None:
     network.expose("feedline", input=first_port.input, output=second_port.output)
     loss = network.attenuator("loss", eta=0.5)
     network.link(network.port("c_port", target=spectator, rate=0.01), loss)
-    network.expose("spectator_line", at=loss.side(2))
+    network.expose("spectator_line", at=loss.port(2))
     chip = Chip([first, second, spectator], port_network=network)
 
     partition = chip.partition()
@@ -149,8 +149,8 @@ def test_field_io_declines_component_solve_but_keeps_automatic_simulation() -> N
     network = PortNetwork(scattering=np.asarray([[0.0, 1.0], [1.0, 0.0]]), label="swap")
     network.port("left", target=first, rate=0.02)
     network.port("right", target=second, rate=0.03)
-    left_plane = network.exposure("left")
-    right_plane = network.exposure("right")
+    left_plane = network.external_port("left")
+    right_plane = network.external_port("right")
     chip = Chip([first, second], port_network=network, frame={"a": 5.0, "b": 5.4})
     sequence = QuantumSequence(chip)
     sequence.schedule(
@@ -177,7 +177,7 @@ def test_partition_keeps_each_groups_field_network() -> None:
     port_b = network.port("pb", target=second, rate=0.03)
     loss = network.attenuator("loss", eta=0.5)
     network.link(port_a, loss)
-    network.expose("line_a", at=loss.side(2))
+    network.expose("line_a", at=loss.port(2))
     network.expose("line_b", at=port_b)
     chip = Chip([first, second], port_network=network)
 
@@ -186,9 +186,9 @@ def test_partition_keeps_each_groups_field_network() -> None:
     assert len(partition) == 2 and not partition.notes
     sub_a, sub_b = (component.chip for component in partition.components)
     assert sub_a.port_network is not None and sub_b.port_network is not None
-    assert [exposure.label for exposure in sub_a.port_network.exposures] == ["line_a"]
+    assert [exposure.label for exposure in sub_a.port_network.external_ports] == ["line_a"]
     assert {component.label for component in sub_a.port_network.components} == {"pa", "loss"}
-    assert [exposure.label for exposure in sub_b.port_network.exposures] == ["line_b"]
+    assert [exposure.label for exposure in sub_b.port_network.external_ports] == ["line_b"]
     full = chip.resolve().slh
     keys = [channel.key for channel in full.channels]
     for sub in (sub_a, sub_b):

@@ -31,7 +31,7 @@ def _index(ports: tuple[str, ...], output: Any) -> int:
 
 
 @dataclass(frozen=True)
-class MeasurementSamples:
+class VNAMeasurementSamples:
     """Synthetic Gaussian IQ draws with sample, sweep, then output axes."""
 
     ports: tuple[str, ...]
@@ -58,7 +58,7 @@ class MeasurementSamples:
 
 
 @dataclass(frozen=True)
-class MeasurementStatistics:
+class VNAMeasurementStatistics:
     """Integrated output means and full covariance of (I0,Q0,I1,Q1,...)."""
 
     ports: tuple[str, ...]
@@ -91,7 +91,7 @@ class MeasurementStatistics:
         i = 2 * _index(self.ports, output)
         return MappingProxyType({key: value[..., i:i+2, i:i+2] for key, value in self.contributions.items()})
 
-    def sample(self, count: int, *, seed: int | None = None, key: Any = None) -> MeasurementSamples:
+    def sample(self, count: int, *, seed: int | None = None, key: Any = None) -> VNAMeasurementSamples:
         """Draw joint Gaussian IQ samples without running a physical solver.
 
         Use seed for NumPy draws or an explicit JAX random key. The covariance
@@ -103,9 +103,9 @@ class MeasurementStatistics:
         draws = gaussian_samples(mean.reshape((*self.values.shape[:-1], -1)), self.iq_covariance,
                                  count, seed=seed, key=key)
         values = draws[..., 0::2] + 1j * draws[..., 1::2]
-        return MeasurementSamples(self.ports, self.input, self.axes, self.incident, values, self.receiver)
+        return VNAMeasurementSamples(self.ports, self.input, self.axes, self.incident, values, self.receiver)
 
-    def calibrate(self, factors: Mapping[Any, Any]) -> MeasurementStatistics:
+    def calibrate(self, factors: Mapping[Any, Any]) -> VNAMeasurementStatistics:
         """Multiply output fields and both covariance axes by calibration factors."""
         xp = select_array_module(is_jax_array(self.values) or contains_tracer(tuple(factors.values())))
         normalized = {resolve_label(port): value for port, value in factors.items()}
@@ -117,12 +117,12 @@ class MeasurementStatistics:
         transform = xp.real(transform)
         covariance = transform @ self.iq_covariance @ transform.T
         contributions = {name: transform @ value @ transform.T for name, value in self.contributions.items()}
-        return MeasurementStatistics(self.ports, self.input, self.axes, self.incident,
+        return VNAMeasurementStatistics(self.ports, self.input, self.axes, self.incident,
                                      self.values * gains, covariance, self.receiver, contributions)
 
 
 @dataclass(frozen=True)
-class MeasurementResult(MeanFieldResponseResult):
+class VNAMeasurement(MeanFieldResponseResult):
     """Physical means and spectra captured before choosing a receiver.
 
     noise_components maps physical source labels to (white covariance,
@@ -213,15 +213,15 @@ class MeasurementResult(MeanFieldResponseResult):
             return power
         return xp.where(power > 0, 10*xp.log10(xp.where(power > 0, power, 1.0)/1e-3), -xp.inf)
 
-    def statistics(self, *, receiver: IQReceiver) -> MeasurementStatistics:
+    def statistics(self, *, receiver: IQReceiver) -> VNAMeasurementStatistics:
         """Integrate captured spectra and detector vacuum without a solver call."""
         covariance, contributions, mean_gain = integrate_noise(
             self.values, self.noise_frequencies, self.noise_components, self.output_delays, receiver)
-        return MeasurementStatistics(self.ports, self.input, self.axes, self.incident,
+        return VNAMeasurementStatistics(self.ports, self.input, self.axes, self.incident,
                                      self.values * mean_gain, covariance, receiver, contributions)
 
     def sample(
         self, count: int, *, receiver: IQReceiver, seed: int | None = None, key: Any = None,
-    ) -> MeasurementSamples:
+    ) -> VNAMeasurementSamples:
         """Integrate for a receiver and draw samples from the captured moments."""
         return self.statistics(receiver=receiver).sample(count, seed=seed, key=key)

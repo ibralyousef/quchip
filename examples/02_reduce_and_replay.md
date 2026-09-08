@@ -15,11 +15,11 @@ jupyter:
 
 <!-- reader-content -->
 
-# Chip transformations
+# Model reduction
 
 Can a smaller model reproduce the same pulse experiment? Drive the end of a
 four-transmon chain, keep its nearest neighbour, and compare the resulting
-active patch with the full chip. Frequencies are in GHz and times in ns.
+reduced model with the full chip. Frequencies are in GHz and times in ns.
 
 ## Declare the chain
 
@@ -46,7 +46,8 @@ chip = Chip(qubits, couplings=couplings, frame="rotating", approximation=RWA())
 ## Schedule a pulse and keep its neighbourhood
 
 Drive `q0` with a 60 ns Gaussian. `active_patch(hops=1)` retains `q0` and `q1`,
-folds away `q3` then `q2`, and binds the existing schedule to the reduced chip.
+eliminates `q3` then `q2`, and runs the existing schedule on the reduced chip.
+Here `hops=1` keeps devices within one coupling step of the driven qubit.
 The source chip and sequence remain unchanged.
 
 ```python
@@ -61,7 +62,7 @@ patch = sequence.active_patch(hops=1, method="sw")
 ```
 
 <details>
-<summary>Plot the full chain and active patch</summary>
+<summary>Plot the full and reduced models</summary>
 
 ```python
 import shutil
@@ -98,14 +99,14 @@ plt.show()
 </details>
 
 ```{figure} ../images/active_patch_topology.svg
-:alt: The full q0-q1-q2-q3 chain and its q0-q1 active patch, both driven on q0.
+:alt: The full q0-q1-q2-q3 chain and its reduced q0-q1 model, both driven on q0.
 
-The patch has 9 basis states. The removed spectators contribute retained
+The reduced model has 9 basis states. The removed spectators contribute
 Hamiltonian corrections; labels show bare parameters.
 [PDF](../images/active_patch_topology.pdf)
 ```
 
-## Replay the same pulse
+## Simulate the same pulse in the reduced model
 
 `sequence.simulate()` runs the full chip; `patch.simulate()` runs the schedule
 on the reduced chip. Compare the excited-state population of the driven qubit.
@@ -141,7 +142,7 @@ population_axis.plot(
     color="#C92F33",
     linewidth=1.6,
     linestyle="--",
-    label="active patch (9 states)",
+    label="reduced model (9 states)",
 )
 population_axis.set_ylabel(r"$P(q_0=1)$")
 population_axis.set_ylim(-0.02, 1.02)
@@ -163,7 +164,7 @@ plt.show()
 </details>
 
 ```{figure} ../images/reduce_and_replay.svg
-:alt: Driven-qubit population on the full chip and active patch, with their absolute difference below.
+:alt: Driven-qubit population on the full chip and reduced model, with their absolute difference below.
 
 The full and reduced trajectories overlap; the lower panel resolves their
 absolute difference. Values below 10⁻¹⁰ are floored for display only.
@@ -175,7 +176,7 @@ absolute difference. Values below 10⁻¹⁰ are floored for display only.
 Each entry in `patch.steps` is an `EliminationResult`. Its `describe()` report
 includes frequency shifts, inherited loss, coupling ratios, and approximation
 notes. The retained Hamiltonian corrections determine the reduced dynamics;
-the source device parameters remain authored.
+the original device parameters stay unchanged.
 
 <details>
 <summary>Show the built-in reports</summary>
@@ -213,9 +214,10 @@ notes:
 To remove a specific device directly, use `eliminate(chip, "q3", method="sw")`
 and inspect the returned `.chip` and `.describe()`. `method="exact"` uses the
 retained block of the diagonalized model instead of the second-order
-Schrieffer–Wolff approximation. Eliminating a coupling retains both endpoints.
+Schrieffer–Wolff approximation. Both use the declared finite Hilbert space.
+Eliminating a coupling retains both endpoints.
 
-## Check this pulse comparison
+## Check the reduction error
 
 A small coupling-to-detuning ratio is a diagnostic, not a guarantee of accurate
 dynamics. Here we also check the full/reduced population difference against
@@ -291,7 +293,7 @@ RESULT reduction={"active_labels":["q0","q1"],"all_folds_valid":true,"eliminated
 ## Other changes to the model
 
 Use `with_params()` to change numerical parameters; the
-[statics guide](statics-and-parameter-studies.md) demonstrates this during a sweep.
+[spectrum guide](statics-and-parameter-studies.md) demonstrates this during a sweep.
 `chip.partition()` separates independent components exactly, while an active
 patch approximates coupled spectators. Inspect `partition.notes` when shared
 Hamiltonian terms, loss, or drive crosstalk keep components on a joint solve.
