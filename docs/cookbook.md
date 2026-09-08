@@ -620,5 +620,5 @@ They work after either evolution solver. A joint measurement preserves
 correlations; partitioned solves combine only independent component probabilities.
 Add `assignment=` for calibrated label errors or `readout=IQReadout(...)` for
 conditional IQ draws. Neither requires a readout pulse. See
-[terminal measurements](guides/dynamics-pulses-and-readout.md#measure-a-prepared-state)
+[terminal measurements](guides/steady-state-and-vna.md#read-a-prepared-qubit-through-the-same-line)
 for Rabi counts, IQ calibration and the use of captured fridge wiring.
