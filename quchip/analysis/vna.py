@@ -18,7 +18,7 @@ from quchip.engine.input_output import (
     same_frequency,
 )
 from quchip.engine.linear_response import try_build_linear_response_problem
-from quchip.results.measurement import MeasurementResult
+from quchip.results.measurement import VNAMeasurement
 from quchip.engine.output_network import output_mixing
 from quchip.engine.reference import cw_transfer, has_amplifier, ReferenceFilter, ReferenceLoss
 from quchip.engine.ir import CanonicalOperator, EngineResult, SteadyStateProblem
@@ -104,9 +104,9 @@ class VNA:
         if ports is None:
             if chip.port_network is None:
                 raise ValueError("VNA requires a chip with a PortNetwork.")
-            ports = chip.port_network.exposures
+            ports = chip.port_network.external_ports
         elif isinstance(ports, str) or not isinstance(ports, Sequence):
-            raise TypeError("VNA ports must be a sequence of exposures or labels.")
+            raise TypeError("VNA ports must be a sequence of network ports or labels.")
         self.ports = tuple(_resolve_exposure(chip, plane) for plane in ports)
         if not self.ports:
             raise ValueError("VNA requires at least one port.")
@@ -141,7 +141,7 @@ class VNA:
         with pump-tone axes. At each frequency, the passive-linear route
         uses one multi-right-hand-side mode-space solve. The stationary route solves
         one pumped operating point, then uses one shifted-Liouvillian factorization
-        for every input plane.
+        for every input port.
         """
         freq_values, freq_is_axis = _axis_values(frequencies)
         self._validate_variations(variations, reserved=("frequency",) if freq_is_axis else ())
@@ -206,13 +206,13 @@ class VNA:
 
         ``frequencies`` are in GHz. ``amplitudes`` are incident field amplitudes
         ``beta`` in ``1/sqrt(ns)``; complex values encode phase. The probe enters
-        ``input`` beside any fixed pumps. When one plane is selected, ``input``
-        defaults to that plane; otherwise it is required. A fixed pump on the probe
+        ``input`` beside any fixed pumps. When one port is selected, ``input``
+        defaults to that port; otherwise it is required. A fixed pump on the probe
         input is rejected.
 
         At each grid point, the method solves the stationary Liouvillian in the probe
         frame. Chip and pump sweep axes precede ``"amplitude"`` and ``"frequency"``.
-        Every selected plane must resolve at the probe frequency. The returned
+        Every selected port must resolve at the probe frequency. The returned
         ``MeanFieldResponseResult`` reports ``<b_out>`` using the same reference-plane
         and hidden-channel bookkeeping as ``sweep()``, and stores the incident
         ``beta`` broadcast over the grid.
@@ -223,7 +223,7 @@ class VNA:
         """
         if input is None:
             if len(self.ports) != 1:
-                raise ValueError("finite_power() requires input= when more than one plane is selected.")
+                raise ValueError("finite_power() requires input= when more than one port is selected.")
             input_label = self.ports[0]
         else:
             input_label = _resolve_exposure(self.chip, input)
@@ -316,7 +316,7 @@ class VNA:
         self, frequencies: Any, amplitudes: Any, *variations: Sweep | ZippedSweep,
         input: Any = None, outputs: Sequence[Any] | None = None, noise_frequencies: Any = None,
         options: dict | None = None, progress: bool = False,
-    ) -> MeasurementResult:
+    ) -> VNAMeasurement:
         """Capture stationary means and joint physical noise before choosing a receiver.
 
         Frequencies are probe GHz, amplitudes are in 1/sqrt(ns). Optional
@@ -435,7 +435,7 @@ class VNA:
         if engine.slh.output_network is not None or has_amplifier(runs[output_port]) or has_amplifier(runs[input_port]):
             raise NotImplementedError(
                 "Normalized g1 and g2 through an amplifier require a detection bandwidth for its "
-                "broadband added noise. Request the correlation at a plane before the amplifier."
+                "broadband added noise. Request the correlation at a reference plane before the amplifier."
             )
 
         thermal = any(channel.input_occupation is not None or any(
@@ -591,14 +591,14 @@ def _axis_values(values: Any) -> tuple[Any, bool]:
 
 
 def _resolve_exposure(chip: Any, value: Any) -> str:
-    """Resolve a plane object or label against the external SLH boundary."""
+    """Find an external network port by object or label."""
     label = resolve_label(value)
     network = chip.port_network
     if network is None:
         raise ValueError("VNA requires a chip with a PortNetwork.")
-    available = [exposure.label for exposure in network.exposures]
+    available = [exposure.label for exposure in network.external_ports]
     if label not in available:
-        raise ValueError(f"Unknown VNA exposure {label!r}. Available exposures: {available}.")
+        raise ValueError(f"Unknown VNA port {label!r}. Available network ports: {available}.")
     return label
 
 
@@ -615,7 +615,7 @@ def _exposure_reference_frequency(chip: Any, label: str) -> Any:
                     return carriers[0]
             return 0.0 if frequency is None else frequency
     available = [channel.key for channel in resolved.slh.external_channels]
-    raise ValueError(f"Unknown VNA exposure {label!r}. Available exposures: {available}.")
+    raise ValueError(f"Unknown VNA port {label!r}. Available network ports: {available}.")
 
 
 def _public_name(sweep: Sweep) -> str:

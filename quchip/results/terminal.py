@@ -1,4 +1,4 @@
-"""Terminal projective measurements and calibrated detector responses."""
+"""Projective measurements of saved states and calibrated detector responses."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -69,7 +69,7 @@ class IQReadout:
     @classmethod
     def from_wiring(cls, chip: Any, output: Any, *, means: Any, frequency: Any,
                     receiver: Any, noise_frequencies: Any = None) -> IQReadout:
-        """Build a coherent-template detector from resolved wiring, without evolution.
+        """Build an IQ detector from wiring and conditional coherent fields.
 
         Use the same boundary-field units and vacuum assumptions as
         SimulationResult.iq_readout(). This captures the chip's current wiring;
@@ -101,8 +101,8 @@ class IQReadout:
 
 
 @dataclass(frozen=True)
-class TerminalSamples:
-    """Independent terminal shots; indices select the ordered outcome tuples.
+class StateSamples:
+    """Independent measurement shots; indices select the ordered outcome tuples.
 
     physical_indices are Born draws. indices additionally includes assignment
     errors, if requested. iq is present only for a conditional IQ readout.
@@ -127,7 +127,7 @@ class TerminalSamples:
 
 
 @dataclass(frozen=True)
-class TerminalMeasurement:
+class StateMeasurement:
     """Born probabilities in a captured local product measurement basis."""
 
     devices: tuple[str, ...]
@@ -159,7 +159,7 @@ class TerminalMeasurement:
         return self.probabilities @ self._assignment(assignment).T
 
     def sample(self, count: int, *, seed: int | None = None, key: Any = None,
-               assignment: Any = None, readout: IQReadout | None = None) -> TerminalSamples:
+               assignment: Any = None, readout: IQReadout | None = None) -> StateSamples:
         """Draw Born outcomes, optionally recording assignment errors or conditional IQ.
 
         Assignment and IQ are separate detector models. IQ samples remain
@@ -195,11 +195,11 @@ class TerminalMeasurement:
             draws = gaussian_samples(centers, xp.asarray(readout.iq_covariance)[physical],
                                      1, seed=noise_seed, key=noise_key)[0]
             iq = draws[..., 0] + 1j * draws[..., 1]
-        return TerminalSamples(self.devices, self.outcomes, self.axes, physical, recorded, iq)
+        return StateSamples(self.devices, self.outcomes, self.axes, physical, recorded, iq)
 
 
 def measure_result(result: Any, devices: tuple[Any, ...], *, t: Any = None,
-                   basis: Any = "energy") -> TerminalMeasurement:
+                   basis: Any = "energy") -> StateMeasurement:
     """Project retained states using captured basis maps and existing result coordinates."""
     from quchip.results.results import SimulationBatchResult
     from quchip.results.partitioned import PartitionedSimulationResult
@@ -222,7 +222,7 @@ def measure_result(result: Any, devices: tuple[Any, ...], *, t: Any = None,
             raise ValueError("Batch measurements require matching outcome dimensions.")
         xp = _namespace(*(point.probabilities for point in points))
         probabilities = xp.stack([point.probabilities for point in points])
-        return TerminalMeasurement(labels, points[0].outcomes,
+        return StateMeasurement(labels, points[0].outcomes,
                                    probabilities.reshape((*result.shape, len(points[0].outcomes))), result.axes)
     if isinstance(result, PartitionedSimulationResult):
         groups: dict[int, list[str]] = {}
@@ -243,7 +243,7 @@ def measure_result(result: Any, devices: tuple[Any, ...], *, t: Any = None,
             digits = np.asarray(outcomes)[:, [labels.index(label) for label in point.devices]].T
             indices = np.ravel_multi_index(tuple(digits), tuple(dimensions[label] for label in point.devices))
             probabilities = probabilities * point.probabilities[xp.asarray(indices)]
-        return TerminalMeasurement(labels, outcomes, probabilities)
+        return StateMeasurement(labels, outcomes, probabilities)
     backend = result._backend
     selected = [result._resolve_device_idx(label)[0] for label in labels]
     state = result.state(t)
@@ -280,4 +280,4 @@ def measure_result(result: Any, devices: tuple[Any, ...], *, t: Any = None,
     probabilities = xp.transpose(diagonal, selected + remaining).reshape(
         (int(np.prod([dims[i] for i in selected])), -1)).sum(axis=-1)
     outcomes = tuple(product(*(range(dims[i]) for i in selected)))
-    return TerminalMeasurement(labels, outcomes, probabilities)
+    return StateMeasurement(labels, outcomes, probabilities)

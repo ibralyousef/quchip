@@ -161,10 +161,10 @@ def wired_result(*, backend="qutip", gain=100., noise=1., loss=.25):
     circ = net.circulator("circ")
     amp = net.amplifier("hemt", gain=gain, added_noise=noise)
     attenuator = net.attenuator("cable", eta=loss, occupation=.2)
-    net.link(port, circ.side(2))
-    net.link(circ.side(3), amp, attenuator)
-    drive = net.expose("drive", at=circ.side(1))
-    out = net.expose("out", at=attenuator.side(2))
+    net.link(port, circ.port(2))
+    net.link(circ.port(3), amp, attenuator)
+    drive = net.expose("drive", at=circ.port(1))
+    out = net.expose("out", at=attenuator.port(2))
     chip = Chip([r], port_network=net, frame="rotating", backend=backend)
     result = QuantumSequence(chip).simulate(tlist=[0., 1.], states="final", check_truncation=False)
     return chip, out, drive, result
@@ -193,7 +193,7 @@ def test_jax_measurement_gradients_and_keyed_detector_sampling():
     """Born and mixture statistics retain analytical gradients; keyed labels are reproducible."""
     import jax
     import jax.numpy as jnp
-    from quchip.results.terminal import TerminalMeasurement
+    from quchip.results.terminal import StateMeasurement
     from quchip.backend.containers import SolverResult
     from quchip.results import SimulationResult
     from quchip.backend.dynamiqs import DynamiqsBackend
@@ -205,7 +205,7 @@ def test_jax_measurement_gradients_and_keyed_detector_sampling():
         return result.measure("q", basis="solver").probabilities[1]
     value, gradient = jax.jit(jax.value_and_grad(probability))(.4)
     np.testing.assert_allclose([value, gradient], [np.sin(.4)**2, np.sin(.8)], atol=1e-12)
-    m = TerminalMeasurement(("q",), ((0,), (1,)), jnp.array([.7, .3]))
+    m = StateMeasurement(("q",), ((0,), (1,)), jnp.array([.7, .3]))
     detector = IQReadout([-1., 1.], np.eye(2)*.1)
     sample = jax.jit(lambda key: m.sample(30, key=key, readout=detector).iq)
     np.testing.assert_array_equal(sample(jax.random.key(2)), sample(jax.random.key(2)))
@@ -252,7 +252,7 @@ def test_thermal_evolution_and_downstream_noise_have_separate_owners():
     assert second_detector.iq_covariance[0, 0, 0] > first_detector.iq_covariance[0, 0, 0]
     r = first_chip["r"]
     r.T1 = 10.
-    r.thermal_population = .2
+    r.thermal_occupation = .2
     warm = QuantumSequence(first_chip).simulate(tlist=[0., 10.], check_truncation=False)
     assert warm.solver == "mesolve"
     assert warm.measure(r).probabilities[1] > .05
@@ -299,10 +299,10 @@ def test_bandpass_noise_and_partitioned_wiring_forwarding():
     filt = net.filter("bandpass", transfer=lambda f: np.where((f >= 4) & (f <= 8), 1., 0.),
                       loss_occupation=.2)
     amp = net.amplifier("hemt", gain=100., added_noise=1.)
-    net.link(p, circ.side(2))
-    net.link(circ.side(3), filt, amp)
-    net.expose("drive", at=circ.side(1))
-    out = net.expose("out", at=amp.side(2))
+    net.link(p, circ.port(2))
+    net.link(circ.port(3), filt, amp)
+    net.expose("drive", at=circ.port(1))
+    out = net.expose("out", at=amp.port(2))
     result = QuantumSequence(Chip([q, r], port_network=net, frame="rotating")).simulate(
         tlist=[0., 1.], check_truncation=False)
     receiver = IQReceiver(1000)

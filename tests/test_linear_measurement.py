@@ -16,11 +16,11 @@ def thermal_fridge(*, backend="qutip", filter_first=True):
     amp = net.amplifier("amp", gain_db=20., noise_temperature=2000., noise_frequency=6.)
     chain = (filt, att) if filter_first else (att, filt)
     lead = net.delay("lead", duration=0.)
-    net.link(lead, *chain, circ.side(1))
-    net.link(circ.side(2), port)
-    net.link(circ.side(3), amp)
-    drive = net.expose("drive", at=lead.side(1))
-    readout = net.expose("readout", at=amp.side(2))
+    net.link(lead, *chain, circ.port(1))
+    net.link(circ.port(2), port)
+    net.link(circ.port(3), amp)
+    drive = net.expose("drive", at=lead.port(1))
+    readout = net.expose("readout", at=amp.port(2))
     return Chip([r], port_network=net, backend=backend), drive, readout
 
 
@@ -71,7 +71,7 @@ def test_filtered_auxiliary_field_mixed_after_device_does_not_create_backaction(
     net.connect(filt.output_terminal("2"), split.input_terminal("right"))
     net.connect(split.output_terminal("right"), filt.input_terminal("2"))
     left = net.expose("left", input=port.input, output=split.output_terminal("left"))
-    right = net.expose("right", at=filt.side(1))
+    right = net.expose("right", at=filt.port(1))
     vna = VNA(Chip([r], port_network=net))
     for options in (None, {}):
         measured = vna.measure(6., 0., input=left, outputs=[left, right],
@@ -101,7 +101,7 @@ def test_nine_mode_measurement_matches_independent_star_response_without_density
     port = net.port("bus", target=bus, rate=2*np.pi)
     amp = net.amplifier("amp", gain_db=40., added_noise=8.)
     net.link(port, amp)
-    output = net.expose("out", at=amp.side(2))
+    output = net.expose("out", at=amp.port(2))
     chip = Chip([bus, *modes], couplings, port_network=net, approximation=RWA())
     def forbidden(*args, **kwargs):
         raise AssertionError("harmonic acquisition constructed a density matrix")
@@ -127,7 +127,7 @@ def test_datasheet_noise_parameters_rebind_and_roundtrip():
     loss = net.attenuator("loss", loss_db=10.)
     amp = net.amplifier("amp", gain_db=20., noise_figure_db=1., noise_frequency=6.)
     net.link(port, loss, amp)
-    net.expose("out", at=amp.side(2))
+    net.expose("out", at=amp.port(2))
     chip = Chip([r], port_network=net)
     restored = Chip.from_dict(chip.to_dict())
     changed = restored.with_params({"network.component.amp.gain_db": 30., "network.component.loss.loss_db": 20.})
@@ -208,7 +208,7 @@ def test_coupled_modes_share_thermal_noise_and_match_general_solver():
     port = net.port("p", target=bus, rate=.04)
     att = net.attenuator("att", loss_db=10., occupation=.01)
     net.link(att, port)
-    drive = net.expose("drive", at=att.side(1))
+    drive = net.expose("drive", at=att.port(1))
     chip = Chip([bus, r], [Capacitive(bus, r, g=.005)], port_network=net, approximation=RWA())
     results = [VNA(chip).measure(6.005, .003, input=drive, outputs=[drive],
                                 noise_frequencies=[-.04, -.004, 0., .004, .04], options=options)

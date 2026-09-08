@@ -1,11 +1,11 @@
-# From the SQA 2026 talk
+# SQA 2026 examples
 
 Five independent calculations from the talk, each linked to its full guide.
 
 quchip uses GHz for frequencies and couplings, ns for time, and mK for
 temperature.
 
-## Define and inspect a chip
+## Your first chip
 
 ```python
 from quchip import Capacitive, Chip, DuffingTransmon, Resonator
@@ -15,19 +15,19 @@ r = Resonator(freq=7.0, levels=5, label="r")
 chip = Chip([q, r], [Capacitive(q, r, g=0.05, label="qr")])
 
 print("devices:", [device.label for device in chip.devices])
-print("authored H:", chip.unresolved_hamiltonian().latex())
+print("declared H:", chip.unresolved_hamiltonian().latex())
 ```
 
 Output:
 
 ```text
 devices: ['q', 'r']
-authored H: \omega_{q}\,\hat n_{q} + 0.5\,\alpha_{q}\,\hat n_{q}\,(\hat n_{q} - \hat I_{q}) + \omega_{r}\,\hat n_{r} + g_{qr}\,(\hat a_{q} + \hat a^\dagger_{q})\,(\hat a_{r} + \hat a^\dagger_{r})
+declared H: \omega_{q}\,\hat n_{q} + 0.5\,\alpha_{q}\,\hat n_{q}\,(\hat n_{q} - \hat I_{q}) + \omega_{r}\,\hat n_{r} + g_{qr}\,(\hat a_{q} + \hat a^\dagger_{q})\,(\hat a_{r} + \hat a^\dagger_{r})
 ```
 
 [Continue with chip definition and inspection](defining-and-inspecting-a-chip.md).
 
-## Read and sweep statics
+## Calculate and sweep the spectrum
 
 ```python
 import numpy as np
@@ -52,7 +52,7 @@ Output:
 first and last dressed f01 (GHz): [4.89859099 5.09846968]
 ```
 
-[Continue with statics and parameter studies](statics-and-parameter-studies.md).
+[Continue with spectra and parameter sweeps](statics-and-parameter-studies.md).
 
 ## Simulate one pulse
 
@@ -112,9 +112,9 @@ g / detuning: 0.025
 valid: True
 ```
 
-[Continue with chip transformations](chip-transformations.md).
+[Continue with model reduction](chip-transformations.md).
 
-## Differentiate a static loss
+## Differentiate a spectral fitting objective
 
 The second residual uses the common sigma-z convention
 $\chi_{\sigma_z}=\left(E_{11}-E_{10}-E_{01}+E_{00}\right)/2$.
@@ -162,4 +162,4 @@ Jacobian:
  [-1.29839799e-04  5.10942405e-04 -5.70796457e-03]]
 ```
 
-[Continue with experimental static fitting, dynamic losses, and multi-sequence analysis](differentiability.md).
+[Continue with gradients and parameter fitting](differentiability.md).

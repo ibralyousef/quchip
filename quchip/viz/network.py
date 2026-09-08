@@ -138,7 +138,7 @@ def plot_port_network(
         for index, label in enumerate(labels):
             positions[label] = (_COLUMN_WIDTH * column, -_ROW_HEIGHT * (index - (len(labels) - 1) / 2.0))
     plane_column = max(columns.values(), default=0) + 1
-    exposures = network.exposures
+    exposures = network.external_ports
     plane_positions: dict[str, tuple[float, float]] = {}
     for exposure in exposures:
         y = (positions[exposure._input_key[0]][1] + positions[exposure._output_key[0]][1]) / 2.0

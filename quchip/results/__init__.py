@@ -27,18 +27,18 @@ from quchip.results.input_output import (
 )
 
 from quchip.results.receiver import IQReceiver
-from quchip.results.measurement import MeasurementResult, MeasurementSamples, MeasurementStatistics
+from quchip.results.measurement import VNAMeasurement, VNAMeasurementSamples, VNAMeasurementStatistics
 
-from quchip.results.terminal import IQReadout, TerminalMeasurement, TerminalSamples
+from quchip.results.terminal import IQReadout, StateMeasurement, StateSamples
 
 __all__ = [
     "IQReadout",
-    "TerminalMeasurement",
-    "TerminalSamples",
+    "StateMeasurement",
+    "StateSamples",
     "IQReceiver",
-    "MeasurementResult",
-    "MeasurementSamples",
-    "MeasurementStatistics",
+    "VNAMeasurement",
+    "VNAMeasurementSamples",
+    "VNAMeasurementStatistics",
     "ObservableTrace",
     "OutputFieldTrace",
     "SimulationBatchResult",

@@ -235,7 +235,7 @@ def test_delay_section_is_reference_plane_metadata_only() -> None:
     port = network.port("chip_port", target=resonator, rate=0.01)
     cable = network.delay("cable", duration=0.25)
     network.link(port, cable)
-    network.expose("readout", at=cable.side(2))
+    network.expose("readout", at=cable.port(2))
 
     resolved = Chip([resonator], port_network=network).resolve().slh
     plane = resolved.external_channels[0].reference
@@ -253,10 +253,10 @@ def test_delay_section_after_a_circulator_decorates_only_the_reached_legs() -> N
     port = network.port("chip_port", target=resonator, rate=0.04)
     circulator = network.circulator("circ")
     line = network.delay("line", duration=1.5)
-    network.link(port, circulator.side(2))
-    network.link(circulator.side(3), line)
-    network.expose("drive", at=circulator.side(1))
-    network.expose("readout", at=line.side(2))
+    network.link(port, circulator.port(2))
+    network.link(circulator.port(3), line)
+    network.expose("drive", at=circulator.port(1))
+    network.expose("readout", at=line.port(2))
     chip = Chip([resonator], port_network=network)
 
     resolved = chip.resolve().slh
@@ -277,7 +277,7 @@ def test_reference_section_and_downstream_loss_share_an_external_run() -> None:
     inner_loss = interior.attenuator("loss", eta=0.5)
     inner_cable = interior.delay("cable", duration=0.1)
     interior.link(inner_port, inner_cable, inner_loss)
-    interior.expose("readout", at=inner_loss.side(2))
+    interior.expose("readout", at=inner_loss.port(2))
     chip = Chip([resonator], port_network=interior)
     from quchip import VNA
     actual = VNA(chip).sweep([6.0]).s("readout", "readout")[0]
@@ -291,7 +291,7 @@ def test_attenuator_is_a_reciprocal_two_sided_vacuum_dilation() -> None:
     port = network.port("chip_port", target=resonator, rate=0.04)
     loss = network.attenuator("cold_loss", eta=0.64)
     network.link(port, loss)
-    network.expose("readout", at=loss.side(2))
+    network.expose("readout", at=loss.port(2))
 
     resolved = Chip([resonator], port_network=network).resolve().slh
     coupling = np.sqrt(0.04) * _lowering(2)
@@ -327,7 +327,7 @@ def test_network_dilation_precedes_stable_identity_hidden_baths() -> None:
     port = network.port("chip_port", target=resonator, rate=0.04)
     loss = network.attenuator("cold_loss", eta=0.64)
     network.link(port, loss)
-    network.expose("readout", at=loss.side(2))
+    network.expose("readout", at=loss.port(2))
 
     resolved = Chip([resonator], port_network=network).resolve().slh
 
@@ -367,7 +367,7 @@ def test_network_graph_round_trips_and_clone_remains_independent() -> None:
     network.link(port, loss)
     cable = network.delay("cable", duration=0.1)
     network.link(loss, cable)
-    network.expose("readout", at=cable.side(2))
+    network.expose("readout", at=cable.port(2))
     chip = Chip([resonator], port_network=network)
 
     restored = Chip.from_dict(json.loads(json.dumps(chip.to_dict())))
@@ -413,7 +413,7 @@ def test_attenuator_power_transmission_is_jax_differentiable() -> None:
         port = network.port("chip_port", target=resonator, rate=0.04)
         loss = network.attenuator("cold_loss", eta=eta)
         network.link(port, loss)
-        network.expose("readout", at=loss.side(2))
+        network.expose("readout", at=loss.port(2))
         value = Chip([resonator], port_network=network).resolve().slh.L[0].to_dense()[0, 1]
         return jnp.real(value)
 
@@ -428,10 +428,10 @@ def test_circulator_and_isolator_route_a_reflection_readout() -> None:
     port = network.port("chip_port", target=resonator, rate=0.04)
     circulator = network.circulator("circ")
     isolator = network.isolator("iso")
-    network.link(port, circulator.side(2))
-    network.link(circulator.side(3), isolator)
-    network.expose("drive", at=circulator.side(1))
-    network.expose("readout", at=isolator.side(2))
+    network.link(port, circulator.port(2))
+    network.link(circulator.port(3), isolator)
+    network.expose("drive", at=circulator.port(1))
+    network.expose("readout", at=isolator.port(2))
     chip = Chip([resonator], port_network=network)
 
     with pytest.raises(ValueError, match="side"):
@@ -487,11 +487,11 @@ def test_every_builtin_component_round_trips_as_kind_and_parameters() -> None:
     custom = network.component("custom", scattering=[[0.0, 1j], [1j, 0.0]], terminals=("a", "b"))
     cable = network.delay("cable", duration=1.5)
     hemt = network.amplifier("hemt", gain=50.0, added_noise=1.0)
-    network.link(port, circ.side(2))
-    network.link(circ.side(3), iso, loss, cable, hemt)
-    network.expose("readout", at=hemt.side(2))
-    network.expose("drive", at=circ.side(1))
-    network.expose("spare", at=circ.side(4))
+    network.link(port, circ.port(2))
+    network.link(circ.port(3), iso, loss, cable, hemt)
+    network.expose("readout", at=hemt.port(2))
+    network.expose("drive", at=circ.port(1))
+    network.expose("spare", at=circ.port(4))
     network.cascade(splitter.output_terminal("left"), phase, through, hybrid.input_terminal("left"))
     network.cascade(splitter.output_terminal("right"), swap.input_terminal("0"))
     network.cascade(hybrid.output_terminal("left"), custom.input_terminal("a"))
@@ -703,9 +703,9 @@ def _two_line_chip() -> Chip:
     loss = network.attenuator("loss", eta=0.5)
     cable = network.delay("cable", duration=1.0)
     network.link(port_a, loss)
-    network.expose("line_a", at=loss.side(2))
+    network.expose("line_a", at=loss.port(2))
     network.link(port_b, cable)
-    network.expose("line_b", at=cable.side(2))
+    network.expose("line_b", at=cable.port(2))
     return Chip([first, second], port_network=network)
 
 
@@ -720,7 +720,7 @@ def test_restrict_keeps_the_subgraphs_touching_selected_ports() -> None:
 
     assert [port.label for port in line_a.ports] == ["pa"]
     assert {component.label for component in line_a.components} == {"pa", "loss"}
-    assert [exposure.label for exposure in line_a.exposures] == ["line_a"]
+    assert [exposure.label for exposure in line_a.external_ports] == ["line_a"]
     sub = Chip([Resonator(freq=5.0, levels=2, label="a")], port_network=line_a).resolve().slh
     keys = [channel.key for channel in full.channels]
     rows = [keys.index(channel.key) for channel in sub.channels]
@@ -728,7 +728,7 @@ def test_restrict_keeps_the_subgraphs_touching_selected_ports() -> None:
     assert "component.loss.eta" in line_a.parameters and "component.cable.duration" not in line_a.parameters
 
     line_b = network.restrict(["pb"])
-    assert [exposure.label for exposure in line_b.exposures] == ["line_b"]
+    assert [exposure.label for exposure in line_b.external_ports] == ["line_b"]
     resolved_b = Chip([Resonator(freq=5.4, levels=2, label="b")], port_network=line_b).resolve().slh
     assert [element.label for element in resolved_b.external_channels[0].reference.outbound] == ["cable"]
 
@@ -757,8 +757,8 @@ def _readout_line() -> PortNetwork:
     cable = line.delay("cable", duration=2.0)
     hemt = line.amplifier("hemt", gain=100.0, added_noise=2.0)
     line.link(loss, isolator, cable, hemt)
-    line.expose("chip", at=loss.side(1))
-    line.expose("room", at=hemt.side(2))
+    line.expose("chip", at=loss.port(1))
+    line.expose("room", at=hemt.port(2))
     return line
 
 
@@ -771,15 +771,15 @@ def test_include_instantiates_a_block_per_line_with_prefixed_labels() -> None:
     for resonator, prefix in ((first, "r1"), (second, "r2")):
         port = network.port(f"{prefix}_port", target=resonator, rate=0.02)
         line = network.include(template, prefix=prefix)
-        network.link(port, line.side("chip"))
-        network.expose(f"{prefix}_out", at=line.side("room"))
+        network.link(port, line.port("chip"))
+        network.expose(f"{prefix}_out", at=line.port("room"))
     chip = Chip([first, second], port_network=network)
 
     labels = {component.label for component in network.components}
     assert {"r1/att", "r1/iso", "r1/cable", "r1/hemt", "r2/att", "r2/hemt"} <= labels
     assert {"component.r1/att.eta", "component.r2/cable.duration"} <= set(network.parameters)
     assert len(template.components) == 4
-    assert [exposure.label for exposure in template.exposures] == ["chip", "room"]
+    assert [exposure.label for exposure in template.external_ports] == ["chip", "room"]
 
     resolved = chip.resolve().slh
     keys = [channel.key for channel in resolved.channels]
@@ -791,7 +791,7 @@ def test_include_instantiates_a_block_per_line_with_prefixed_labels() -> None:
     loss = by_hand.attenuator("att", eta=0.5)
     hemt = by_hand.amplifier("hemt", gain=100.0, added_noise=2.0)
     by_hand.link(port, loss, by_hand.isolator("iso"), by_hand.delay("cable", duration=2.0), hemt)
-    by_hand.expose("r1_out", at=hemt.side(2))
+    by_hand.expose("r1_out", at=hemt.port(2))
     lone = Chip([Resonator(freq=5.0, levels=2, label="a")], port_network=by_hand).resolve().slh
     np.testing.assert_allclose(resolved.S[0, 0], lone.S[0, 0])
     np.testing.assert_allclose(resolved.L[0].to_dense(), np.kron(lone.L[0].to_dense(), np.eye(2)))
@@ -819,9 +819,9 @@ def test_include_interfaces_and_rejections() -> None:
     assert [channel.key for channel in resolved.channels] == ["through", "side"]
     assert block.component("phi").label == "b/phi"
     with pytest.raises(ValueError, match="input\\(\\)|output\\(\\)"):
-        block.side("in")
+        block.port("in")
     with pytest.raises(KeyError):
-        block.side("missing")
+        block.port("missing")
 
     with_ports = PortNetwork(label="with_ports")
     with_ports.port("q", target=resonator, rate=0.01)
@@ -845,8 +845,8 @@ def test_copied_component_parameters_do_not_alias_authored_arrays() -> None:
     eta = np.asarray(0.64)
     template = PortNetwork(label="template")
     loss = template.attenuator("loss", eta=eta)
-    template.expose("chip", at=loss.side(1))
-    template.expose("room", at=loss.side(2))
+    template.expose("chip", at=loss.port(1))
+    template.expose("room", at=loss.port(2))
     copied = template.copy()
     host = PortNetwork(label="host")
     host.include(template, prefix="a")
@@ -864,14 +864,14 @@ def test_include_keeps_filter_callables_by_reference() -> None:
 
     template = PortNetwork(label="filtered")
     stage = template.filter("lp", transfer=lowpass, cutoff=8.0)
-    template.expose("chip", at=stage.side(1))
-    template.expose("room", at=stage.side(2))
+    template.expose("chip", at=stage.port(1))
+    template.expose("room", at=stage.port(2))
     resonator = Resonator(freq=5.0, levels=2, label="r")
     network = PortNetwork(label="host")
     port = network.port("p", target=resonator, rate=0.02)
     block = network.include(template, prefix="f")
-    network.link(port, block.side("chip"))
-    network.expose("out", at=block.side("room"))
+    network.link(port, block.port("chip"))
+    network.expose("out", at=block.port("room"))
     chip = Chip([resonator], port_network=network)
 
     resolved = chip.resolve().slh
@@ -888,7 +888,7 @@ def test_directional_component_side_error_is_actionable() -> None:
     network = PortNetwork(label="line")
     splitter = network.beam_splitter("bs", eta=0.5)
     with pytest.raises(ValueError, match="directional.*input_terminal"):
-        splitter.side("left")
+        splitter.port("left")
     with pytest.raises(ValueError, match="directional"):
         network.link(network.port("p", target=Resonator(freq=5.0, levels=2, label="r"), rate=0.02), splitter)
 

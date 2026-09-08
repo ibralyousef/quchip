@@ -1048,7 +1048,7 @@ class CollapseTerm:
         symbols = {
             "T1": "T_1",
             "T2": "T_2",
-            "thermal_population": r"\bar n",
+            "thermal_occupation": r"\bar n",
             "internal_quality_factor": "Q_\\mathrm{int}",
             "external_quality_factor": "Q_\\mathrm{ext}",
         }

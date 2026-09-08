@@ -16,7 +16,7 @@ from quchip.engine.linear_response import try_build_linear_response_problem
 from quchip.engine.reference import (
     FieldChannel, cw_transfer,
 )
-from quchip.results.measurement import MeasurementResult
+from quchip.results.measurement import VNAMeasurement
 from quchip.sweep import Sweep, ZippedSweep, _iter_axis_points
 from quchip.utils.jax_utils import contains_tracer
 from quchip.utils.labeling import resolve_label
@@ -98,7 +98,7 @@ def capture_linear(
 def measure(
     vna: Any, frequencies: Any, amplitudes: Any, variations: tuple[Sweep | ZippedSweep, ...], *,
     input: Any, outputs: Any, noise_frequencies: Any, options: Any, progress: bool,
-) -> MeasurementResult:
+) -> VNAMeasurement:
     """Acquire physical fields and correlations once per probe/sweep point."""
     from quchip.analysis.vna import (
         _axis_values, _operating_point, _plane_means, _public_axes, _resolve_exposure,
@@ -178,7 +178,7 @@ def measure(
                xp.stack([point[name][1] for point in captured]).reshape((*shape, len(offsets), size, size)))
         for name in names
     }
-    return MeasurementResult(
+    return VNAMeasurement(
         ports=labels, input=resolve_label(input_label),
         frequencies=frequency_values if frequency_axis else frequency_values[0],
         amplitudes=amplitude_values if amplitude_axis else amplitude_values[0], axes=axes, shape=shape,

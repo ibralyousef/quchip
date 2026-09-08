@@ -1,4 +1,4 @@
-# quchip Physics Reference
+# Physics reference
 
 This document states the physics contracts implemented by quchip. It distinguishes authored and resolved Hamiltonians, records where local bases, frames, and RWA are applied, and states the engine's assumptions.
 
@@ -111,8 +111,8 @@ Source: [`quchip/devices/base.py`](quchip/devices/base.py)
 The standard dissipators are:
 
 - `T1`: relaxation through `a`
-- `T2`: pure dephasing through `sqrt(2*gamma_phi) * n` with `gamma_phi = 1/T2 - 1/(2*T1)`. The factor `2` makes the 0–1 coherence decay at `1/(2*T1) + gamma_phi = 1/T2`, so the input `T2` is the resulting coherence time (when `thermal_population == 0`). The number operator `n` gives the standard `(m-n)^2` dephasing scaling across higher levels.
-- thermal up/down channels when `thermal_population` is set
+- `T2`: pure dephasing through `sqrt(2*gamma_phi) * n` with `gamma_phi = 1/T2 - 1/(2*T1)`. The factor `2` makes the 0–1 coherence decay at `1/(2*T1) + gamma_phi = 1/T2`, so the input `T2` is the resulting coherence time (when `thermal_occupation == 0`). The number operator `n` gives the standard `(m-n)^2` dephasing scaling across higher levels.
+- thermal up/down channels when `thermal_occupation` is set
 
 Devices, drives, couplings, and baths author `CollapseChannel` records that
 keep the local operator separate from its non-negative rate in `1/ns`. The
@@ -217,7 +217,7 @@ effective channel coefficient with magnitude squared `2γ(1 + cos φ)` and adds
 `φ = 2π f τ = ωτ`, with `f` in GHz and `τ` in ns, matches the
 `Δ = γ sin φ` convention of Kockum et al., Phys. Rev. A 90, 013837 (2014).
 
-`port.side` and `component.side(k)` each select one physical connector, pairing
+`port.side` and `component.port(k)` each select one physical connector, pairing
 that side's input and output terminals. `network.link(...)` cables consecutive
 sides in both directions; each cable compiles to two directed terminal
 connections. An ideal circulator routes `1 -> 2 -> 3 -> 1`; an isolator is a
@@ -983,7 +983,7 @@ the *full* resonator pull per qubit excitation. This is **2×** the σ_z-convent
 
 Analytic cross-checks (2nd-order dispersive): two-level `chi = 2g^2/Delta`; Duffing transmon `chi = 2g^2*alpha/(Delta*(Delta+alpha))` with `Delta = f_q − f_r` (Koch et al., PRA 76, 042319, §IV). Critical photon number `n_crit = Delta^2/(4g^2)`.
 
-`effective_params[q]["kappa"]` is the eliminated mode's total intrinsic downward decay rate, in 1/ns, as returned by `intrinsic_decay_rate()`. For a resonator it includes `2π*f_r/Q_internal` when `internal_quality_factor` is set and the inherited thermal-emission rate when `T1` or `thermal_population` is set. The latter is `(nbar + 1)/T1` with `T1`, or `nbar + 1` when only `thermal_population` is present. The reported value is `0.0` only when none of these intrinsic lowering channels is configured. An external default port on a linear resonator is transformed separately as described in §10.5 and is not folded into survivor `T1`; this avoids counting its Purcell channel twice. Bridge legs report `chi = 0.0`: bus/coupler modes are not readout modes, and their dressed pull would double-count the mediated exchange.
+`effective_params[q]["kappa"]` is the eliminated mode's total intrinsic downward decay rate, in 1/ns, as returned by `intrinsic_decay_rate()`. For a resonator it includes `2π*f_r/Q_internal` when `internal_quality_factor` is set and the inherited thermal-emission rate when `T1` or `thermal_occupation` is set. The latter is `(nbar + 1)/T1` with `T1`, or `nbar + 1` when only `thermal_occupation` is present. The reported value is `0.0` only when none of these intrinsic lowering channels is configured. An external default port on a linear resonator is transformed separately as described in §10.5 and is not folded into survivor `T1`; this avoids counting its Purcell channel twice. Bridge legs report `chi = 0.0`: bus/coupler modes are not readout modes, and their dressed pull would double-count the mediated exchange.
 
 Gradients through `chi` follow the same rule as `Chip.freq` (§13): the eigensystem must come from a JAX-capable backend.
 
@@ -1144,7 +1144,7 @@ When you need to audit a physics path, start here:
 - control-line retargeting across reductions: [`quchip/chip/retarget.py`](quchip/chip/retarget.py)
 - readout pointer states and figures of merit: [`quchip/analysis/dispersive_readout.py`](quchip/analysis/dispersive_readout.py)
 
-## Terminal measurement
+## Measurement of saved states
 
 `SimulationResult.measure(*devices, t=None, basis="energy")` projects a retained
 ket or density matrix in the captured local isolated energy bases. `t=None`
@@ -1158,7 +1158,7 @@ Shot sampling applies the Born rule without further quantum evolution.
 `assignment[recorded, physical]` is column-stochastic. `IQReadout` defines one
 conditional complex Gaussian distribution per physical outcome; its total
 mixture covariance includes both within-outcome covariance and the covariance
-of conditional means. These terminal detector models do not change solver
+of conditional means. These readout models do not change solver
 selection, return collapsed states, or describe continuous quantum trajectories.
 
 `IQReadout.from_wiring(chip, output, ...)` resolves a detector without quantum
@@ -1168,7 +1168,7 @@ captured output reference sections and downstream mixing. Unspecified boundary
 channels are vacuum. It includes downstream added noise and ideal heterodyne
 vacuum through the same propagation and integration used by VNA. Boundary
 thermal noise, device correlations and transient field correlations are outside
-this coherent-template model; calibrated conditional distributions may include
+this coherent-field readout model; calibrated conditional distributions may include
 those effects instead. A calibrated full covariance must not receive the same
 apparatus noise a second time. Input baths and port decay remain in the declared
-quantum dynamics, irrespective of the terminal detector choice.
+quantum dynamics, irrespective of the readout model.

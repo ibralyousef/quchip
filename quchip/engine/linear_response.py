@@ -53,7 +53,7 @@ def _build_linear_response_problem(
         for device in chip.devices
     ):
         raise _UnsupportedLinearModel
-    if any(device.thermal_population is not None for device in chip.devices):
+    if any(device.thermal_occupation is not None for device in chip.devices):
         raise _UnsupportedLinearModel
 
     backend = chip.backend

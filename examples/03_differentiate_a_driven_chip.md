@@ -15,14 +15,14 @@ jupyter:
 
 <!-- reader-content -->
 
-# Differentiability
+# Gradients and parameter fitting
 
 Differentiate dressed observables and pulse responses, and use JAX gradients
-to fit experimental spectroscopy.
+to fit measured spectroscopy.
 
-## Losses through statics
+## Gradients of spectral observables
 
-A scalar loss has a gradient. A vector residual has a Jacobian. Both pass
+A scalar fitting objective has a gradient. A vector residual has a Jacobian. Both pass
 through the same public `Chip.with_params()` call.
 
 The second observable uses the sigma-z convention
@@ -47,7 +47,7 @@ chip = Chip(
 
 ```
 
-Define a scalar loss and vector residual. `jax.grad` gives the loss gradient;
+Define a scalar fitting objective and vector residual. `jax.grad` gives the loss gradient;
 `jax.jacrev` gives the observable Jacobian. Sweep the coupling to compare the
 resolved curve with its local tangent.
 
@@ -146,7 +146,7 @@ The black point is where `jax.jacrev` evaluates the slope. The dispersive shift
 bends away from its tangent faster than $f_{01}$ over this range.
 ```
 
-## Fit experimental statics
+## Fit measured spectroscopy
 
 Stefanski *et al.* fitted a fluxonium spectrum to obtain $E_C$, $E_J$, and
 $E_L$. Their [paper](https://arxiv.org/abs/2411.13437) and
@@ -670,7 +670,7 @@ RESULT gradient={"backend":"dynamiqs","base_population":0.995519779566944,"figur
 
 </details>
 
-## Boundaries of this gradient
+## Gradient assumptions and limits
 
 The traced calculation keeps the device graph, Hilbert-space dimensions, and
 RWA band selection fixed. dynamiqs supports this automatic-differentiation

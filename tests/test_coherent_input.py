@@ -29,7 +29,7 @@ def _one_port_chip(*, rate: float = 0.04, delay: float = 0.0) -> tuple[Chip, Res
     if delay:
         cable = network.delay("cable", duration=delay)
         network.link(port, cable)
-        network.expose("feedline", at=cable.side(2))
+        network.expose("feedline", at=cable.port(2))
     chip = Chip([resonator], port_network=network, frame="lab")
     return chip, resonator
 

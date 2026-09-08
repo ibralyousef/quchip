@@ -119,7 +119,7 @@ def test_base_device_collapse_operators_accept_traced_noise_params() -> None:
                 levels=3,
                 T1=T1,
                 T2=T2,
-                thermal_population=n_bar,
+                thermal_occupation=n_bar,
             )
             c_ops = q.collapse_operators()
         return jnp.real(c_ops[0][0, 1] + c_ops[1][1, 0] + c_ops[2][1, 1])

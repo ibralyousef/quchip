@@ -12,17 +12,17 @@ def line(*, occupation=None, backend="qutip", mixed=False):
     circ = net.circulator("circ")
     iso = net.isolator("iso", occupation=occupation)
     amp = net.amplifier("hemt", gain=100.0, added_noise=1.0)
-    net.link(port, circ.side(2))
+    net.link(port, circ.port(2))
     if mixed:
         loss = net.attenuator("loss", eta=0.25, occupation=0.2)
         second = net.amplifier("second", gain=10.0, added_noise=2.0)
-        net.link(circ.side(3), amp, iso, loss, second)
+        net.link(circ.port(3), amp, iso, loss, second)
         tail = second
     else:
-        net.link(circ.side(3), iso, amp)
+        net.link(circ.port(3), iso, amp)
         tail = amp
-    drive = net.expose("drive", at=circ.side(1))
-    readout = net.expose("readout", at=tail.side(2))
+    drive = net.expose("drive", at=circ.port(1))
+    readout = net.expose("readout", at=tail.port(2))
     return Chip([r], port_network=net, backend=backend), drive, readout
 
 
@@ -174,7 +174,7 @@ def split_thermal(*, delay=0.0, backend="qutip"):
     net.connect(split.output_terminal("right"), cable.input_terminal("1"))
     net.connect(cable.output_terminal("1"), load.input_terminal("1"))
     left = net.expose("left", input=split.input_terminal("left"), output=split.output_terminal("left"))
-    right = net.expose("right", at=cable.side(2))
+    right = net.expose("right", at=cable.port(2))
     return Chip([mode], port_network=net, backend=backend), left, right
 
 
