@@ -137,7 +137,8 @@ from quchip.results import (
     OutputCorrelationResult,
     OutputSpectrumResult,
 )
-from quchip.results.measurement import IQReceiver, MeasurementResult, MeasurementStatistics, MeasurementSamples
+from quchip.results.receiver import IQReceiver
+from quchip.results.measurement import MeasurementResult, MeasurementStatistics, MeasurementSamples
 from quchip.sweep import SpectrumSweep, Sweep, ZippedSweep
 from quchip.utils.constants import Phi_0, hbar, k_B
 
@@ -157,7 +158,12 @@ _LAZY_VIZ_EXPORTS = {
     "plot_wigner": ("quchip.viz.results", "plot_wigner"),
 }
 
+from quchip.results.terminal import IQReadout, TerminalMeasurement, TerminalSamples
+
 __all__ = [
+    "IQReadout",
+    "TerminalMeasurement",
+    "TerminalSamples",
     # Version
     "__version__",
     # Engine approximation strategies

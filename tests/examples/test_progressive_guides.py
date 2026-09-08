@@ -97,7 +97,8 @@ def test_committed_markdown_contains_current_notebook_outputs() -> None:
 
 
 @pytest.mark.examples
-@pytest.mark.parametrize("guide", ["defining-and-inspecting-a-chip", "steady-state-and-vna", "slh-networks"])
+@pytest.mark.parametrize("guide", ["defining-and-inspecting-a-chip", "steady-state-and-vna", "slh-networks",
+                                   "dynamics-pulses-and-readout"])
 def test_guide_outputs_match_a_fresh_execution(guide: str) -> None:
     """Standalone guides execute their physical checks and reproduce shown output."""
     path = ROOT / "docs" / "guides" / f"{guide}.md"

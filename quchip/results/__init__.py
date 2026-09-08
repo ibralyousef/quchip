@@ -26,9 +26,15 @@ from quchip.results.input_output import (
     SParameterResult,
 )
 
-from quchip.results.measurement import IQReceiver, MeasurementResult, MeasurementSamples, MeasurementStatistics
+from quchip.results.receiver import IQReceiver
+from quchip.results.measurement import MeasurementResult, MeasurementSamples, MeasurementStatistics
+
+from quchip.results.terminal import IQReadout, TerminalMeasurement, TerminalSamples
 
 __all__ = [
+    "IQReadout",
+    "TerminalMeasurement",
+    "TerminalSamples",
     "IQReceiver",
     "MeasurementResult",
     "MeasurementSamples",

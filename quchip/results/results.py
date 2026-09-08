@@ -120,7 +120,9 @@ class SimulationResult:
         channels: tuple[SLHChannel, ...] = (),
         bases: dict[str, Any] | None = None,
         dissipation: bool = True,
+        readout_wiring: Any = None,
     ) -> None:
+        self._readout_wiring = readout_wiring
         self._backend = backend
         self._truncation: Any = None
         self._boundary_traces: tuple[Any, ...] | None = None
@@ -409,6 +411,35 @@ class SimulationResult:
             return self._final_state
         raise RuntimeError('No final state available; run with states="all" or states="final" to retain it.')
 
+    def iq_readout(self, output: Any, *, means: Any, frequency: Any, receiver: Any,
+                   noise_frequencies: Any = None) -> Any:
+        """Propagate conditional coherent boundary fields through captured output wiring.
+
+        means gives one noiseless complex field per outcome, in 1/sqrt(ns),
+        at the selected Markov boundary channel. A mapping supplies fields at
+        several boundary channels; unspecified fields are vacuum. The output
+        line adds its resolved gain, filter loss noise, and amplifier noise.
+        This stationary coherent-state readout model excludes quantum-device
+        correlations and occupied boundary inputs. Use calibrated IQReadout
+        distributions when those effects are included in a detector calibration.
+        """
+        if self._readout_wiring is None:
+            raise RuntimeError("No captured output wiring is available for this result.")
+        return self._readout_wiring.iq_readout(output, means=means, frequency=frequency,
+                                             receiver=receiver, noise_frequencies=noise_frequencies)
+
+    def measure(self, *devices: Any, t: Any = None, basis: Any = "energy") -> Any:
+        """Measure retained states in local energy bases, without further evolution.
+
+        Pass multiple devices for joint outcomes, t for an exact saved time,
+        or basis='solver'. Custom local unitary columns are expressed in the
+        captured energy basis of the stored integration frame: one matrix for
+        one device, or a device mapping. No phase-frame conversion is applied.
+        Samples at different times represent independently terminated experiments.
+        """
+        from quchip.results.terminal import measure_result
+        return measure_result(self, devices, t=t, basis=basis)
+
     def reduced_state(self, t: float, device: str | BaseDevice) -> Any:
         """Partial-trace the state at time *t* down to *device*'s subspace."""
         dev_idx, _ = self._resolve_device_idx(device)
@@ -585,6 +616,18 @@ class SimulationBatchResult(BatchResult[SimulationResult]):
     a loss function that sums over the batch stays JAX-traceable end-to-end.
     """
 
+    def measure(self, *devices: Any, t: Any = None, basis: Any = "energy") -> Any:
+        """Measure retained states in local energy bases, without further evolution.
+
+        Pass multiple devices for joint outcomes, t for an exact saved time,
+        or basis='solver'. Custom local unitary columns are expressed in the
+        captured energy basis of the stored integration frame: one matrix for
+        one device, or a device mapping. No phase-frame conversion is applied.
+        Samples at different times represent independently terminated experiments.
+        """
+        from quchip.results.terminal import measure_result
+        return measure_result(self, devices, t=t, basis=basis)
+
     def _require_shared_times(self, values: Any) -> Any:
         from quchip.results._time import require_valid
 
@@ -722,6 +765,8 @@ def _wrap(
             resolved_frame=resolved_frame,
             engine_result=engine_result,
         )
+    from quchip.analysis.field_noise import ReadoutWiring
+
     return SimulationResult(
         solver_result=solver_result,
         backend=backend,
@@ -732,6 +777,7 @@ def _wrap(
         channels=engine_result.slh.channels if engine_result.dissipation else (),
         bases=engine_result.bases,
         dissipation=engine_result.dissipation,
+        readout_wiring=ReadoutWiring.capture(engine_result.slh, backend.array_module),
     )
 
 

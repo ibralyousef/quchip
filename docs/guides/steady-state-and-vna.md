@@ -430,3 +430,7 @@ amplifier saturation, finite reverse isolation, and reverse amplifier noise.
 
 For lifetime design, continue with [Purcell filtering and the T1 budget](slh-networks.md).
 For pulse shaping and cavity depletion, see [pulses, leakage, and readout](dynamics-pulses-and-readout.md#empty-the-resonator-after-readout).
+
+For counts or calibrated IQ after a pulse sequence, see
+[terminal measurements](dynamics-pulses-and-readout.md#measure-a-prepared-state).
+The receiver and output-noise conventions are shared with this guide.
