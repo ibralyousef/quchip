@@ -596,6 +596,13 @@ and `noise_frequency=` in GHz. A matched absorptive `network.filter()` uses
 in their declared network order, including shared noise at splitter outputs.
 A load that reaches a quantum coupling changes the dynamics.
 
-See [the executed resonator example](guides/noisy-vna-measurement.md) for the
+Use `loss_db` instead of `eta` for attenuation in dB. Amplifiers accept
+`gain_db` and either `noise_temperature` in mK or `noise_figure_db` referenced
+to 290 K, with `noise_frequency` in GHz. These conventions remain parameter
+paths; their conversion to added quanta occurs when resolving the model.
+`measurement.noise_spectrum(readout, unit="dBm/Hz")` reports physical output
+fluctuation density, excluding coherent signal and detector vacuum.
+
+See [the fridge guide](guides/steady-state-and-vna.md) for the
 comparison, covariance budget, and captured-grid limits. Draws use a Gaussian
 second-moment approximation; they are not quantum trajectories.

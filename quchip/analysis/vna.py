@@ -365,14 +365,14 @@ class VNA:
         components, _ = capture_noise(operating, self.chip.backend, (output_port,), carrier,
                                       xp.asarray(frequency_values))
 
-        def normal_spectrum(pair: tuple[Any, Any]) -> Any:
-            white, excess = pair
-            spectrum = white + excess
-            return xp.real(spectrum[..., 0, 0] + spectrum[..., 1, 1]
-                           + 1j * (spectrum[..., 1, 0] - spectrum[..., 0, 1]))
+        from quchip.analysis.field_statistics import normal_spectrum
 
-        signal = normal_spectrum(components["device.correlations"])
-        added_noise = sum((normal_spectrum(pair) for name, pair in components.items()
+        def source_spectrum(pair: tuple[Any, Any]) -> Any:
+            white, excess = pair
+            return normal_spectrum(white + excess, xp)
+
+        signal = source_spectrum(components["device.correlations"])
+        added_noise = sum((source_spectrum(pair) for name, pair in components.items()
                            if name != "device.correlations"), xp.zeros_like(frequency_values))
         return OutputSpectrumResult(
             port=output_port,

@@ -61,10 +61,12 @@ def quadrature_spectrum(
 
 def complex_covariance(values: Any, xp: Any) -> Any:
     """Convert E[z_i z_j*] to the covariance of (Re z_i, Im z_i)."""
-    blocks = xp.stack((xp.stack((xp.real(values), -xp.imag(values)), axis=-1),
-                       xp.stack((xp.imag(values), xp.real(values)), axis=-1)), axis=-2) / 2
-    count = values.shape[-1]
-    return xp.swapaxes(blocks, -3, -2).reshape((*values.shape[:-2], 2 * count, 2 * count))
+    return proper_spectrum(values, values, xp)
+
+
+def normal_spectrum(iq: Any, xp: Any) -> Any:
+    """Recover the upper-sideband normal spectrum from a single-output IQ block."""
+    return xp.real(iq[..., 0, 0] + iq[..., 1, 1] + 1j*(iq[..., 1, 0]-iq[..., 0, 1]))
 
 
 def quadrature_transfer(upper: Any, lower: Any, xp: Any) -> Any:
@@ -86,11 +88,7 @@ def block_diagonal(blocks: Any, xp: Any) -> Any:
 
 def proper_spectrum(upper: Any, lower: Any, xp: Any) -> Any:
     """Convert normal upper/lower cross-spectra to normally ordered IQ spectra."""
-    even, odd = (upper + xp.conj(lower)) / 4, (upper - xp.conj(lower)) / 4
-    blocks = xp.stack((xp.stack((even, 1j * odd), axis=-1),
-                       xp.stack((-1j * odd, even), axis=-1)), axis=-2)
-    count = upper.shape[-1]
-    return xp.swapaxes(blocks, -3, -2).reshape((*upper.shape[:-2], 2 * count, 2 * count))
+    return field_transfer(upper, lower, xp) / 2
 
 
 def field_transfer(upper: Any, lower: Any, xp: Any) -> Any:

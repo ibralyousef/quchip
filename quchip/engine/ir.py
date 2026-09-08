@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeAlias, cast
 import jax.tree_util as jtu
 import numpy as np
 
-from quchip.engine.reference import ReferencePlane
+from quchip.engine.reference import FieldChannel, ReferencePlane
 from quchip.utils.jax_utils import (
     array_namespace,
     contains_tracer,
@@ -1863,6 +1863,7 @@ class LinearResponseProblem:
     plane_indices: tuple[int, ...]
     inbound_transfer: Any
     outbound_transfer: Any
+    field_channels: tuple[FieldChannel, ...] = ()
 
 
 @dataclass(frozen=True)

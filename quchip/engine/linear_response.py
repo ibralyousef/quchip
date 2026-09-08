@@ -66,6 +66,7 @@ def _build_linear_response_problem(
             chip.approximation,
             mode_index,
             backend,
+            local=True,
         )
     for coupling in chip.couplings:
         hamiltonian = _add_hamiltonian_expr(
@@ -149,6 +150,7 @@ def _build_linear_response_problem(
         plane_indices=plane_indices,
         inbound_transfer=inbound_transfer,
         outbound_transfer=outbound_transfer,
+        field_channels=network._field_channels(compiled),
     )
 
 
@@ -158,6 +160,7 @@ def _add_hamiltonian_expr(
     approximation: Approximation,
     mode_index: dict[str, int],
     backend: Any,
+    *, local: bool = False,
 ) -> Any:
     if not isinstance(expression, PhysicsExpr):
         raise _UnsupportedLinearModel
@@ -166,6 +169,10 @@ def _add_hamiltonian_expr(
             sum(1 if kind == "adag" else -1 for factor_label, kind in factors if factor_label == label)
             for label in expression.labels
         )
+        if local and sum(weights) != 0:
+            # Active local terms can be stationary in their authored frame;
+            # a weight-only RWA cannot prove that they are off resonance.
+            raise _UnsupportedLinearModel
         if not approximation.keeps_operator_band(weights):
             continue
         if not factors:

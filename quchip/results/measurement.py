@@ -8,7 +8,8 @@ from typing import Any, Callable, Mapping
 
 import numpy as np
 
-from quchip.analysis.field_statistics import block_diagonal, quadrature_transfer
+from quchip.analysis.field_statistics import block_diagonal, normal_spectrum, quadrature_transfer
+from quchip.utils.constants import TWO_PI, hbar
 from quchip.results.input_output import MeanFieldResponseResult
 from quchip.utils.jax_utils import array_namespace, contains_tracer, is_jax_array, select_array_module
 from quchip.utils.labeling import resolve_label
@@ -202,6 +203,28 @@ class MeasurementResult(MeanFieldResponseResult):
         i = 2 * _index(self.ports, output)
         return MappingProxyType({name: white[..., None, i:i+2, i:i+2] + excess[..., i:i+2, i:i+2]
                                  for name, (white, excess) in self.noise_components.items()})
+
+    def noise_spectrum(self, output: Any, *, unit: str = "quanta") -> Any:
+        """Return physical output noise in quanta, W/Hz, or dBm/Hz.
+
+        The final axis is ``noise_frequencies`` relative to each probe carrier.
+        This normally ordered spectrum excludes coherent signal and receiver
+        vacuum. Power units use hf times occupation at the absolute sideband
+        frequency and require positive physical frequencies. No solve is run.
+        """
+        xp = array_namespace(self.values)
+        spectrum = normal_spectrum(sum(self.noise_contributions(output).values()), xp)
+        if unit == "quanta":
+            return spectrum
+        if unit not in {"W/Hz", "dBm/Hz"}:
+            raise ValueError("unit must be 'quanta', 'W/Hz', or 'dBm/Hz'.")
+        frequency = xp.broadcast_to(xp.asarray(self.frequencies), self.shape)[..., None] + self.noise_frequencies
+        if not contains_tracer(frequency) and np.any(np.asarray(frequency) <= 0):
+            raise ValueError("Power noise spectra require positive absolute sideband frequencies.")
+        power = TWO_PI*hbar*frequency*1e9*spectrum
+        if unit == "W/Hz":
+            return power
+        return xp.where(power > 0, 10*xp.log10(xp.where(power > 0, power, 1.0)/1e-3), -xp.inf)
 
     def statistics(self, *, receiver: IQReceiver) -> MeasurementStatistics:
         """Integrate captured spectra and detector vacuum without a solver call."""
