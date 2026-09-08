@@ -1,0 +1,12 @@
+<nav class="sidebar-tree docs-section-tree" aria-label="{{ docs_section }} pages">
+  {% if docs_section_tree %}
+  {{ docs_section_tree }}
+  {% else %}
+  {# Pages outside every section still get somewhere to go. #}
+  <ul>
+    {% for section in docs_sections %}
+    <li class="toctree-l1"><a class="reference internal" href="{{ pathto(section.doc) }}">{{ section.title }}</a></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</nav>
