@@ -428,9 +428,115 @@ amplifier saturation, finite reverse isolation, and reverse amplifier noise.
 
 </details>
 
+## Read a prepared qubit through the same line
+
+A Rabi calculation can stop after state preparation. To describe an omitted
+readout stage, supply its conditional coherent fields at the Markov boundary
+and let the fridge determine the downstream gain and noise.
+
+This two-level qubit undergoes one Rabi period. Its preparation is closed and
+uses `sesolve`; the readout model below does not change that evolution.
+
+```python
+from quchip import ChargeDrive, DuffingTransmon, IQReadout, QuantumSequence, Square
+
+q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="q")
+rabi_chip = Chip([q], frame="rotating")
+xy = ChargeDrive(q, label="xy")
+rabi_chip.wire(xy)
+rabi = QuantumSequence(rabi_chip)
+rabi.schedule(xy, envelope=Square(duration=40.0, amplitude=0.025), freq=5.0)
+result = rabi.simulate(tlist=np.linspace(0, 40, 81), check_truncation=False)
+
+detector = IQReadout.from_wiring(
+    readout_chip, readout, frequency=6.5,
+    means=[-0.01+0.001875j, 0.01-0.001875j],
+    receiver=IQReceiver(integration_time=100_000),
+)
+measurement = result.measure(q, t=10.0)
+shots = measurement.sample(1000, readout=detector, seed=7)
+```
+
+The supplied means are representative fields for outcomes 0 and 1, in
+$1/\sqrt{\mathrm{ns}}$, before the selected channel's output reference sections.
+They summarize the readout interaction; qubit populations alone cannot determine
+them. The detector includes downstream filter, cable and amplifier noise,
+plus heterodyne vacuum, integrated for 100 μs. `detector.contributions` gives
+the source covariance budget.
+
+Both panels use this detector. A midpoint threshold classifies the IQ shots;
+its overlap gives about 16% error for either outcome. The recorded Rabi curve
+therefore spans approximately 0.16–0.84 even though the quantum population
+spans 0–1. The qubit starts in |0⟩; this floor is a detection error.
+
+<details>
+<summary>Plot the Rabi counts and IQ record</summary>
+
+```python
+from scipy.special import ndtr
+
+centers = np.stack((detector.means.real, detector.means.imag), axis=-1)
+covariance = np.asarray(detector.iq_covariance[0])
+direction = np.linalg.solve(covariance, centers[1]-centers[0])
+threshold = direction @ centers.mean(axis=0)
+sigma = np.sqrt(direction @ covariance @ direction)
+excited_given_outcome = ndtr((centers @ direction-threshold)/sigma)
+
+times = np.asarray(result.times)
+probability = np.asarray(result.population(q, 1))
+recorded_probability = excited_given_outcome[0]*(1-probability) + excited_given_outcome[1]*probability
+fractions = []
+for i, t in enumerate(times[::4]):
+    record = result.measure(q, t=t).sample(256, readout=detector, seed=20+i)
+    vectors = np.stack((record.iq.real, record.iq.imag), axis=-1)
+    fractions.append(np.mean(vectors @ direction > threshold))
+
+figure, axes = plt.subplots(1, 2, figsize=(8.8, 3.65), layout="constrained")
+axes[0].plot(times, probability, color=ink, label="Born probability")
+axes[0].plot(times, recorded_probability, color=red, label="After fridge + threshold")
+axes[0].scatter(times[::4], fractions, s=18, color=blue, label="256 IQ shots", zorder=3)
+axes[0].set(xlabel="Pulse duration (ns)", ylabel="Recorded excited fraction", xlim=(0, 40), ylim=(-0.04, 1.1))
+axes[0].legend(fontsize=8, loc="upper right")
+for outcome, color in enumerate((blue, red)):
+    points = shots.iq[shots.physical_indices == outcome]
+    axes[1].scatter(points.real, points.imag, s=6, alpha=0.65, color=color,
+                    edgecolors="none", label=f"Outcome {outcome}")
+    axes[1].plot(centers[outcome, 0], centers[outcome, 1], "+", color=ink, ms=9, mew=1.4)
+span = np.max(np.abs(centers)) + 4*np.sqrt(np.max(np.diag(covariance)))
+tangent = np.array([-direction[1], direction[0]]) / np.linalg.norm(direction)
+boundary = centers.mean(axis=0)[:, None] + tangent[:, None]*np.array([-span, span])
+axes[1].plot(*boundary, color=muted, ls="--", lw=1, label="Threshold")
+axes[1].set(xlabel=r"I ($1/\sqrt{\mathrm{ns}}$)", ylabel=r"Q ($1/\sqrt{\mathrm{ns}}$)",
+            xlim=(-span, span), ylim=(-span, span))
+axes[1].set_aspect("equal", adjustable="box")
+axes[1].legend(fontsize=8, loc="upper center", ncol=2)
+figure.suptitle(r"Fridge output at 6.5 GHz $\cdot$ 100 $\mu$s integration", fontsize=12)
+figure.savefig("terminal_rabi.svg")
+plt.close(figure)
+```
+
+</details>
+
+```{figure} ../images/terminal_rabi.svg
+:alt: Rabi probability and thresholded counts through the fridge beside the same detector's overlapping IQ clouds.
+
+The output chain rotates and amplifies the supplied fields and broadens their
+IQ distributions. Colors mark physical outcomes; the threshold determines
+the recorded labels. [PDF](../images/terminal_rabi.pdf)
+```
+
+`result.measure()` works with either kets or density matrices, using captured
+local energy bases. Pass several devices for joint outcomes or `t=` for an
+exact saved state. Final measurement works with `states="final"`; different
+measurement times represent separate terminated experiments.
+
+If a simulation already includes the fridge, `result.iq_readout(...)` reuses
+its captured wiring. `IQReadout.from_wiring(...)` resolves the current wiring
+without quantum evolution. Both assume coherent boundary fields and vacuum in
+unspecified channels; occupied boundary inputs and device field correlations
+need a fuller field calculation or a detector calibration that includes them.
+Use a calibrated `IQReadout(means, iq_covariance)` directly in that case,
+without adding the same apparatus noise again.
+
 For lifetime design, continue with [Purcell filtering and the T1 budget](slh-networks.md).
 For pulse shaping and cavity depletion, see [pulses, leakage, and readout](dynamics-pulses-and-readout.md#empty-the-resonator-after-readout).
-
-For counts or calibrated IQ after a pulse sequence, see
-[terminal measurements](dynamics-pulses-and-readout.md#measure-a-prepared-state).
-The receiver and output-noise conventions are shared with this guide.
