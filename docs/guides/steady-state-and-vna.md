@@ -1,25 +1,24 @@
 # Resonator readout and fridge wiring
 
-Follow one three-resonator chip from its fridge wiring to a stationary VNA
-response and sampled IQ. Frequencies are in GHz, times in ns, temperatures
-in mK, and decay rates in `1/ns`. Run the cells in order.
+Measure three resonators through a common bus and a fridge readout line, then
+sample the VNA trace at two integration times. Frequencies are in GHz, times
+in ns, temperatures in mK, and decay rates in `1/ns`. Run the cells in order.
 
-## Define the resonators and their bus
+## Couple the resonators to a bus
 
-Three harmonic resonators span 6–7 GHz and exchange photons with a 6.5 GHz
-bus. Only the bus couples directly to the measurement line. Each internal Q
-sets a loss rate; each design Qe sets the coupling to the lossy bus. The full
-coupled response determines the shifted resonances and their linewidths.
-These are illustrative parameters, not a fit to a measured chip.
+The resonators lie at 6.4, 6.5, and 6.6 GHz. Each has its own internal loss;
+all three exchange photons with a 6.5 GHz bus connected to the measurement
+line. The bus has a 1 GHz external linewidth. The resonators' nominal loaded
+linewidths are 11–18 MHz.
 
 ```python
 import numpy as np
 from scipy.signal import butter
 from quchip import Capacitive, Chip, IQReceiver, PortNetwork, Resonator, RWA, VNA, qnp
 
-mode_frequencies = np.array([6.0, 6.45, 7.0])
-internal_q = np.array([8000, 25000, 12000])
-external_q = np.array([1800, 3200, 2200])
+mode_frequencies = np.array([6.4, 6.5, 6.6])
+internal_q = np.array([1800, 3200, 2400])
+external_q = np.array([450, 750, 550])
 bus = Resonator(freq=6.5, levels=3, internal_quality_factor=100_000, label="bus")
 resonators = [Resonator(freq=f, levels=3, internal_quality_factor=qi, label=f"r{i+1}")
               for i, (f, qi) in enumerate(zip(mode_frequencies, internal_q))]
@@ -34,41 +33,26 @@ couplings = [Capacitive(bus, r, g=g, label=f"bus_r{i+1}")
              for i, (r, g) in enumerate(zip(resonators, coupling_strengths))]
 ```
 
-The bus has a 1 GHz external linewidth. The coupling formula uses each
-resonator's isolated response through that bus to set a nominal Qe. The
-simulation retains all three couplings, including their mutual effect through
-the bus. RWA keeps the exchange terms. Harmonic stationary acquisition uses
-mode-space equations, so the local `levels` do not truncate this calculation;
-nonlinear devices retain the density-matrix solver.
+`internal_quality_factor` sets each resonator's intrinsic decay. We set the
+couplings from a nominal external Q, using the bus susceptibility at each
+bare resonator frequency:
 
-## Wire the fridge and define its noise
+```{math}
+\kappa_{e,r} = \frac{(2\pi g_r)^2\,\kappa_{e,b}}
+{(\kappa_b/2)^2 + [2\pi(f_r-f_b)]^2},
+\qquad Q_{e,r}=\frac{2\pi f_r}{\kappa_{e,r}}.
+```
 
-Passive loss is specified in dB and its load temperature in mK. The HEMT uses
-gain in dB and equivalent input noise temperature; the room amplifier uses
-noise figure. The physical and equivalent temperatures have different meanings:
+The simulation includes all three couplings, so the resonances shift and their
+linewidths change through the shared bus. RWA retains the photon-exchange
+terms. These are representative parameters.
 
-| Element | Declaration | Noise model |
-|---|---|---|
-| Attenuator or cable | `loss_db`, `temperature`, `noise_frequency` | Planck occupation at the physical load temperature |
-| Isolator | Load `temperature`, plus a separate insertion loss | Reverse field terminates in the load; the load emits upstream |
-| Circulator | Ideal routing, unless loss terminals are explicitly added | No dissipative noise from an ideal unitary component |
-| Matched absorptive filter | Complex `transfer`, `loss_temperature` | Emission proportional to absorbed power, `(1 - abs(H)**2) * n` |
-| HEMT | `gain_db`, `noise_temperature`, `noise_frequency` | Equivalent added noise `k_B * T_e / (h * f)` |
-| Room amplifier | `gain_db`, `noise_figure_db`, `noise_frequency` | `T_e = 290 K * (10**(NF/10) - 1)` |
+## Put the chip in the fridge
 
-`gain` (linear power gain), `eta` (power transmission), and `added_noise`
-(input-referred symmetrized quanta) remain available. Choose one convention
-for each quantity. Noise temperature is **not** the HEMT's physical stage
-temperature. The noise-frequency reference fixes the occupation over the
-Markov band and remains a model parameter. For context, cryogenic amplifier
-datasheets report [gain and equivalent noise temperature](https://lownoisefactory.com/wp-content/uploads/2026/02/lnf-lnc4_8sg.pdf);
-[noise figure uses a 290 K reference](https://helpfiles.keysight.com/csg/pxivna/Applications/Noise_Figure.htm).
-
-Both filters have half-power edges at 4 and 8 GHz. A fourth-order Butterworth
-low-pass prototype gives an eighth-order bandpass. The input filter sees a
-vacuum source; the thermal attenuators follow it, so their emitted noise reaches
-the chip without passing through that filter. A colored thermal reservoir
-feeding a quantum coupling requires an explicit dynamical filter/bath model.
+A mixing-chamber circulator sends port 1 to the bus on port 2 and routes its
+reflection to port 3. Input attenuation is distributed across 4 K, the cold
+plate, and the mixing chamber. Two output isolators precede the 4 K HEMT.
+Both lines contain a 4–8 GHz bandpass filter.
 
 ```python
 filter_b, filter_a = butter(4, [4.0, 8.0], btype="bandpass", analog=True)
@@ -93,6 +77,30 @@ output_filter = fridge.filter("output_4_8GHz", transfer=passband,
 coax = fridge.attenuator("output_coax", loss_db=2, temperature=4000, noise_frequency=6.5)
 hemt = fridge.amplifier("HEMT_4K", gain_db=40, noise_temperature=2500, noise_frequency=6.5)
 room_amp = fridge.amplifier("amp_RT", gain_db=20, noise_figure_db=3, noise_frequency=6.5)
+```
+
+`loss_db` is the power loss in dB. An attenuator's `temperature` sets the
+occupation of its dissipative load at `noise_frequency`. The isolator loads
+are at 20 mK; their combined insertion loss is represented by `iso_loss`.
+The circulator routes fields ideally and adds no noise of its own.
+
+For the HEMT, `noise_temperature=2500` is a 2.5 K equivalent input noise
+temperature. It specifies the added noise, independently of the physical
+4 K stage. The room amplifier instead uses a 3 dB noise figure relative to
+290 K. These match the [noise-temperature](https://lownoisefactory.com/wp-content/uploads/2026/02/lnf-lnc4_8sg.pdf)
+and [noise-figure](https://helpfiles.keysight.com/csg/pxivna/Applications/Noise_Figure.htm)
+conventions used for amplifier specifications.
+
+The filters have half-power edges at 4 and 8 GHz. `loss_temperature` describes
+the noise emitted by absorbed power in the output filter. Here the input
+filter sees a vacuum source, with the thermal attenuators downstream of it.
+The resonators' intrinsic loss baths are also vacuum.
+
+Connect the input chain to circulator side 1, the bus to side 2, and the
+receiver chain to side 3. Expose `drive` for the source and `readout` for the
+receiver.
+
+```python
 fridge.link(input_filter, att_4k, att_cp, att_mxc, circ.side(1))
 fridge.link(circ.side(2), port)
 fridge.link(circ.side(3), iso_1, iso_loss, iso_2, output_filter, coax, hemt, room_amp)
@@ -102,57 +110,108 @@ readout_chip = Chip([bus, *resonators], couplings, port_network=fridge,
                     approximation=RWA(), frame="rotating")
 ```
 
-The circulator routes the reflected signal through two ideal isolators with
-1 dB combined insertion loss, a cold filter, 2 dB of cable loss at 4 K, and
-the amplifiers. Internal Qi baths and the coherent source are vacuum. Thermal
-input changes the harmonic stationary fluctuations; the mean remains linear.
-Saturation, compression, and finite reverse isolation are not included.
-
 <details>
-<summary>Draw the same fridge wiring</summary>
+<summary>Draw the fridge wiring</summary>
 
 ```python
 import shutil
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, Rectangle
+from matplotlib.patches import Arc, Circle, FancyArrowPatch, Polygon, Rectangle
 
 plt.style.use("../_static/quchip.mplstyle")
 plt.rcParams["text.usetex"] = bool(shutil.which("latex"))
-fig, axis = plt.subplots(figsize=(7.2, 6.6), layout="constrained")
-axis.set(xlim=(0, 12), ylim=(-0.1, 10.8))
+fig, axis = plt.subplots(figsize=(7.2, 6.9), layout="constrained")
+axis.set(xlim=(0, 11.6), ylim=(0, 10.6))
+axis.set_aspect("equal")
 axis.axis("off")
-for name, bottom, top in [("Room", 8.5, 10.8), ("4 K", 6, 8.5),
-                          ("100 mK", 4.5, 6), ("20 mK", -0.1, 4.5)]:
-    axis.axhspan(bottom, top, color="#F2F4F6" if bottom in (6, -0.1) else "#FAFBFC", zorder=0)
-    axis.text(0.2, (bottom + top) / 2, name, fontsize=10, va="center")
-axis.plot([3, 3, 6], [10, 3.0, 3.0], color="#246FA8", lw=1.6)
-axis.plot([6, 9.5, 9.5], [3.0, 3.0, 10], color="#C92F33", lw=1.6)
-axis.plot([6, 6], [2.7, 1.5], color="#16181C", lw=1.4)
-axis.annotate("", (3, 8.5), (3, 9.0), arrowprops={"arrowstyle": "->", "color": "#246FA8"})
-axis.annotate("", (9.5, 10.2), (9.5, 9.7), arrowprops={"arrowstyle": "->", "color": "#C92F33"})
+blue, red, ink, muted = "#246FA8", "#C92F33", "#16181C", "#50565A"
+stages = [
+    ("300 K", "", 8.6, 10.6), ("50 K", "", 7.5, 8.6), ("4 K", "", 6.1, 7.5),
+    ("Still", "800 mK", 4.85, 6.1), ("Cold plate", "100 mK", 3.6, 4.85), ("Mixing chamber", "20 mK", 0.0, 3.6),
+]
+for index, (name, temperature, bottom, top) in enumerate(stages):
+    axis.axhspan(bottom, top, color="#F2F4F6" if index % 2 else "#FAFBFC", lw=0, zorder=0)
+    if bottom > 0:
+        axis.hlines(bottom, 0, 11.6, color="#DBDEE1", lw=0.8, ls=(0, (4, 3)), zorder=1)
+    axis.text(0.25, (bottom + top) / 2 + (0.16 if temperature else 0), name, va="center", fontsize=9, color=ink)
+    if temperature:
+        axis.text(0.25, (bottom + top) / 2 - 0.16, temperature, va="center", fontsize=8, color=muted)
 
 
-def box(x, y, text, width=1.8):
-    axis.add_patch(Rectangle((x-width/2, y-.3), width, .6, ec="#16181C", fc="white", zorder=3))
-    axis.text(x, y, text, fontsize=8, ha="center", va="center", zorder=4)
+def label(x, y, text, ha="center", va="top", fontsize=8):
+    axis.text(x, y, text, ha=ha, va=va, fontsize=fontsize, color=ink, zorder=4)
 
 
-box(3, 10, "Source + 4–8 GHz filter", width=3.1)
-box(3, 7.3, "20 dB attenuation")
-box(3, 5.2, "20 dB attenuation")
-box(3, 3.7, "20 dB attenuation")
-axis.add_patch(Circle((6, 3), .35, ec="#16181C", fc="white", zorder=3))
-axis.text(6, 3, r"$1\to 2$" + "\n" + r"$2\to 3$", fontsize=7, ha="center", va="center", zorder=4)
-axis.text(6, 3.55, "Circulator", fontsize=8, ha="center")
-box(8.1, 3, "2 isolators\n1 dB total loss", width=2.3)
-box(9.5, 4, "4–8 GHz filter")
-box(9.5, 6.6, "2 dB cable loss")
-box(9.5, 7.7, "HEMT: +40 dB\nNoise temp: 2.5 K", width=2.7)
-box(9.5, 9.3, "Room amp: +20 dB\nNoise figure: 3 dB", width=2.7)
-box(6, 1.5, "Bus: 6.5 GHz", width=2.5)
-for x, frequency in zip((3.7, 6, 8.3), mode_frequencies):
-    axis.plot([6, x, x], [1.2, .85, .4], color="#16181C", lw=.9)
-    box(x, .3, f"{frequency:g} GHz", width=1.7)
+def box(x, y, text, width=0.8, height=0.55):
+    axis.add_patch(Rectangle((x - width / 2, y - height / 2), width, height, ec=ink, fc="white", lw=1.2, zorder=3))
+    if text is not None:
+        label(x, y, text, va="center", fontsize=8.5)
+
+
+def amplifier(x, y, text):
+    axis.add_patch(Polygon([(x - 0.36, y - 0.32), (x + 0.36, y - 0.32), (x, y + 0.36)],
+                           closed=True, ec=ink, fc="white", lw=1.2, zorder=3))
+    label(x + 0.5, y, text, ha="left", va="center", fontsize=8.5)
+
+
+def isolator(x, y):
+    axis.add_patch(Circle((x, y), 0.3, ec=ink, fc="white", lw=1.2, zorder=3))
+    axis.add_patch(FancyArrowPatch((x - 0.17, y), (x + 0.19, y), arrowstyle="-|>",
+                                   mutation_scale=8, color=ink, lw=1.2, zorder=4))
+    label(x, y - 0.42, "Isolator")
+
+
+def circulator(x, y):
+    axis.add_patch(Circle((x, y), 0.4, ec=ink, fc="white", lw=1.2, zorder=3))
+    axis.add_patch(Arc((x, y), 0.44, 0.44, theta1=120, theta2=395, color=ink, lw=1.2, zorder=4))
+    head = np.deg2rad(35)
+    tip = np.array([x + 0.22 * np.cos(head), y + 0.22 * np.sin(head)])
+    along = np.array([-np.sin(head), np.cos(head)])
+    normal = np.array([np.cos(head), np.sin(head)])
+    axis.add_patch(Polygon([tip + 0.09 * along, tip - 0.05 * along + 0.06 * normal,
+                            tip - 0.05 * along - 0.06 * normal], closed=True, color=ink, zorder=4))
+    for dx, dy, port in [(-0.5, 0.3, "1"), (-0.44, -0.52, "2"), (0.5, 0.3, "3")]:
+        label(x + dx, y + dy, port, va="center")
+    label(x, y + 0.55, "Circulator", va="bottom")
+
+
+def band_pass(x, y, text, side):
+    box(x, y, None)
+    phase = np.linspace(0, 2 * np.pi, 60)
+    axis.plot(x - 0.25 + 0.5 * phase / (2 * np.pi), y + 0.12 * np.sin(2 * phase), color=ink, lw=1.1, zorder=4)
+    axis.hlines([y - 0.19, y + 0.19], x - 0.12, x + 0.12, color=ink, lw=1.1, zorder=4)
+    label(x + 0.5 * side, y, text, ha="left" if side > 0 else "right", va="center", fontsize=8.5)
+
+
+# Signal path: the drive descends the blue line, reaches the bus through the
+# circulator, and the reflection rises the red line to the receiver.
+x_in, x_out, y_row = 2.6, 8.9, 2.4
+axis.plot([x_in, x_in, 5.0], [10.0, y_row, y_row], color=blue, lw=1.6, zorder=2)
+axis.plot([5.6, x_out, x_out], [y_row, y_row, 10.0], color=red, lw=1.6, zorder=2)
+axis.annotate("", (x_in, 9.55), (x_in, 10.0), arrowprops={"arrowstyle": "-|>", "color": blue, "lw": 1.6, "mutation_scale": 10})
+axis.annotate("", (x_out, 10.0), (x_out, 9.55), arrowprops={"arrowstyle": "-|>", "color": red, "lw": 1.6, "mutation_scale": 10})
+axis.text(x_in + 0.2, 10.25, r"Source $\cdot$ drive", va="center", fontsize=9, color=blue)
+axis.text(x_out - 0.2, 10.25, r"Receiver $\cdot$ readout", va="center", ha="right", fontsize=9, color=red)
+axis.plot([5.3, 5.3], [y_row - 0.4, 1.6], color=ink, lw=1.4, zorder=2)
+for x in (4.0, 5.3, 6.6):
+    axis.plot([x, x], [1.1, 0.7], color=ink, lw=1.0, zorder=2)
+
+band_pass(x_in, 9.0, "4–8 GHz", side=1)
+box(x_in, 6.8, "20 dB")
+box(x_in, 4.22, "20 dB")
+box(3.1, y_row, "20 dB")
+circulator(5.3, y_row)
+isolator(6.35, y_row)
+box(7.15, y_row, "1 dB", width=0.6)
+isolator(7.95, y_row)
+band_pass(x_out, 3.15, "4–8 GHz", side=1)
+box(x_out, 6.42, "2 dB")
+label(x_out + 0.5, 6.42, "Coax", ha="left", va="center", fontsize=8.5)
+amplifier(x_out, 7.12, "HEMT 40 dB")
+amplifier(x_out, 9.0, "Amplifier 20 dB")
+box(5.3, 1.35, "Bus 6.5 GHz", width=3.8, height=0.5)
+for x, frequency in zip((4.0, 5.3, 6.6), mode_frequencies):
+    box(x, 0.45, f"{frequency:g} GHz", width=1.1, height=0.5)
 fig.savefig("fridge_wiring.svg")
 plt.close(fig)
 ```
@@ -160,36 +219,70 @@ plt.close(fig)
 </details>
 
 ```{figure} ../images/fridge_wiring.svg
-:alt: Three resonators coupled to a bus, driven through staged fridge attenuation and a circulator, with two isolators, a 4–8 GHz output filter and two amplifiers.
+:alt: Fridge wiring with staged input attenuation, a circulator feeding three resonators through a bus, and an isolated, filtered return line to the HEMT and room amplifier.
 
-One declared input and return path is used for both the VNA response and noisy
-acquisition below. [PDF](../images/fridge_wiring.pdf)
+The drive descends the blue line; the reflected field returns along the red
+line. The three resonators couple to the bus at the mixing chamber.
+[PDF](../images/fridge_wiring.pdf)
 ```
 
-## Calculate the stationary VNA response
+## Measure the source-to-receiver response
 
-The frequency grid covers the full band and resolves the narrow features.
-The source amplitude is in `sqrt(photons/ns)`, before the 60 dB input loss.
+Sweep the probe frequency between the exposed instrument ports. The chip has
+one coupling port, but the source and receiver are separate, so its reflection
+appears in S21.
 
 ```python
-frequencies = np.unique(np.concatenate([
-    np.linspace(5.97, 7.03, 401),
-    *(f + np.linspace(-0.012, 0.012, 121) for f in mode_frequencies),
-]))
+frequencies = np.linspace(6.34, 6.66, 401)
 vna = VNA(readout_chip, ports=[drive, readout])
-response = vna.sweep(frequencies)
-ideal = response.s(readout, drive)
+ideal = vna.sweep(frequencies).s(readout, drive)
 ```
 
-The source and receiver are separate instrument ports, so the returned
-reflection appears in S21. `ideal` is the complete stationary mean at the declared instrument planes,
-including physical loss, filters, and gain.
+<details>
+<summary>Plot S21</summary>
 
-## Acquire noise, then sample the measurement
+```python
+fig, magnitude_axis = plt.subplots(figsize=(6.4, 3.2), layout="constrained")
+phase_axis = magnitude_axis.twinx()
+phase_axis.grid(False)
+magnitude_axis.plot(frequencies, 20 * np.log10(np.abs(ideal)), color="#C92F33")
+phase_axis.plot(frequencies, np.unwrap(np.angle(ideal)) * 180 / np.pi, color="#246FA8", ls="--")
+magnitude_axis.set(xlabel="Probe frequency (GHz)", ylabel=r"$|S_{21}|$ (dB)",
+                   xlim=(frequencies[0], frequencies[-1]))
+phase_axis.set(ylabel=r"Phase of $S_{21}$ (degrees)", yticks=[0, 180, 360, 540, 720, 900, 1080])
+magnitude_axis.yaxis.label.set_color("#C92F33")
+magnitude_axis.tick_params(axis="y", colors="#C92F33")
+phase_axis.yaxis.label.set_color("#246FA8")
+phase_axis.tick_params(axis="y", colors="#246FA8")
+phase_axis.spines["right"].set_visible(True)
+phase_axis.spines["right"].set_color("#246FA8")
+magnitude_axis.spines["left"].set_color("#C92F33")
+magnitude_axis.ticklabel_format(useOffset=False, axis="x")
+fig.savefig("fridge_s21.svg")
+plt.close(fig)
+```
 
-Keep the same chip, fridge, frequencies, and instrument planes. `measure()`
-captures the stationary mean and physical noise spectra. Its ratio agrees with
-the harmonic S21 above. Choose integration time and sample count afterward.
+</details>
+
+```{figure} ../images/fridge_s21.svg
+:alt: Three resolved resonances in the source-to-receiver response, with magnitude in red and unwrapped phase in blue.
+
+S21 at the room-temperature instrument ports. The 60 dB amplifier gain balances
+the 60 dB input attenuation; isolator and cable loss give an approximately
+−3 dB background. The three resonances add dips and phase windings.
+[PDF](../images/fridge_s21.pdf)
+```
+
+`ideal` includes the bus, resonators, losses, filters, and amplifier gain.
+It is the stationary mean response of the whole setup. Added amplifier noise
+raises the fluctuation level without changing this curve.
+
+## Sample a VNA trace
+
+A sampled trace also needs the probe amplitude and receiver integration time.
+Use an amplitude of 20 `sqrt(photons/ns)` at the source, before the 60 dB input
+attenuation. `measure()` calculates the mean and noise spectra for this drive.
+`sample()` then draws one complex IQ value at every probe frequency.
 
 ```python
 measurement = vna.measure(frequencies, amplitudes=20, input=drive, outputs=[readout])
@@ -198,79 +291,49 @@ long = measurement.sample(1, receiver=IQReceiver(integration_time=10_000_000), s
 np.testing.assert_allclose(measurement.ratio(readout), ideal, atol=1e-10)
 ```
 
-The samples add jointly drawn IQ fluctuations from that same model. Increasing
-integration from 1 ms to 10 ms reuses the stored spectra. The common seed
-exposes the change in variance.
+The two samples use the same physical calculation. Increasing the integration
+time from 1 ms to 10 ms reduces the noise variance by about a factor of ten.
+The common random seed makes that change visible point by point.
 
 <details>
-<summary>Plot the full band and all three resonances</summary>
+<summary>Plot the sampled traces</summary>
 
 ```python
-fig, axes = plt.subplots(2, 2, figsize=(9.2, 5.8), sharex=True, sharey="row", layout="constrained")
+fig, axes = plt.subplots(2, 2, figsize=(7.2, 4.6), sharex=True, sharey="row", layout="constrained")
+fig.get_layout_engine().set(h_pad=0.02, w_pad=0.02)
 ideal_phase = np.unwrap(np.angle(ideal))
-for column, (samples, title) in enumerate(((short, "1 ms"), (long, "10 ms"))):
+for column, (samples, title) in enumerate(zip((short, long), ("1 ms integration", "10 ms integration"))):
     observed = samples.ratio(readout)[0]
-    axes[0, column].plot(frequencies, 20 * np.log10(np.abs(observed)), ".",
-                         color="#C92F33", ms=2, alpha=0.6, label="Sampled IQ")
-    axes[0, column].plot(frequencies, 20 * np.log10(np.abs(ideal)), color="#16181C",
-                         lw=1.2, label="Ideal stationary mean")
-    axes[1, column].plot(frequencies, (ideal_phase + np.angle(observed / ideal)) / np.pi,
-                         ".", color="#C92F33", ms=2, alpha=0.6)
-    axes[1, column].plot(frequencies, ideal_phase / np.pi, color="#16181C", lw=1.2)
+    axes[0, column].plot(frequencies, 20 * np.log10(np.abs(observed)), ".", color="#C92F33", ms=2.6, alpha=0.7,
+                         label="sampled IQ")
+    axes[0, column].plot(frequencies, 20 * np.log10(np.abs(ideal)), color="#16181C", lw=1.2, label="ideal mean")
+    axes[1, column].plot(frequencies, (ideal_phase + np.angle(observed / ideal)) * 180 / np.pi, ".",
+                         color="#C92F33", ms=2.6, alpha=0.7)
+    axes[1, column].plot(frequencies, ideal_phase * 180 / np.pi, color="#16181C", lw=1.2)
     axes[0, column].set_title(title)
     axes[1, column].set_xlabel("Probe frequency (GHz)")
-axes[0, 0].set_ylabel("Full-chain output / input (dB)")
-axes[1, 0].set_ylabel(r"Phase / $\pi$")
-axes[0, 1].legend(frameon=False, fontsize=8)
+axes[0, 0].set_ylabel("Output / input (dB)")
+axes[1, 0].set(ylabel="Unwrapped phase (degrees)", yticks=[0, 360, 720, 1080])
+axes[0, 1].legend(loc="lower right")
+axes[1, 1].set_xlim(frequencies[0], frequencies[-1])
 fig.savefig("fridge_measurement.svg")
-plt.close(fig)
-
-fig, axes = plt.subplots(1, 3, figsize=(9.2, 3.0), sharey=True, layout="constrained")
-observed = long.ratio(readout)[0]
-for index, (axis, frequency) in enumerate(zip(axes.flat, mode_frequencies)):
-    selected = np.abs(frequencies - frequency) <= 0.012
-    detuning = (frequencies[selected] - frequency) * 1000
-    axis.plot(detuning, 20 * np.log10(np.abs(observed[selected])), ".", color="#C92F33", ms=3)
-    axis.plot(detuning, 20 * np.log10(np.abs(ideal[selected])), color="#16181C", lw=1.2)
-    axis.set_title(f"R{index+1}: {frequency:.3f} GHz", fontsize=10)
-    axis.text(0.03, 0.04, f"Qi = {internal_q[index]:,}\nQe design = {external_q[index]:,}",
-              transform=axis.transAxes, fontsize=8, color="#50565A")
-    axis.set_xlabel("Bare-mode detuning (MHz)")
-    if index == 0:
-        axis.set_ylabel("Output / input (dB)")
-fig.savefig("fridge_measurement_detail.svg")
 plt.close(fig)
 ```
 
 </details>
 
 ```{figure} ../images/fridge_measurement.svg
-:alt: Three resonator features across 6–7 GHz, comparing the complete stationary mean with IQ samples at 1 ms and 10 ms integration.
+:alt: Magnitude and phase of all three resonances, comparing the ideal mean with sampled IQ at 1 ms and 10 ms integration.
 
-Solid line: the complete stationary mean. Red points: one IQ sample per probe point.
-Phase samples use the mean's unwrapped branch. [PDF](../images/fridge_measurement.pdf)
+Solid lines show the stationary mean; red points are sampled IQ. The phase is
+shown on the mean's unwrapped branch. Longer integration reduces the scatter
+in both magnitude and phase. [PDF](../images/fridge_measurement.pdf)
 ```
 
-```{figure} ../images/fridge_measurement_detail.svg
-:alt: Each of the three resonances resolved individually, with varied internal and design external Q values and 10 ms IQ samples.
-
-The coupled resonance centers shift from the bare frequencies. All three
-features use the same captured measurement. [PDF](../images/fridge_measurement_detail.pdf)
-```
-
-## Report noise at a defined plane
-
-`noise_spectrum(readout)` reports normally ordered fluctuation density in
-quanta at the receiver plane. Choose `unit="W/Hz"` or `unit="dBm/Hz"` for
-available noise power density. Its final axis is the captured offset frequency;
-the conversion uses the absolute sideband frequency. It excludes the coherent
-signal and the detector vacuum added during IQ acquisition.
-
-`statistics.noise_contributions(readout)` gives each source's contribution to
-the **integrated IQ covariance**, in photons/ns. Its trace is the complex
-field variance. The `device.correlations` term contains input-system
-interference and may be negative; it is not an independent added noise source.
-Source contributions, including `receiver.vacuum`, sum to the full covariance.
+The measurement also retains the output noise spectrum. Use `noise_spectrum()`
+to report its power density at the receiver in dBm/Hz. After choosing an
+integration time, `statistics()` gives the IQ covariance and each source's
+contribution to it.
 
 ```python
 statistics = measurement.statistics(receiver=IQReceiver(integration_time=1_000_000))
@@ -288,19 +351,45 @@ print(f"RESULT long_complex_ratio_rmse={long_error:.6f}")
 Output:
 
 ```text
-RESULT receiver_noise_dBm_per_Hz=-132.478062
-RESULT short_complex_ratio_rmse=0.178530
-RESULT long_complex_ratio_rmse=0.056456
+RESULT receiver_noise_dBm_per_Hz=-132.467086
+RESULT short_complex_ratio_rmse=0.175733
+RESULT long_complex_ratio_rmse=0.055572
 ```
 
-The default offset grid spans ±0.1 GHz, logarithmically spaced down to 1 Hz.
-Supply `noise_frequencies=` when other physical features need resolution.
-Receiver processing checks integration convergence and edge support; it cannot
-detect an unsampled feature. Declare frequency grids outside JAX transforms.
-Physical parameter changes require a new capture. Receiver time, digital
-transfer, calibration, and random draws operate on the captured arrays.
-The samples describe stationary Gaussian second moments, including correlated
-outputs; they do not generate continuous acquisition records or quantum trajectories.
+<details>
+<summary>Noise units and model limits</summary>
+
+`noise_spectrum()` reports normally ordered fluctuations, excluding the
+coherent carrier and detector vacuum. Its default unit is quanta; `W/Hz` and
+`dBm/Hz` use the absolute sideband frequency. The final array axis is the
+captured offset frequency.
+
+Each source in `statistics.noise_contributions()` contributes a 2×2 IQ
+covariance in photons/ns. The trace is the complex field variance. The sum
+includes detector vacuum. `device.correlations` contains interference between
+the input and the device field and may be negative.
+
+Passive load temperatures give Planck occupations. Amplifier noise temperature
+uses $n_\mathrm{add}=k_B T_e/(hf)$, while noise figure uses
+$T_e=290\,\mathrm{K}\,(10^{\mathrm{NF}/10}-1)$.
+`noise_frequency` fixes these occupations over the model's Markov band.
+Linear `eta`, linear power `gain`, and input-referred symmetrized `added_noise`
+remain available as alternative declarations.
+
+The default offset grid spans ±0.1 GHz down to 1 Hz. Supply
+`noise_frequencies=` if a narrower spectral feature needs more points.
+Integration checks test the stored grid's convergence and edge support;
+they cannot find an unsampled feature. Changing the physical setup requires
+another `measure()` call. Receiver time, digital filtering, calibration, and
+random draws use the captured arrays.
+
+Stationary harmonic calculations use mode-space equations without a Fock
+cutoff. Nonlinear devices use the density-matrix solver. Sampling describes
+stationary Gaussian field moments. Colored thermal noise feeding the chip
+requires an explicit dynamical filter or bath model. This setup omits
+amplifier saturation, finite reverse isolation, and reverse amplifier noise.
+
+</details>
 
 For lifetime design, continue with [Purcell filtering and the T1 budget](slh-networks.md).
 For pulse shaping and cavity depletion, see [pulses, leakage, and readout](dynamics-pulses-and-readout.md#empty-the-resonator-after-readout).
