@@ -8,6 +8,49 @@ from quchip.utils.constants import k_B
 from quchip.utils.jax_utils import contains_tracer, select_array_module
 
 
+def _choice(parameters: Mapping[str, Any], names: tuple[str, ...]) -> tuple[str, Any]:
+    """Select one explicit numerical convention, retaining traced values."""
+    values = [(name, parameters[name]) for name in names if parameters.get(name) is not None]
+    if len(values) != 1:
+        raise ValueError(f"Specify exactly one of {', '.join(names)}.")
+    name, value = values[0]
+    if not contains_tracer(value):
+        number = np.asarray(value)
+        if number.ndim or not np.isrealobj(number) or not np.isfinite(number):
+            raise ValueError(f"{name} must be a finite real scalar.")
+    return name, value
+
+
+def attenuation_value(parameters: Mapping[str, Any]) -> Any:
+    """Convert authored power transmission or positive dB loss to transmission."""
+    name, value = _choice(parameters, ("eta", "loss_db"))
+    eta = value if name == "eta" else 10 ** (-value / 10)
+    if not contains_tracer(eta) and not 0 <= eta <= 1:
+        raise ValueError("Attenuator eta must lie in [0, 1]; loss_db must be non-negative.")
+    return eta
+
+
+def amplifier_values(parameters: Mapping[str, Any]) -> tuple[Any, Any]:
+    """Convert gain and equivalent input noise to symmetrized added quanta.
+
+    Equivalent noise temperature is mK, not a Planck bath temperature.
+    Noise figure uses the standard 290 K reference: Te = 290 K (F - 1).
+    """
+    name, value = _choice(parameters, ("gain", "gain_db"))
+    gain = value if name == "gain" else 10 ** (value / 10)
+    name, noise = _choice(parameters, ("added_noise", "noise_temperature", "noise_figure_db"))
+    if name == "added_noise":
+        if parameters.get("noise_frequency") is not None:
+            raise ValueError("noise_frequency is used with noise_temperature or noise_figure_db.")
+    else:
+        _, frequency = _choice(parameters, ("noise_frequency",))
+        if not contains_tracer(frequency) and frequency <= 0:
+            raise ValueError("noise_frequency must be positive GHz.")
+        temperature = noise if name == "noise_temperature" else 290_000 * (10 ** (noise / 10) - 1)
+        noise = k_B * temperature / frequency
+    return gain, noise
+
+
 def noise_parameters(*, occupation: Any = None, temperature: Any = None, noise_frequency: Any = None) -> dict[str, Any]:
     """Validate one Markov field state; temperature is mK and frequency is GHz."""
     if temperature is not None:

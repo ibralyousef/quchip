@@ -709,6 +709,8 @@ The engine then applies the inbound and outbound factors to that response.
 Nonlinear, pumped, active, dynamic, or opaque operator models retain the
 stationary-Liouvillian route. This selection is structural and does not depend
 on the numerical value of a traced parameter.
+Active local terms also retain the general route: a weight-only RWA does not
+establish whether a local parametric term is off resonance in its authored frame.
 
 `VNA.sweep()` and `VNA.finite_power()` cover small-signal scattering and
 stationary finite-power mean fields, respectively. Ring-up, ring-down, wave
@@ -743,11 +745,35 @@ numerical model parameters in flattened sweep order; `noise_frequencies`
 records the stored offset grid. The finite-power ratio is output mean divided
 by the probe amplitude, not the small-signal derivative around a separate pump.
 
+For eligible passive harmonic models, `measure()` uses the same compact
+mode-space lowering and backend response solver as `sweep()`. With response
+matrix T(f) and input occupations n, the normal output spectrum at the Markov
+boundary is `T(f) diag(n) T(f)†`. Subtracting `S diag(n) S†` supplies the
+device-generated excess to the shared downstream propagation; that owner adds
+the direct sources once. This is the exact stationary Gaussian field solution,
+including thermal fluctuations, without a Fock-space truncation. All modes
+must decay. Concrete acquisitions check stability; traced paths retain the
+usual host-validation limitation. Thermal device collapse declarations,
+nonlinear or active terms, fixed pump configurations, branched output graphs,
+and explicit solver options retain the operator-space acquisition. Passing
+`options={}` requests that general route for cross-checks.
+
 An attenuator, isolator load, or `network.termination()` can declare
 `occupation=n` or `temperature=T, noise_frequency=f`. Temperature is mK and
 `f` is a positive physical frequency in GHz. The Markov occupation is evaluated
 at this declared frequency and held constant over the simulated band. It is
 never evaluated at a rotating-frame offset. Vacuum remains the default.
+
+Attenuators also accept positive `loss_db` instead of `eta`.
+Amplifiers accept `gain_db` instead of linear power gain and either equivalent
+input `noise_temperature` in mK or `noise_figure_db` referenced to 290 K,
+with a positive `noise_frequency` in GHz. The conversion is
+`n_add = k_B T_e/(h f)` and `T_e = 290 K (10^(NF/10)-1)`. This is an
+equivalent symmetrized noise temperature, not a physical Planck occupation.
+The phase-preserving quantum floor still applies. Authored dB/temperature
+parameters remain the rebinding and serialization paths; conversion has one
+owner at resolution. As with direct added quanta, these values are flat at
+their declared noise reference over the modeled band.
 
 For a full unitary scattering matrix S, input j couples through
 `K_j = (S† L)_j`. In addition to vacuum `sum_i D[L_i]`, its thermal population
@@ -776,8 +802,19 @@ so it need not be positive or independently sampleable. A matched absorptive
 filter declares `loss_occupation` or `loss_temperature` and emits
 `(1-|H(f)|²)n` in each direction. A scalar H(f) without that declaration does
 not imply an absorptive thermal model. Colored emission may propagate to
-external outputs, but a thermal reference filter that feeds a quantum coupling
-is rejected: a colored reservoir requires an explicit dynamical model.
+external outputs, but colored noise that feeds a quantum coupling is rejected:
+a colored reservoir requires an explicit dynamical model. Source color follows
+propagation order. A vacuum filter before occupied attenuators does not color
+their emission. Source backaction follows `S†L`, so fields mixed only after
+the device may carry filtered thermal noise without heating it.
+
+`measurement.noise_spectrum(output)` recovers the normally ordered scalar
+spectrum from the captured IQ matrix, retaining upper/lower sideband asymmetry.
+It excludes the coherent carrier and final receiver vacuum. `unit="W/Hz"`
+multiplies by `h f_absolute`; `unit="dBm/Hz"` reports its power ratio to
+1 mW/Hz. Power conversions require positive absolute sideband frequencies.
+Receiver source budgets remain integrated IQ covariances in photons/ns;
+their trace is the complex-field variance, not a spectral power density.
 
 Acyclic output networks can place an amplifier before a splitter or between
 passive components. The compiler retains a unitary Markovian boundary and

@@ -23,7 +23,6 @@ DEFAULT_PAIRS = (
     "01_resolve_and_sweep",
     "02_reduce_and_replay",
     "03_differentiate_a_driven_chip",
-    "04_noisy_vna_measurement",
 )
 OUTPUT_START = "<!-- executed-output:start -->"
 OUTPUT_END = "<!-- executed-output:end -->"

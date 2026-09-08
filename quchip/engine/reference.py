@@ -42,12 +42,11 @@ class ReferenceFilter:
     transfer: Callable[..., Any]
     parameters: Mapping[str, Any]
     loss_occupation: Any = None
-    noise_frequency: Any = None
 
     @property
     def tracked_values(self) -> tuple[Any, ...]:
         """Return the values that may carry JAX tracers."""
-        return (*self.parameters.values(), self.loss_occupation, self.noise_frequency)
+        return (*self.parameters.values(), self.loss_occupation)
 
     def __call__(self, frequency: Any) -> Any:
         """Evaluate the complex transfer at ``frequency`` in GHz.
@@ -131,6 +130,15 @@ class ReferencePlane:
     outbound: tuple[ReferenceElement, ...] = ()
 
 
+@dataclass(frozen=True)
+class FieldChannel:
+    """Field metadata shared by mode-space and operator-space acquisition."""
+
+    key: str
+    reference: ReferencePlane
+    input_occupation: Any = None
+
+
 def _array_module(elements: tuple[ReferenceElement, ...], frequency: Any, xp: Any) -> Any:
     """Return ``xp``, or the module matching traced content in ``elements`` and ``frequency``."""
     if xp is not None:
@@ -204,6 +212,40 @@ def noise_density(elements: tuple[ReferenceElement, ...], frequency: Any, xp: An
     xp = _array_module(elements, frequency, xp)
     return sum(noise_contributions(elements, frequency, xp).values(),
                xp.zeros_like(xp.asarray(frequency, dtype=float)))
+
+
+def noise_colors(elements: tuple[ReferenceElement, ...]) -> dict[str, bool]:
+    """Mark sources whose emission passes through a frequency-dependent filter."""
+    colored = False
+    sources = {}
+    for element in reversed(elements):
+        colored = colored or isinstance(element, ReferenceFilter)
+        if not isinstance(element, ReferenceDelay):
+            sources[element.label] = colored
+    return sources
+
+
+def has_colored_noise(elements: tuple[ReferenceElement, ...]) -> bool:
+    """Return whether a potentially occupied source emits colored noise."""
+    colors = noise_colors(elements)
+    for element in elements:
+        if isinstance(element, ReferenceDelay) or not colors[element.label]:
+            continue
+        if isinstance(element, ReferenceLoss) and maybe_concrete_scalar(element.eta) == 1:
+            continue
+        occupation = source_occupation(element)
+        if occupation is not None and maybe_concrete_scalar(occupation) != 0:
+            return True
+    return False
+
+
+def source_occupation(element: ReferenceElement) -> Any:
+    """Return a declared source occupation, or None for implicit vacuum."""
+    if isinstance(element, ReferenceDelay):
+        return None
+    if isinstance(element, ReferenceAmplifier):
+        return element.added_noise_density
+    return element.loss_occupation if isinstance(element, ReferenceFilter) else element.occupation
 
 
 def has_filter(elements: tuple[ReferenceElement, ...]) -> bool:

@@ -1,0 +1,168 @@
+"""Compact acquisition preserves physical noise and datasheet conventions."""
+
+import numpy as np
+import pytest
+
+from quchip import Capacitive, Chip, IQReceiver, PortNetwork, Resonator, RWA, VNA
+
+
+def thermal_fridge(*, backend="qutip", filter_first=True):
+    r = Resonator(freq=6.0, levels=8, internal_quality_factor=10_000, label="r")
+    net = PortNetwork(label="fridge")
+    port = net.port("p", target=r, rate=.04)
+    filt = net.filter("filter", transfer=lambda f: 1/(1-1j*(f-6)/.1))
+    att = net.attenuator("att", loss_db=10., occupation=.02)
+    circ = net.circulator("circ")
+    amp = net.amplifier("amp", gain_db=20., noise_temperature=2000., noise_frequency=6.)
+    chain = (filt, att) if filter_first else (att, filt)
+    lead = net.delay("lead", duration=0.)
+    net.link(lead, *chain, circ.side(1))
+    net.link(circ.side(2), port)
+    net.link(circ.side(3), amp)
+    drive = net.expose("drive", at=lead.side(1))
+    readout = net.expose("readout", at=amp.side(2))
+    return Chip([r], port_network=net, backend=backend), drive, readout
+
+
+def test_compact_capture_matches_density_matrix_with_thermal_input_and_upstream_filter():
+    """A filter preceding the occupied sources permits exact Markov acquisition."""
+    chip, drive, readout = thermal_fridge()
+    offsets = [-.04, -.004, 0., .004, .04]
+    vna = VNA(chip)
+    compact = vna.measure([5.997, 6., 6.003], .002, input=drive, outputs=[readout], noise_frequencies=offsets)
+    general = vna.measure([5.997, 6., 6.003], .002, input=drive, outputs=[readout],
+                          noise_frequencies=offsets, options={})
+    np.testing.assert_allclose(compact.values, general.values, atol=1e-8)
+    assert compact.noise_components.keys() == general.noise_components.keys()
+    for source in compact.noise_components:
+        np.testing.assert_allclose(compact.noise_components[source][0], general.noise_components[source][0], atol=1e-8)
+        np.testing.assert_allclose(compact.noise_components[source][1], general.noise_components[source][1], atol=1e-7)
+
+
+def test_filter_after_thermal_source_still_rejects_colored_backaction():
+    """Changing propagation order does not turn a colored bath into a Markov input."""
+    chip, drive, readout = thermal_fridge(filter_first=False)
+    for options in (None, {}):
+        with pytest.raises(ValueError, match="colored thermal backaction"):
+            VNA(chip).measure(6., .002, input=drive, outputs=[readout], options=options)
+
+
+def test_lossless_thermal_attenuator_before_filter_emits_no_colored_noise():
+    """A zero-loss endpoint is valid even when its physical temperature is nonzero."""
+    chip, drive, readout = thermal_fridge(filter_first=False)
+    chip = chip.with_params({"network.component.att.loss_db": 0.})
+    for options in (None, {}):
+        measured = VNA(chip).measure(6., .001, input=drive, outputs=[readout], options=options,
+                                   noise_frequencies=[-.1, -.01, 0., .01, .1])
+        np.testing.assert_allclose(measured.noise_contributions(readout)["input.drive.att"], 0., atol=1e-12)
+
+
+def test_filtered_auxiliary_field_mixed_after_device_does_not_create_backaction():
+    """Input-system coupling S†L distinguishes downstream mixing from colored heating."""
+    r = Resonator(freq=6., levels=4, label="r")
+    net = PortNetwork()
+    port = net.port("p", target=r, rate=.04)
+    split = net.hybrid90("split")
+    filt = net.filter("aux", transfer=lambda f: np.sqrt(.6)/(1-1j*(f-6.)/.02), loss_occupation=.2)
+    net.connect(port.output, split.input_terminal("left"))
+    net.connect(filt.output_terminal("2"), split.input_terminal("right"))
+    net.connect(split.output_terminal("right"), filt.input_terminal("2"))
+    left = net.expose("left", input=port.input, output=split.output_terminal("left"))
+    right = net.expose("right", at=filt.side(1))
+    vna = VNA(Chip([r], port_network=net))
+    for options in (None, {}):
+        measured = vna.measure(6., 0., input=left, outputs=[left, right],
+                               noise_frequencies=[-.04, -.004, 0., .004, .04], options=options)
+        np.testing.assert_allclose(measured.noise_spectrum(left)[2], .04, atol=1e-10)
+        np.testing.assert_allclose(measured.noise_spectrum(right)[2], .104, atol=1e-10)
+
+
+def test_uncoupled_lossless_mode_has_no_unique_stationary_capture():
+    """A dark mode cannot be silently assigned a stationary state by the compact route."""
+    r = Resonator(freq=6., label="r")
+    dark = Resonator(freq=7., label="dark")
+    net = PortNetwork()
+    port = net.port("p", target=r, rate=.04)
+    with pytest.raises(ValueError, match="all modes to decay"):
+        VNA(Chip([r, dark], port_network=net)).measure(6., .001, input=port, outputs=[port])
+
+
+def test_nine_mode_measurement_matches_independent_star_response_without_density_matrix(monkeypatch):
+    """Nine harmonic modes acquire means and noise without tensor-product operators."""
+    frequencies = np.linspace(6., 7., 8)
+    bus = Resonator(freq=6.5, levels=8, internal_quality_factor=100_000, label="bus")
+    modes = [Resonator(freq=f, levels=8, internal_quality_factor=8000+2000*i, label=f"r{i}")
+             for i, f in enumerate(frequencies)]
+    couplings = [Capacitive(bus, mode, g=.025+.002*i) for i, mode in enumerate(modes)]
+    net = PortNetwork()
+    port = net.port("bus", target=bus, rate=2*np.pi)
+    amp = net.amplifier("amp", gain_db=40., added_noise=8.)
+    net.link(port, amp)
+    output = net.expose("out", at=amp.side(2))
+    chip = Chip([bus, *modes], couplings, port_network=net, approximation=RWA())
+    def forbidden(*args, **kwargs):
+        raise AssertionError("harmonic acquisition constructed a density matrix")
+    monkeypatch.setattr(chip.backend, "steadystate", forbidden)
+    monkeypatch.setattr(chip.backend, "stationary_resolvent", forbidden)
+    probe = np.linspace(5.98, 7.02, 51)
+    measured = VNA(chip).measure(probe, .02, input=output, outputs=[output],
+                                noise_frequencies=[-.1, -.01, 0., .01, .1])
+    den = 2*np.pi*np.array([m.freq/m.internal_quality_factor for m in modes])/2
+    den = den+2j*np.pi*(frequencies[None, :]-probe[:, None])
+    bus_den = (2*np.pi+2*np.pi*bus.freq/bus.internal_quality_factor)/2+2j*np.pi*(bus.freq-probe)
+    bus_den += np.sum((2*np.pi*np.array([c.g for c in couplings]))**2/den, axis=1)
+    np.testing.assert_allclose(measured.ratio(output), 100*(1-2*np.pi/bus_den), atol=1e-9)
+    covariance = measured.statistics(receiver=IQReceiver(integration_time=1e6)).covariance(output)
+    np.testing.assert_allclose(covariance, np.broadcast_to(np.eye(2)*(85000.5/2e6), covariance.shape), atol=1e-10)
+
+
+def test_datasheet_noise_parameters_rebind_and_roundtrip():
+    """dB and temperature remain authored parameters after capture and serialization."""
+    r = Resonator(freq=6., levels=4, label="r")
+    net = PortNetwork()
+    port = net.port("p", target=r, rate=.04)
+    loss = net.attenuator("loss", loss_db=10.)
+    amp = net.amplifier("amp", gain_db=20., noise_figure_db=1., noise_frequency=6.)
+    net.link(port, loss, amp)
+    net.expose("out", at=amp.side(2))
+    chip = Chip([r], port_network=net)
+    restored = Chip.from_dict(chip.to_dict())
+    changed = restored.with_params({"network.component.amp.gain_db": 30., "network.component.loss.loss_db": 20.})
+    point = VNA(changed).measure(6., .001, input="out", outputs=["out"])
+    assert point.parameters[0]["network.component.amp.gain_db"] == 30.
+    # Independent SI conversion: Te = 290*(10**(NF/10)-1), nadd = kTe/(hf).
+    nadd = 1.380649e-23 * 290*(10**.1-1)/(6.62607015e-34*6e9)
+    expected = (1000*nadd+(1000-1)/2+1)/2e6
+    np.testing.assert_allclose(point.statistics(receiver=IQReceiver(integration_time=1e6)).covariance("out"),
+                               np.eye(2)*expected, atol=1e-10)
+    physical = 2e6*expected-1
+    np.testing.assert_allclose(point.noise_spectrum("out"), physical, rtol=1e-12)
+    watts = 6.62607015e-34*(6.+point.noise_frequencies)*1e9*physical
+    np.testing.assert_allclose(point.noise_spectrum("out", unit="W/Hz"), watts, rtol=1e-12)
+    np.testing.assert_allclose(point.noise_spectrum("out", unit="dBm/Hz"), 10*np.log10(watts/1e-3), atol=1e-12)
+
+
+@pytest.mark.parametrize("kwargs", [dict(gain=100., gain_db=20., added_noise=1.),
+    dict(gain_db=20., noise_temperature=2000.), dict(gain_db=20., noise_temperature=2000., added_noise=1.),
+    dict(gain_db=20., noise_figure_db=-1., noise_frequency=6.)])
+def test_ambiguous_or_incomplete_amplifier_conventions_fail(kwargs):
+    """Noise conventions cannot be mixed or silently supplied a reference frequency."""
+    with pytest.raises(ValueError):
+        PortNetwork().amplifier("amp", **kwargs)
+
+
+@pytest.mark.optional_backend
+def test_linear_measurement_datasheet_noise_gradient():
+    """Equivalent temperature differentiates through harmonic acquisition and receiver."""
+    jax = pytest.importorskip("jax")
+    pytest.importorskip("dynamiqs")
+    chip, drive, readout = thermal_fridge(backend="dynamiqs")
+    offsets = np.array([-.1, -.01, 0., .01, .1])
+    def variance(temperature):
+        changed = chip.with_params({"network.component.amp.noise_temperature": temperature})
+        result = VNA(changed).measure(6., .002, input=drive, outputs=[readout],
+                                     noise_frequencies=offsets)
+        return result.statistics(receiver=IQReceiver(integration_time=1e6)).covariance(readout)[0, 0]
+    gradient = jax.jit(jax.grad(variance))(2000.)
+    expected = 100*1.380649e-26/(6.62607015e-34*6e9)/(2e6)
+    np.testing.assert_allclose(gradient, expected, rtol=1e-9)

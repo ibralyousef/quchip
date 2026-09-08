@@ -11,8 +11,9 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 
 from quchip.chip.ports import Port
-from quchip.engine.field_noise import noise_parameters, occupation_value
+from quchip.engine.field_noise import amplifier_values, attenuation_value, noise_parameters, occupation_value
 from quchip.engine.reference import (
+    FieldChannel,
     ReferenceAmplifier,
     ReferenceDelay,
     ReferenceElement,
@@ -20,6 +21,8 @@ from quchip.engine.reference import (
     ReferencePlane,
     ReferenceLoss,
     noise_density,
+    has_colored_noise,
+    source_occupation,
 )
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar, select_array_module
 from quchip.utils.labeling import auto_label, resolve_label
@@ -533,7 +536,7 @@ class PortNetwork:
         return self._permutation_component(label, names, order, kind="permutation", sided=False)
 
     def attenuator(
-        self, label: str, *, eta: Any, occupation: Any = None,
+        self, label: str, *, eta: Any = None, loss_db: Any = None, occupation: Any = None,
         temperature: Any = None, noise_frequency: Any = None,
     ) -> SLHComponent:
         """Add a reciprocal two-sided attenuator with power transmission ``eta``.
@@ -542,15 +545,15 @@ class PortNetwork:
         one of two hidden loss channels with amplitude ``sqrt(1-eta)``.
         They default to vacuum. Declare occupation, or temperature in mK with
         noise_frequency in GHz, to give both loads a thermal state.
+        Specify either power transmission ``eta`` or positive ``loss_db``.
         """
-        concrete = maybe_concrete_scalar(eta)
-        if concrete is not None and not 0.0 <= concrete <= 1.0:
-            raise ValueError(f"Attenuator eta must lie in [0, 1], got {eta}.")
+        power = {key: value for key, value in (("eta", eta), ("loss_db", loss_db)) if value is not None}
+        transmission = attenuation_value(power)
         component = SLHComponent(
             label=label,
             input_names=("1", "2", "vacuum_1", "vacuum_2"),
             output_names=("1", "2", "vacuum_1", "vacuum_2"),
-            scattering=self._attenuator_matrix(eta),
+            scattering=self._attenuator_matrix(transmission),
             _network_token=self._token,
             sides=("1", "2"),
             _local_ports=(None,) * 4,
@@ -559,7 +562,7 @@ class PortNetwork:
             ),
             _row_inputs=((1, 3), (0, 2), (0, 2), (1, 3)),
             _kind="attenuator",
-            _parameters={"eta": eta, **noise_parameters(
+            _parameters={**power, **noise_parameters(
                 occupation=occupation, temperature=temperature, noise_frequency=noise_frequency)},
         )
         return self._add_component(component)
@@ -610,7 +613,10 @@ class PortNetwork:
                            for name, value in noise.items()})
         return self._reference_component(label, kind="filter", parameters=dict(parameters), transfer=transfer)
 
-    def amplifier(self, label: str, *, gain: Any, added_noise: Any) -> SLHComponent:
+    def amplifier(
+        self, label: str, *, gain: Any = None, gain_db: Any = None, added_noise: Any = None,
+        noise_temperature: Any = None, noise_figure_db: Any = None, noise_frequency: Any = None,
+    ) -> SLHComponent:
         """Add a phase-preserving amplifier reference section to an output line.
 
         ``gain`` is power gain ``G``. ``added_noise`` is input-referred
@@ -625,10 +631,21 @@ class PortNetwork:
         differentiable. Acyclic downstream splitters retain its shared output
         noise. The section remains outside Markovian ``S``, ``L``, and
         ``H`` and serializes normally.
+
+        Alternatively specify ``gain_db`` and either ``noise_temperature``
+        (equivalent input noise temperature in mK) or ``noise_figure_db``
+        (290 K reference). Both require ``noise_frequency`` in GHz to convert
+        to added quanta. Equivalent temperature uses kT/hf, not the Planck
+        occupation of a physical thermal load. Authored conventions remain
+        parameter paths for rebinding and serialization.
         """
-        ReferenceAmplifier(label, gain, added_noise)
+        parameters = {key: value for key, value in (
+            ("gain", gain), ("gain_db", gain_db), ("added_noise", added_noise),
+            ("noise_temperature", noise_temperature), ("noise_figure_db", noise_figure_db),
+            ("noise_frequency", noise_frequency)) if value is not None}
+        ReferenceAmplifier(label, *amplifier_values(parameters))
         return self._reference_component(
-            label, kind="amplifier", parameters={"gain": gain, "added_noise": added_noise}
+            label, kind="amplifier", parameters=parameters,
         )
 
     def _reference_component(
@@ -855,12 +872,9 @@ class PortNetwork:
         compiled = self._compile() if _compiled is None else _compiled
         operators = {label: port_channels[label].coupling for label in expected}
         channels: list[SLHChannel] = []
-        for entry in compiled.channels:
+        for entry, field_channel in zip(compiled.channels, self._field_channels(compiled), strict=True):
             exposure, mapping = entry.exposure, entry.coupling
-            input_occupation = (
-                occupation_value(self._components[exposure._input_key[0]]._parameters)
-                if exposure._hidden else None
-            )
+            input_occupation = field_channel.input_occupation
             frame_frequency = self._common_frame_frequency(
                 mapping, port_channels, boundary=f"exposure {exposure.label!r}"
             )
@@ -914,26 +928,6 @@ class PortNetwork:
                 full_scattering = full_scattering.at[: len(channels), : len(channels)].set(compiled.scattering)
             else:
                 full_scattering[: len(channels), : len(channels)] = compiled.scattering
-        for index, entry in enumerate(compiled.channels):
-            sources = [element for element in entry.reference.inbound
-                       if ((isinstance(element, ReferenceLoss) and element.occupation is not None)
-                           or (isinstance(element, ReferenceFilter) and element.loss_occupation is not None))]
-            if not sources:
-                continue
-            filters = [element for element in entry.reference.inbound if isinstance(element, ReferenceFilter)]
-            if filters:
-                # A colored thermal input is not a Markov bath. It is safe to
-                # process at a downstream plane only when it cannot drive L.
-                coupled = any(compiled.support[row, index] and bool(channel.coupling)
-                              for row, channel in enumerate(compiled.channels))
-                if coupled:
-                    raise ValueError("A thermal reference filter feeds a quantum coupling; use an explicit "
-                                     "dynamical filter/bath for colored thermal backaction.")
-            input_noise = noise_density(entry.reference.inbound, 0.0, xp)
-            # No filters may feed a quantum coupling, so only flat Markov noise
-            # reaches the solver. Downstream-only color stays in output spectra.
-            if not filters:
-                channels[index] = replace(channels[index], input_occupation=input_noise)
         return ResolvedSLH(
             scattering=full_scattering,
             hamiltonian=HamiltonianProgram(
@@ -944,6 +938,31 @@ class PortNetwork:
             support=full_support,
             output_network=compiled.output_network,
         )
+
+    def _field_channels(self, compiled: _CompiledNetwork) -> tuple[FieldChannel, ...]:
+        """Resolve source states once for both operator and compact mode solvers."""
+        xp = select_array_module(contains_tracer(compiled.scattering))
+        scattering = xp.asarray(compiled.scattering)
+        fields = []
+        for index, entry in enumerate(compiled.channels):
+            exposure = entry.exposure
+            occupation = (occupation_value(self._components[exposure._input_key[0]]._parameters)
+                          if exposure._hidden else None)
+            inbound = entry.reference.inbound
+            if has_colored_noise(inbound):
+                # Input j drives K_j = (S†L)_j; shared output support alone
+                # cannot distinguish backaction from a downstream splitter.
+                coupling = self._combine_maps(xp.conj(scattering[:, index]),
+                                              [dict(c.coupling) for c in compiled.channels])
+                if self._active_mapping_sources(coupling):
+                    raise ValueError("A thermal reference filter feeds a quantum coupling; use an explicit "
+                                     "dynamical filter/bath for colored thermal backaction.")
+            elif any(source_occupation(e) is not None for e in inbound):
+                # Filters before all occupied sources do not color their noise.
+                flat = tuple(e for e in inbound if not isinstance(e, ReferenceFilter))
+                occupation = noise_density(flat, 0.0, xp)
+            fields.append(FieldChannel(exposure.label, entry.reference, occupation))
+        return tuple(fields)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize a static network graph and its quantum ports."""
@@ -1468,14 +1487,18 @@ class PortNetwork:
                 return True
         return False
 
-    def _reference_element(self, label: str) -> ReferenceElement:
+    def _reference_element(self, label: str, *, output_side: str | None = None) -> ReferenceElement:
         component = self._components[label]
         parameters = component._parameters
         kind = component._kind
         if kind == "delay":
             return ReferenceDelay(label, parameters["duration"])
         if kind == "amplifier":
-            return ReferenceAmplifier(label, parameters["gain"], parameters["added_noise"])
+            return ReferenceAmplifier(label, *amplifier_values(parameters))
+        if kind in {"attenuator", "isolator"}:
+            assert output_side is not None
+            eta = attenuation_value(parameters) if kind == "attenuator" else float(output_side == "2")
+            return ReferenceLoss(label, eta, occupation_value(parameters))
         assert component._transfer is not None
         noise = occupation_value({name: parameters[key] for name, key in
                                   (("occupation", "loss_occupation"), ("temperature", "loss_temperature"),
@@ -1483,7 +1506,7 @@ class PortNetwork:
         transfer_parameters = {name: value for name, value in parameters.items()
                                if name not in {"loss_occupation", "loss_temperature", "noise_frequency"}}
         return ReferenceFilter(label, component._transfer, MappingProxyType(transfer_parameters),
-                               noise, parameters.get("noise_frequency"))
+                               noise)
 
     def _peel(
         self, exposure: FieldExposure, *, traversals: set[TerminalKey] | None = None,
@@ -1514,11 +1537,8 @@ class PortNetwork:
                     if outbound:
                         run.append(self._reference_element(label))
                 elif self._components[label]._kind in {"attenuator", "isolator"}:
-                    component = self._components[label]
                     forward = (name == "2") if outbound else (name == "1")
-                    eta = (component._parameters["eta"] if component._kind == "attenuator"
-                           else float(forward))
-                    run.append(ReferenceLoss(label, eta, occupation_value(component._parameters)))
+                    run.append(self._reference_element(label, output_side="2" if forward else "1"))
                 else:
                     run.append(self._reference_element(label))
                 other = (label, "2" if name == "1" else "1")
@@ -1571,8 +1591,7 @@ class PortNetwork:
                     if (label, side) in traversals or (component._kind == "amplifier" and side == "1"):
                         continue
                     if component._kind in {"isolator", "attenuator"}:
-                        eta = component._parameters["eta"] if component._kind == "attenuator" else float(side == "2")
-                        element: ReferenceElement = ReferenceLoss(label, eta, occupation_value(component._parameters))
+                        element = self._reference_element(label, output_side=side)
                     else:
                         element = self._reference_element(label)
                     embedded[(label, side)] = element
@@ -1703,7 +1722,7 @@ class PortNetwork:
     @staticmethod
     def _output_network(embedded, groups, nodes, feeds, fields, inputs, peeled, scattering, boundary):
         """Freeze acyclic downstream field maps, preserving a unitary solver boundary."""
-        from quchip.engine.output_network import OutputNetwork, OutputStep
+        from quchip.engine.output_network import OutputNetwork, OutputStep, pad_mixing
         xp = select_array_module(contains_tracer(scattering))
         inverse = xp.conj(xp.asarray(scattering).T)
         affected = set()
@@ -1734,11 +1753,7 @@ class PortNetwork:
                                   for coefficient, boundary_input, upstream in feeds[terminal])
                 steps.append(OutputStep(terminal, base, terms, reference))
         size = len(scattering)
-        full_boundary = xp.eye(size, dtype=complex)
-        if boundary is not None:
-            count = len(boundary)
-            full_boundary = xp.block([[boundary, xp.zeros((count, size-count))],
-                                      [xp.zeros((size-count, count)), xp.eye(size-count)]])
+        full_boundary = xp.eye(size, dtype=complex) if boundary is None else pad_mixing(boundary, size, xp)
         return OutputNetwork(tuple(steps), tuple(output for _, output, _ in peeled), full_boundary, size)
 
     @staticmethod
@@ -1999,7 +2014,7 @@ class PortNetwork:
         elif kind == "beam_splitter":
             matrix = self._transmission_matrix(parameters["eta"])
         elif kind == "attenuator":
-            matrix = self._attenuator_matrix(parameters["eta"])
+            matrix = self._attenuator_matrix(attenuation_value(parameters))
         else:
             matrix = component.scattering
         xp = select_array_module(contains_tracer(matrix))
