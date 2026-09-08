@@ -1143,3 +1143,32 @@ When you need to audit a physics path, start here:
 - Schrieffer-Wolff kernels and the exact reduction route: [`quchip/chip/sw.py`](quchip/chip/sw.py)
 - control-line retargeting across reductions: [`quchip/chip/retarget.py`](quchip/chip/retarget.py)
 - readout pointer states and figures of merit: [`quchip/analysis/dispersive_readout.py`](quchip/analysis/dispersive_readout.py)
+
+## Terminal measurement
+
+`SimulationResult.measure(*devices, t=None, basis="energy")` projects a retained
+ket or density matrix in the captured local isolated energy bases. `t=None`
+selects the final state. A custom basis supplies orthonormal columns in those
+energy coordinates in the stored integration frame, without an automatic
+phase-frame conversion; `basis="solver"` selects the solver's product basis.
+Joint probabilities are obtained before marginalizing unmeasured devices.
+Independent partition components may be combined at the probability level.
+
+Shot sampling applies the Born rule without further quantum evolution.
+`assignment[recorded, physical]` is column-stochastic. `IQReadout` defines one
+conditional complex Gaussian distribution per physical outcome; its total
+mixture covariance includes both within-outcome covariance and the covariance
+of conditional means. These terminal detector models do not change solver
+selection, return collapsed states, or describe continuous quantum trajectories.
+
+`IQReadout.from_wiring(chip, output, ...)` resolves a detector without quantum
+evolution. `result.iq_readout()` uses the simulation's captured wiring instead.
+Both propagate supplied conditional coherent fields through
+captured output reference sections and downstream mixing. Unspecified boundary
+channels are vacuum. It includes downstream added noise and ideal heterodyne
+vacuum through the same propagation and integration used by VNA. Boundary
+thermal noise, device correlations and transient field correlations are outside
+this coherent-template model; calibrated conditional distributions may include
+those effects instead. A calibrated full covariance must not receive the same
+apparatus noise a second time. Input baths and port decay remain in the declared
+quantum dynamics, irrespective of the terminal detector choice.

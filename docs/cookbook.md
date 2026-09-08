@@ -606,3 +606,19 @@ fluctuation density, excluding coherent signal and detector vacuum.
 See [the fridge guide](guides/steady-state-and-vna.md) for the
 comparison, covariance budget, and captured-grid limits. Draws use a Gaussian
 second-moment approximation; they are not quantum trajectories.
+
+## Sample a prepared quantum state
+
+```python
+measurement = result.measure(q)
+counts = measurement.sample(1024, seed=7).counts()
+joint = result.measure(q1, q2)
+```
+
+Terminal measurements use the saved state and its captured local energy bases.
+They work after either evolution solver. A joint measurement preserves
+correlations; partitioned solves combine only independent component probabilities.
+Add `assignment=` for calibrated label errors or `readout=IQReadout(...)` for
+conditional IQ draws. Neither requires a readout pulse. See
+[terminal measurements](guides/dynamics-pulses-and-readout.md#measure-a-prepared-state)
+for Rabi counts, IQ calibration and the use of captured fridge wiring.

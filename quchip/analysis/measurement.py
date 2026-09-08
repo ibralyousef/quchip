@@ -7,15 +7,14 @@ from typing import Any
 
 import numpy as np
 
-from quchip.analysis.field_statistics import (
-    block_diagonal, complex_covariance, field_transfer, proper_spectrum, quadrature_spectrum, quadrature_transfer,
-)
+from quchip.analysis.field_statistics import proper_spectrum, quadrature_spectrum
+from quchip.analysis.field_noise import propagate_noise
+from quchip.results.receiver import noise_grid
 from quchip.engine.ir import LinearResponseProblem
 from quchip.devices.spaces import FockSpace
 from quchip.engine.linear_response import try_build_linear_response_problem
-from quchip.engine.output_network import pad_mixing
 from quchip.engine.reference import (
-    FieldChannel, ReferenceFilter, cw_transfer, noise_colors, noise_contributions, source_occupation, time_shift,
+    FieldChannel, cw_transfer,
 )
 from quchip.results.measurement import MeasurementResult
 from quchip.sweep import Sweep, ZippedSweep, _iter_axis_points
@@ -60,92 +59,6 @@ def capture_noise(operating: Any, backend: Any, labels: tuple[str, ...], frequen
     excess = quadrature_spectrum(engine, rho, backend, operating.prepared, regression_labels, offsets)
     fields = tuple(FieldChannel(c.key, c.reference, c.input_occupation) for c in engine.slh.channels)
     return propagate_noise(fields, engine.slh.S, engine.slh.output_network, excess, labels, frequency, offsets, xp)
-
-
-def propagate_noise(
-    fields: tuple[FieldChannel, ...], scattering: Any, graph: Any, excess: Any,
-    labels: tuple[str, ...], frequency: Any, offsets: Any, xp: Any,
-) -> tuple[dict[str, tuple[Any, Any]], Any]:
-    """Apply one physical source/transfer owner to either stationary solver's spectrum."""
-    indices = {channel.key: i for i, channel in enumerate(fields)}
-    selected = [indices[label] for label in labels]
-    channels = [fields[i] for i in selected]
-    mixed = graph is not None
-    upper = xp.stack([cw_transfer(c.reference.outbound, frequency + offsets, xp) + xp.zeros_like(offsets)
-                      for c in channels], axis=-1)
-    lower = xp.stack([cw_transfer(c.reference.outbound, frequency - offsets, xp) + xp.zeros_like(offsets)
-                      for c in channels], axis=-1)
-    if mixed:
-        graph_positive = [graph.evaluate(frequency + offset, xp) for offset in offsets]
-        graph_negative = [graph.evaluate(frequency - offset, xp) for offset in offsets]
-        graph_upper = xp.stack([pad_mixing(point[0], len(fields), xp)[xp.asarray(selected)]
-                                for point in graph_positive])
-        graph_lower = xp.stack([pad_mixing(point[0], len(fields), xp)[xp.asarray(selected)]
-                                for point in graph_negative])
-        transform = field_transfer(upper[..., None] * graph_upper, lower[..., None] * graph_lower, xp)
-    else:
-        transform = block_diagonal(quadrature_transfer(upper, lower, xp), xp)
-    transformed = transform @ excess @ xp.conj(xp.swapaxes(transform, -1, -2))
-    size = 2 * len(labels)
-    zero = xp.zeros((size, size))
-    empty = xp.zeros((len(offsets), size, size), dtype=complex)
-    components: dict[str, tuple[Any, Any]] = {"device.correlations": (zero, transformed)}
-    gains = xp.stack([cw_transfer(c.reference.outbound, frequency, xp) for c in channels])
-    if mixed:
-        dc = gains[:, None] * pad_mixing(graph.evaluate(frequency, xp)[0], len(fields), xp)[xp.asarray(selected)]
-        dc_transform = field_transfer(dc, dc, xp)
-    else:
-        dc_transform = block_diagonal(quadrature_transfer(gains, gains, xp), xp)
-    colored_output = any(isinstance(element, ReferenceFilter) for c in channels for element in c.reference.outbound)
-    scattering = xp.asarray(scattering)
-    if not mixed:
-        scattering = scattering[xp.asarray(selected)]
-    colored_output = colored_output or (graph is not None and graph.colored)
-    for index, channel in enumerate(fields):
-        column = scattering[:, index]
-        source_matrix = column[:, None] * xp.conj(column[None, :])
-        inbound = channel.reference.inbound
-        reference_sources = any(source_occupation(element) is not None for element in inbound)
-        if reference_sources:
-            positive = noise_contributions(inbound, frequency + offsets, xp)
-            negative = noise_contributions(inbound, frequency - offsets, xp)
-            colors = noise_colors(inbound)
-            for name, up in positive.items():
-                direct = proper_spectrum(up[..., None, None] * source_matrix,
-                                         negative[name][..., None, None] * source_matrix, xp)
-                spectrum = transform @ direct @ xp.conj(xp.swapaxes(transform, -1, -2))
-                components[f"input.{channel.key}.{name}"] = ((zero, spectrum) if colored_output or colors[name] else
-                    (xp.real(dc_transform @ direct[len(offsets)//2] @ xp.conj(dc_transform.T)), empty))
-        elif channel.input_occupation is not None:
-            direct = complex_covariance(source_matrix * channel.input_occupation, xp)
-            if colored_output:
-                components[f"input.{channel.key}"] = (
-                    zero, transform @ direct @ xp.conj(xp.swapaxes(transform, -1, -2)))
-            else:
-                components[f"input.{channel.key}"] = (xp.real(dc_transform @ direct @ xp.conj(dc_transform.T)), empty)
-    if mixed:
-        for name in graph_positive[0][1]:
-            up = xp.stack([point[1][name][xp.asarray(selected)[:, None], xp.asarray(selected)[None, :]]
-                           for point in graph_positive]) * upper[..., :, None] * xp.conj(upper[..., None, :])
-            down = xp.stack([point[1][name][xp.asarray(selected)[:, None], xp.asarray(selected)[None, :]]
-                             for point in graph_negative]) * lower[..., :, None] * xp.conj(lower[..., None, :])
-            spectrum = proper_spectrum(up, down, xp)
-            components[f"network.{name}"] = ((zero, spectrum) if colored_output else
-                                              (xp.real(spectrum[len(offsets)//2]), empty))
-    for index, channel in enumerate(channels):
-        elements = channel.reference.outbound
-        positive = noise_contributions(elements, frequency + offsets, xp)
-        negative = noise_contributions(elements, frequency - offsets, xp)
-        colors = noise_colors(elements)
-        for name, up in positive.items():
-            block = quadrature_transfer(up, negative[name], xp) / 2
-            selector = xp.eye(len(labels))[index:index+1].T @ xp.eye(len(labels))[index:index+1]
-            spectrum = xp.kron(selector, block)
-            if colors[name]:
-                components[f"output.{channel.key}.{name}"] = (zero, spectrum)
-            else:
-                components[f"output.{channel.key}.{name}"] = (xp.real(spectrum[0]), empty)
-    return components, xp.asarray([time_shift(c.reference.outbound) for c in channels])
 
 
 def capture_linear(
@@ -215,15 +128,7 @@ def measure(
     if frequency_axis:
         shape += (len(frequency_values),)
         axes += (("frequency", frequency_values),)
-    if noise_frequencies is None:
-        positive = np.geomspace(1e-9, 0.1, 161)
-        offsets = np.concatenate((-positive[::-1], [0.0], positive))
-    else:
-        offsets = np.asarray(noise_frequencies, dtype=float)
-    if (offsets.ndim != 1 or len(offsets) < 5 or not np.all(np.isfinite(offsets))
-            or np.any(np.diff(offsets) <= 0) or not np.any(offsets == 0)
-            or not np.allclose(offsets, -offsets[::-1], atol=0, rtol=1e-12)):
-        raise ValueError("noise_frequencies must be finite, increasing, symmetric offsets including zero (GHz).")
+    offsets = noise_grid(noise_frequencies)
     xp = vna.chip.backend.array_module
     modes = tuple(device.label for device in vna.chip.devices if isinstance(device.local_space(), FockSpace))
     captured, means, incident, diagnostics, delays, parameters = [], [], [], [], [], []
