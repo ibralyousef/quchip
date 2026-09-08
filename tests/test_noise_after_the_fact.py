@@ -97,8 +97,8 @@ def test_posthoc_mutation_validated_like_constructor():
         q.T1 = -5.0
     assert q.T1 == 50_000.0
 
-    with pytest.raises(ValueError, match="thermal_population"):
-        q.thermal_population = -0.1
+    with pytest.raises(ValueError, match="thermal_occupation"):
+        q.thermal_occupation = -0.1
 
 
 def test_posthoc_declarative_sign_constraints_enforced():
@@ -289,9 +289,9 @@ def test_noise_channel_metadata_is_not_public():
 
 def test_noise_parameter_names_reflect_declared_channels():
     """noise_parameter_names() follows fields declared with noise=True."""
-    assert DuffingTransmon.noise_parameter_names() == ("T1", "T2", "thermal_population")
-    assert Resonator.noise_parameter_names() == ("T1", "T2", "thermal_population", "internal_quality_factor")
-    assert LeakyTransmon.noise_parameter_names() == ("T1", "T2", "thermal_population", "leakage_rate")
+    assert DuffingTransmon.noise_parameter_names() == ("T1", "T2", "thermal_occupation")
+    assert Resonator.noise_parameter_names() == ("T1", "T2", "thermal_occupation", "internal_quality_factor")
+    assert LeakyTransmon.noise_parameter_names() == ("T1", "T2", "thermal_occupation", "leakage_rate")
 
 
 # ---------------------------------------------------------------------------

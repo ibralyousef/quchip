@@ -95,8 +95,15 @@ class LinearResponseSolverResult:
     """Backend payload for one batched passive-linear scattering solve."""
 
     responses: Any
+    mode_amplitudes: Any
     residuals: Any
     _condition_numbers: DeferredValue = field(repr=False)
+    _mode_covariance: DeferredValue = field(repr=False)
+
+    @property
+    def mode_covariance(self) -> Any:
+        """Return centered normal covariance N_ij = <delta a_j† delta a_i>."""
+        return self._mode_covariance()
 
     @property
     def condition_numbers(self) -> Any:

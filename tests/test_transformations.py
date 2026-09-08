@@ -234,7 +234,7 @@ def test_eliminate_purcell_keeps_intrinsic_thermal_noise_separate():
     from quchip.chip.transformations import eliminate
 
     q = DuffingTransmon(
-        freq=5.0, anharmonicity=-0.25, levels=3, label="q", T1=30_000.0, thermal_population=0.02
+        freq=5.0, anharmonicity=-0.25, levels=3, label="q", T1=30_000.0, thermal_occupation=0.02
     )
     r = Resonator(freq=7.0, internal_quality_factor=5000.0, levels=4, label="r")
     chip = Chip([q, r], couplings=[Capacitive(q, r, g=0.08, label="cap0")])

@@ -1,4 +1,4 @@
-# Purcell filtering and the T1 budget
+# Purcell filtering and T1
 
 Compare two circuits: how much does a Purcell filter improve T1, and does it
 preserve the readout bandwidth? Include intrinsic loss in every mode.
@@ -296,5 +296,6 @@ np.testing.assert_allclose(linewidths[1], linewidths[0], rtol=0.05)
 
 The loaded linewidth is **1.033 MHz without the filter** and **1.051 MHz with
 it**, within the 5% design tolerance of the broad-filter estimate.
-A `network.filter()` reference section cannot provide this T1 protection: it
-changes reported fields, while the coupled quantum filter changes the decay.
+A `network.filter()` applies a transfer function to the signal path. It cannot
+provide this T1 protection; that requires a coupled resonator in the quantum
+model, which changes the decay channels.

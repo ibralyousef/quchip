@@ -11,16 +11,23 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 
 from quchip.chip.ports import Port
+from quchip.engine.field_noise import amplifier_values, attenuation_value, noise_parameters, occupation_value
 from quchip.engine.reference import (
+    FieldChannel,
     ReferenceAmplifier,
     ReferenceDelay,
     ReferenceElement,
     ReferenceFilter,
     ReferencePlane,
+    ReferenceLoss,
+    noise_density,
+    has_colored_noise,
+    source_occupation,
 )
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar, select_array_module
 from quchip.utils.labeling import auto_label, resolve_label
 from quchip.utils.values import copy_value
+from quchip.utils.deprecation import warn_renamed
 
 if TYPE_CHECKING:
     from quchip.control.field import CoherentInput
@@ -66,17 +73,22 @@ class SLHComponent:
     _parameters: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     _transfer: Callable[..., Any] | None = field(default=None, repr=False, compare=False)
 
-    def side(self, name: str | int) -> "FieldSide":
-        """Return the physical side whose input and output terminals share ``name``."""
+    def port(self, name: str | int) -> "ComponentPort":
+        """Return a component port with incoming and outgoing field connections."""
         label = str(name)
         if not self.sides:
             raise ValueError(
-                f"Component {self.label!r} is directional and has no physical sides; use "
+                f"Component {self.label!r} is directional and has no component ports; use "
                 "input_terminal()/output_terminal() or cascade()."
             )
         if label not in self.sides:
-            raise KeyError(f"No side {label!r} on component {self.label!r}; available: {list(self.sides)}")
-        return FieldSide(self.input_terminal(label), self.output_terminal(label))
+            raise KeyError(f"No port {label!r} on component {self.label!r}; available: {list(self.sides)}")
+        return ComponentPort(self.input_terminal(label), self.output_terminal(label))
+
+    def side(self, name: str | int) -> "ComponentPort":
+        """Deprecated alias for :meth:`port`."""
+        warn_renamed("component.side()", "component.port()")
+        return self.port(name)
 
     @property
     def inputs(self) -> tuple[FieldTerminal, ...]:
@@ -138,16 +150,20 @@ class SLHComponent:
 
 
 @dataclass(frozen=True)
-class FieldSide:
-    """One physical connector pairing a component side's input and output terminals."""
+class ComponentPort:
+    """A component port pairing its incoming and outgoing field connections."""
 
     input: FieldTerminal
     output: FieldTerminal
 
 
 @dataclass(frozen=True, eq=False)
-class FieldExposure:
-    """One named reciprocal reference plane on a :class:`PortNetwork`."""
+class NetworkPort:
+    """A named external network port with incoming and outgoing fields.
+
+    The reference plane specifies where these fields are defined. A device's
+    :class:`Port` instead specifies its coupling to the network.
+    """
 
     label: str
     _input_key: TerminalKey = field(repr=False)
@@ -158,7 +174,7 @@ class FieldExposure:
     def __eq__(self, other: object) -> bool:
         """Compare stable plane identity within one network."""
         return (
-            isinstance(other, FieldExposure)
+            isinstance(other, NetworkPort)
             and self._network_token is other._network_token
             and self.label == other.label
         )
@@ -241,22 +257,27 @@ class IncludedNetwork:
         return self._host._components[label]
 
     def input(self, name: str) -> FieldTerminal:
-        """Return the input terminal of the template exposure ``name``."""
+        """Return the input terminal of the exported network port ``name``."""
         key = self._interface(name)[0]
         return self._host._components[key[0]].input_terminal(key[1])
 
     def output(self, name: str) -> FieldTerminal:
-        """Return the output terminal of the template exposure ``name``."""
+        """Return the output terminal of the exported network port ``name``."""
         key = self._interface(name)[1]
         return self._host._components[key[0]].output_terminal(key[1])
 
-    def side(self, name: str) -> FieldSide:
-        """Return the physical side behind a template exposure made with ``expose(..., at=)``."""
+    def port(self, name: str) -> ComponentPort:
+        """Return a component port exported by the network block."""
         input_key, output_key = self._interface(name)
         component = self._host._components[input_key[0]]
         if input_key != output_key or input_key[1] not in component.sides:
             raise ValueError(f"Interface {name!r} of block {self.prefix!r} is asymmetric; use input() and output().")
-        return component.side(input_key[1])
+        return component.port(input_key[1])
+
+    def side(self, name: str) -> ComponentPort:
+        """Deprecated alias for :meth:`port`."""
+        warn_renamed("block.side()", "block.port()")
+        return self.port(name)
 
     def _interface(self, name: str) -> tuple[TerminalKey, TerminalKey]:
         if name not in self._interfaces:
@@ -276,6 +297,7 @@ _SERIALIZED_FACTORIES = frozenset(
         "attenuator",
         "delay",
         "amplifier",
+        "termination",
     }
 )
 
@@ -293,7 +315,7 @@ class _AffineField:
 
 @dataclass(frozen=True)
 class _CompiledChannel:
-    exposure: FieldExposure
+    exposure: NetworkPort
     coupling: Mapping[str, Any]
     reference: ReferencePlane
 
@@ -304,6 +326,7 @@ class _CompiledNetwork:
     scattering: Any
     generated_pairs: tuple[tuple[str, str, Any], ...]
     support: np.ndarray
+    output_network: Any = None
 
 
 class PortNetwork:
@@ -337,7 +360,7 @@ class PortNetwork:
         self._ports: list[Port] = []
         self._connections: dict[TerminalKey, TerminalKey] = {}
         self._used_outputs: dict[TerminalKey, TerminalKey] = {}
-        self._exposures: list[FieldExposure] = []
+        self._exposures: list[NetworkPort] = []
 
     @classmethod
     def from_ports(
@@ -364,16 +387,27 @@ class PortNetwork:
         return tuple(self._components.values())
 
     @property
-    def exposures(self) -> tuple[FieldExposure, ...]:
-        """Return the complete external reference planes in channel order."""
+    def external_ports(self) -> tuple[NetworkPort, ...]:
+        """Return the external network ports in channel order."""
         return tuple(exposure for exposure in self._effective_exposures() if not exposure._hidden)
 
-    def exposure(self, exposure: str | FieldExposure) -> FieldExposure:
-        """Return one external reference plane by object or label."""
-        if isinstance(exposure, FieldExposure) and exposure._network_token is not self._token:
-            raise ValueError(f"Exposure {exposure.label!r} belongs to another PortNetwork.")
+    @property
+    def exposures(self) -> tuple[NetworkPort, ...]:
+        """Deprecated alias for :attr:`external_ports`."""
+        warn_renamed("network.exposures", "network.external_ports")
+        return self.external_ports
+
+    def exposure(self, exposure: str | NetworkPort) -> NetworkPort:
+        """Deprecated alias for :meth:`external_port`."""
+        warn_renamed("network.exposure()", "network.external_port()")
+        return self.external_port(exposure)
+
+    def external_port(self, exposure: str | NetworkPort) -> NetworkPort:
+        """Return one external network port by object or label."""
+        if isinstance(exposure, NetworkPort) and exposure._network_token is not self._token:
+            raise ValueError(f"Network port {exposure.label!r} belongs to another PortNetwork.")
         label = resolve_label(exposure)
-        exposures = self.exposures
+        exposures = self.external_ports
         for candidate in exposures:
             if candidate.label == label:
                 return candidate
@@ -497,7 +531,7 @@ class PortNetwork:
 
         ``eta`` is the power from input ``k`` to output ``k``. With
         ``t = sqrt(eta)`` and ``r = sqrt(1 - eta)``, the scattering matrix is
-        ``[[t, r], [-r, t]]``. This component has no physical sides; use
+        ``[[t, r], [-r, t]]``. This component has no component ports; use
         ``input_terminal()``, ``output_terminal()``, or ``cascade()``.
         """
         matrix = self._transmission_matrix(eta)
@@ -509,7 +543,7 @@ class PortNetwork:
         """Add a directional two-input/two-output ideal 90-degree hybrid.
 
         The scattering matrix is ``[[1, 1j], [1j, 1]] / sqrt(2)``. This
-        component has no physical sides; use ``input_terminal()``,
+        component has no component ports; use ``input_terminal()``,
         ``output_terminal()``, or ``cascade()``.
         """
         return self._scattering_component(
@@ -527,20 +561,25 @@ class PortNetwork:
         names = tuple(str(index) for index in range(len(order)))
         return self._permutation_component(label, names, order, kind="permutation", sided=False)
 
-    def attenuator(self, label: str, *, eta: Any) -> SLHComponent:
+    def attenuator(
+        self, label: str, *, eta: Any = None, loss_db: Any = None, occupation: Any = None,
+        temperature: Any = None, noise_frequency: Any = None,
+    ) -> SLHComponent:
         """Add a reciprocal two-sided attenuator with power transmission ``eta``.
 
         Each direction has amplitude transmission ``sqrt(eta)`` and couples to
-        one of two hidden vacuum channels with amplitude ``sqrt(1-eta)``.
+        one of two hidden loss channels with amplitude ``sqrt(1-eta)``.
+        They default to vacuum. Declare occupation, or temperature in mK with
+        noise_frequency in GHz, to give both loads a thermal state.
+        Specify either power transmission ``eta`` or positive ``loss_db``.
         """
-        concrete = maybe_concrete_scalar(eta)
-        if concrete is not None and not 0.0 <= concrete <= 1.0:
-            raise ValueError(f"Attenuator eta must lie in [0, 1], got {eta}.")
+        power = {key: value for key, value in (("eta", eta), ("loss_db", loss_db)) if value is not None}
+        transmission = attenuation_value(power)
         component = SLHComponent(
             label=label,
             input_names=("1", "2", "vacuum_1", "vacuum_2"),
             output_names=("1", "2", "vacuum_1", "vacuum_2"),
-            scattering=self._attenuator_matrix(eta),
+            scattering=self._attenuator_matrix(transmission),
             _network_token=self._token,
             sides=("1", "2"),
             _local_ports=(None,) * 4,
@@ -549,7 +588,8 @@ class PortNetwork:
             ),
             _row_inputs=((1, 3), (0, 2), (0, 2), (1, 3)),
             _kind="attenuator",
-            _parameters={"eta": eta},
+            _parameters={**power, **noise_parameters(
+                occupation=occupation, temperature=temperature, noise_frequency=noise_frequency)},
         )
         return self._add_component(component)
 
@@ -562,13 +602,16 @@ class PortNetwork:
         Place it with :meth:`link` or :meth:`connect` like any other component.
         The compiler peels adjacent runs from each exposure leg, so the section
         never enters Markovian ``S``, ``L``, or ``H``. Every reference section must
-        belong to one of these runs. Its duration is tracked at
+        belong to an exposed run or an acyclic downstream output graph. Its duration is tracked at
         ``network.component.<label>.duration``.
         """
         ReferenceDelay(label, duration)
         return self._reference_component(label, kind="delay", parameters={"duration": duration})
 
-    def filter(self, label: str, *, transfer: Callable[..., Any], **parameters: Any) -> SLHComponent:
+    def filter(
+        self, label: str, *, transfer: Callable[..., Any], loss_occupation: Any = None,
+        loss_temperature: Any = None, noise_frequency: Any = None, **parameters: Any,
+    ) -> SLHComponent:
         """Add a two-sided passive filter reference section.
 
         ``transfer(frequency, **parameters)`` must accept scalar or array frequencies
@@ -583,10 +626,23 @@ class PortNetwork:
         evaluations with ``|H| > 1`` raise. Networks containing filters cannot be
         serialized with :meth:`to_dict`; ``Chip.clone()`` and ``Chip.with_params()``
         preserve the callable.
+
+        Declare loss_occupation, or loss_temperature in mK with noise_frequency
+        in GHz, for a matched absorptive realization emitting (1-|H|²)n.
+        A scalar transfer alone does not distinguish absorption from reflection.
+        Colored thermal emission cannot feed a quantum coupling through a
+        reference section; use a dynamical filter/bath model for that case.
         """
+        noise = noise_parameters(occupation=loss_occupation, temperature=loss_temperature,
+                                 noise_frequency=noise_frequency)
+        parameters.update({f"loss_{name}" if name != "noise_frequency" else name: value
+                           for name, value in noise.items()})
         return self._reference_component(label, kind="filter", parameters=dict(parameters), transfer=transfer)
 
-    def amplifier(self, label: str, *, gain: Any, added_noise: Any) -> SLHComponent:
+    def amplifier(
+        self, label: str, *, gain: Any = None, gain_db: Any = None, added_noise: Any = None,
+        noise_temperature: Any = None, noise_figure_db: Any = None, noise_frequency: Any = None,
+    ) -> SLHComponent:
         """Add a phase-preserving amplifier reference section to an output line.
 
         ``gain`` is power gain ``G``. ``added_noise`` is input-referred
@@ -598,12 +654,24 @@ class PortNetwork:
         The compiler rejects a section that would amplify an incident field into
         the chip or put the output plane on side 1. Both parameters are tracked at
         ``network.component.<label>.<name>`` and remain sweepable and
-        differentiable. The section remains outside Markovian ``S``, ``L``, and
+        differentiable. Acyclic downstream splitters retain its shared output
+        noise. The section remains outside Markovian ``S``, ``L``, and
         ``H`` and serializes normally.
+
+        Alternatively specify ``gain_db`` and either ``noise_temperature``
+        (equivalent input noise temperature in mK) or ``noise_figure_db``
+        (290 K reference). Both require ``noise_frequency`` in GHz to convert
+        to added quanta. Equivalent temperature uses kT/hf, not the Planck
+        occupation of a physical thermal load. Authored conventions remain
+        parameter paths for rebinding and serialization.
         """
-        ReferenceAmplifier(label, gain, added_noise)
+        parameters = {key: value for key, value in (
+            ("gain", gain), ("gain_db", gain_db), ("added_noise", added_noise),
+            ("noise_temperature", noise_temperature), ("noise_figure_db", noise_figure_db),
+            ("noise_frequency", noise_frequency)) if value is not None}
+        ReferenceAmplifier(label, *amplifier_values(parameters))
         return self._reference_component(
-            label, kind="amplifier", parameters={"gain": gain, "added_noise": added_noise}
+            label, kind="amplifier", parameters=parameters,
         )
 
     def _reference_component(
@@ -634,19 +702,42 @@ class PortNetwork:
         sources = tuple((row - 1) % ports for row in range(ports))
         return self._permutation_component(label, names, sources, kind="circulator")
 
-    def isolator(self, label: str) -> SLHComponent:
+    def isolator(
+        self, label: str, *, occupation: Any = None,
+        temperature: Any = None, noise_frequency: Any = None,
+    ) -> SLHComponent:
         """Add an ideal isolator routing side 1 to side 2.
 
         The reverse field is dumped into ``hidden.<label>.load``, whose vacuum
         travels back toward side 1.
         """
-        return self._permutation_component(
+        component = self._permutation_component(
             label,
             ("1", "2", "load"),
             (2, 0, 1),
             kind="isolator",
             hidden_pairs=(("load", "load", f"hidden.{label}.load"),),
         )
+        component._parameters.update(noise_parameters(
+            occupation=occupation, temperature=temperature, noise_frequency=noise_frequency))
+        return component
+
+    def termination(
+        self, label: str, *, occupation: Any = None,
+        temperature: Any = None, noise_frequency: Any = None,
+    ) -> SLHComponent:
+        """Add a matched one-sided load with an optional thermal input state.
+
+        Specify occupation directly, or temperature in mK and the positive
+        physical noise_frequency in GHz defining the Markov occupation.
+        """
+        component = self._permutation_component(
+            label, ("1", "load"), (1, 0), kind="termination",
+            hidden_pairs=(("load", "load", f"hidden.{label}.load"),),
+        )
+        component._parameters.update(noise_parameters(
+            occupation=occupation, temperature=temperature, noise_frequency=noise_frequency))
+        return component
 
     def _permutation_component(
         self,
@@ -692,11 +783,11 @@ class PortNetwork:
         self._connections[input.key] = output.key
         self._used_outputs[output.key] = input.key
 
-    def link(self, *items: Port | SLHComponent | FieldSide) -> None:
-        """Link consecutive physical sides in both directions.
+    def link(self, *items: Port | SLHComponent | ComponentPort) -> None:
+        """Link consecutive component ports in both directions.
 
         When a two-sided component is passed directly, the chain enters side 1
-        and leaves side 2. Pass ``component.side(k)`` to select a side
+        and leaves side 2. Pass ``component.port(k)`` to select a side
         explicitly.
         """
         for first, second in self._pairs("link", items):
@@ -720,14 +811,14 @@ class PortNetwork:
         self,
         label: str,
         *,
-        at: Port | SLHComponent | FieldSide | None = None,
+        at: Port | SLHComponent | ComponentPort | None = None,
         input: FieldTerminal | Port | SLHComponent | None = None,
         output: FieldTerminal | Port | SLHComponent | None = None,
-    ) -> FieldExposure:
-        """Name and return an external input/output reference plane.
+    ) -> NetworkPort:
+        """Name and return an external network port.
 
-        Pass ``at=`` to expose one physical side. Use ``input=`` and
-        ``output=`` for an asymmetric plane; ports and components then select
+        Pass ``at=`` to expose one component port. Use ``input=`` and
+        ``output=`` for separate input and output connections; ports and components then select
         their sole or ``signal`` terminal unless explicit terminals are passed.
         """
         if at is not None:
@@ -744,12 +835,12 @@ class PortNetwork:
         self._reject_hidden_terminal(input)
         self._reject_hidden_terminal(output)
         if label in {exposure.label for exposure in self._exposures}:
-            raise ValueError(f"Duplicate PortNetwork exposure label {label!r}.")
+            raise ValueError(f"Duplicate external network port label {label!r}.")
         if input.key in self._connections or output.key in self._used_outputs:
             raise ValueError("Connected terminals cannot also be exposed.")
         if self._terminal_is_exposed(input) or self._terminal_is_exposed(output):
-            raise ValueError("A terminal cannot belong to more than one exposure.")
-        exposure = FieldExposure(label, input.key, output.key, _network_token=self._token)
+            raise ValueError("A terminal cannot belong to more than one external network port.")
+        exposure = NetworkPort(label, input.key, output.key, _network_token=self._token)
         self._exposures.append(exposure)
         return exposure
 
@@ -782,7 +873,9 @@ class PortNetwork:
             self._cache_value(self._authored_scattering),
         )
 
-    def resolve(self, base: "ResolvedSLH", *, _compiled: _CompiledNetwork | None = None) -> "ResolvedSLH":
+    def resolve(
+        self, base: "ResolvedSLH", *, _compiled: _CompiledNetwork | None = None,
+    ) -> "ResolvedSLH":
         """Compose this boundary onto port channels in an input-free SLH value."""
         from quchip.engine.ir import (
             CollapseTerm,
@@ -805,8 +898,9 @@ class PortNetwork:
         compiled = self._compile() if _compiled is None else _compiled
         operators = {label: port_channels[label].coupling for label in expected}
         channels: list[SLHChannel] = []
-        for entry in compiled.channels:
+        for entry, field_channel in zip(compiled.channels, self._field_channels(compiled), strict=True):
             exposure, mapping = entry.exposure, entry.coupling
+            input_occupation = field_channel.input_occupation
             frame_frequency = self._common_frame_frequency(
                 mapping, port_channels, boundary=f"exposure {exposure.label!r}"
             )
@@ -822,6 +916,7 @@ class PortNetwork:
                         key=exposure.label,
                         accessibility="hidden" if exposure._hidden else "exposed",
                         reference=entry.reference,
+                        input_occupation=input_occupation,
                     )
                 )
                 continue
@@ -839,6 +934,7 @@ class PortNetwork:
                     collapse=template,
                     coupling_operator=coupling,
                     reference=entry.reference,
+                    input_occupation=input_occupation,
                 )
             )
 
@@ -866,7 +962,33 @@ class PortNetwork:
             ),
             channels=tuple((*channels, *hidden)),
             support=full_support,
+            output_network=compiled.output_network,
         )
+
+    def _field_channels(self, compiled: _CompiledNetwork) -> tuple[FieldChannel, ...]:
+        """Resolve source states once for both operator and compact mode solvers."""
+        xp = select_array_module(contains_tracer(compiled.scattering))
+        scattering = xp.asarray(compiled.scattering)
+        fields = []
+        for index, entry in enumerate(compiled.channels):
+            exposure = entry.exposure
+            occupation = (occupation_value(self._components[exposure._input_key[0]]._parameters)
+                          if exposure._hidden else None)
+            inbound = entry.reference.inbound
+            if has_colored_noise(inbound):
+                # Input j drives K_j = (S†L)_j; shared output support alone
+                # cannot distinguish backaction from a downstream splitter.
+                coupling = self._combine_maps(xp.conj(scattering[:, index]),
+                                              [dict(c.coupling) for c in compiled.channels])
+                if self._active_mapping_sources(coupling):
+                    raise ValueError("A thermal reference filter feeds a quantum coupling; use an explicit "
+                                     "dynamical filter/bath for colored thermal backaction.")
+            elif any(source_occupation(e) is not None for e in inbound):
+                # Filters before all occupied sources do not color their noise.
+                flat = tuple(e for e in inbound if not isinstance(e, ReferenceFilter))
+                occupation = noise_density(flat, 0.0, xp)
+            fields.append(FieldChannel(exposure.label, entry.reference, occupation))
+        return tuple(fields)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize a static network graph and its quantum ports."""
@@ -967,7 +1089,7 @@ class PortNetwork:
             network._used_outputs[output_key] = input_key
         for payload in data.get("exposures", []):
             network._exposures.append(
-                FieldExposure(
+                NetworkPort(
                     payload["label"],
                     tuple(payload["input"]),
                     tuple(payload["output"]),
@@ -1175,9 +1297,9 @@ class PortNetwork:
         """Return the boundary convention and approximation scope."""
         return [
             "This instantaneous Markovian boundary uses b_out = S b_in + L; scalar S is unitary after "
-            "explicit vacuum loss dilation, and instantaneous core feedback is reduced algebraically.",
+            "explicit loss dilation; declared thermal input states enter the quantum dynamics.",
             "Reference sections shift incident and reported fields at external planes only; they do not "
-            "enter S, L, or H and cannot sit inside feedback loops.",
+            "enter S, L, or H and cannot sit inside feedback loops. Acyclic output mixing preserves joint noise.",
         ]
 
     def dynamical_supports(
@@ -1329,7 +1451,7 @@ class PortNetwork:
         self._components[component.label] = component
         return component
 
-    def _effective_exposures(self) -> tuple[FieldExposure, ...]:
+    def _effective_exposures(self) -> tuple[NetworkPort, ...]:
         exposed = list(self._exposures)
         used = {
             key
@@ -1349,18 +1471,20 @@ class PortNetwork:
             )
             if not touched:
                 exposed.append(
-                    FieldExposure(
+                    NetworkPort(
                         component.label,
                         input_key,
                         output_key,
                         _network_token=self._token,
                     )
                 )
-        hidden: list[FieldExposure] = []
+        hidden: list[NetworkPort] = []
         for component in self.components:
+            if self._is_reference(component.label):
+                continue
             for input_name, output_name, label in component._hidden_pairs:
                 hidden.append(
-                    FieldExposure(
+                    NetworkPort(
                         label,
                         (component.label, input_name),
                         (component.label, output_name),
@@ -1371,20 +1495,48 @@ class PortNetwork:
         return tuple((*exposed, *hidden))
 
     def _is_reference(self, label: str) -> bool:
-        return self._components[label]._kind in {"delay", "filter", "amplifier"}
+        kind = self._components[label]._kind
+        if kind in {"delay", "filter", "amplifier"}:
+            return True
+        # A passive two-sided section downstream of a reference run belongs
+        # to that same external run. Its directed vacuum/thermal dilation is
+        # retained in ReferenceLoss rather than becoming an internal amplifier.
+        visited: set[str] = set()
+        while kind in {"attenuator", "isolator"} and label not in visited:
+            visited.add(label)
+            previous = self._connections.get((label, "1"))
+            if previous is None or previous[1] != "2":
+                return False
+            label = previous[0]
+            kind = self._components[label]._kind
+            if kind in {"delay", "filter", "amplifier"}:
+                return True
+        return False
 
-    def _reference_element(self, label: str) -> ReferenceElement:
+    def _reference_element(self, label: str, *, output_side: str | None = None) -> ReferenceElement:
         component = self._components[label]
         parameters = component._parameters
         kind = component._kind
         if kind == "delay":
             return ReferenceDelay(label, parameters["duration"])
         if kind == "amplifier":
-            return ReferenceAmplifier(label, parameters["gain"], parameters["added_noise"])
+            return ReferenceAmplifier(label, *amplifier_values(parameters))
+        if kind in {"attenuator", "isolator"}:
+            assert output_side is not None
+            eta = attenuation_value(parameters) if kind == "attenuator" else float(output_side == "2")
+            return ReferenceLoss(label, eta, occupation_value(parameters))
         assert component._transfer is not None
-        return ReferenceFilter(label, component._transfer, MappingProxyType(dict(parameters)))
+        noise = occupation_value({name: parameters[key] for name, key in
+                                  (("occupation", "loss_occupation"), ("temperature", "loss_temperature"),
+                                   ("noise_frequency", "noise_frequency")) if key in parameters})
+        transfer_parameters = {name: value for name, value in parameters.items()
+                               if name not in {"loss_occupation", "loss_temperature", "noise_frequency"}}
+        return ReferenceFilter(label, component._transfer, MappingProxyType(transfer_parameters),
+                               noise)
 
-    def _peel(self, exposure: FieldExposure) -> tuple[TerminalKey, TerminalKey, ReferencePlane]:
+    def _peel(
+        self, exposure: NetworkPort, *, traversals: set[TerminalKey] | None = None,
+    ) -> tuple[TerminalKey, TerminalKey, ReferencePlane]:
         """Peel adjacent reference runs from ``exposure`` to the Markov boundary.
 
         The returned plane orders inbound sections from exposure to boundary and
@@ -1397,6 +1549,8 @@ class PortNetwork:
             run: list[ReferenceElement] = []
             while self._is_reference(key[0]):
                 label, name = key
+                if traversals is not None:
+                    traversals.add((label, name if outbound else ("2" if name == "1" else "1")))
                 if any(element.label == label for element in run):
                     raise ValueError(f"Reference component {label!r} feeds back into itself.")
                 if self._components[label]._kind == "amplifier":
@@ -1408,6 +1562,9 @@ class PortNetwork:
                         )
                     if outbound:
                         run.append(self._reference_element(label))
+                elif self._components[label]._kind in {"attenuator", "isolator"}:
+                    forward = (name == "2") if outbound else (name == "1")
+                    run.append(self._reference_element(label, output_side="2" if forward else "1"))
                 else:
                     run.append(self._reference_element(label))
                 other = (label, "2" if name == "1" else "1")
@@ -1424,21 +1581,53 @@ class PortNetwork:
         plane = ReferencePlane(inbound=tuple(inbound), outbound=tuple(reversed(outbound)))
         return boundary_input, boundary_output, plane
 
-    def _compile(self) -> _CompiledNetwork:
+    def _compile(
+        self, *, _embedded: Mapping[TerminalKey, ReferenceElement] | None = None,
+        _retained: Mapping[str, ReferencePlane] | None = None,
+    ) -> _CompiledNetwork:
         exposures = self._effective_exposures()
-        peeled = [self._peel(exposure) for exposure in exposures]
-        planes = [plane for _, _, plane in peeled]
-        reached = {
-            element.label for plane in planes for element in (*plane.inbound, *plane.outbound)
-        }
-        unreached = [
-            label for label in self._components if self._is_reference(label) and label not in reached
-        ]
-        if unreached:
-            raise ValueError(
-                f"Reference components {unreached} must sit on a run between an exposure and the Markov "
-                "boundary, not inside the core graph or an instantaneous feedback loop."
-            )
+        traversals: set[TerminalKey] = set()
+        peeled = [self._peel(exposure, traversals=traversals) for exposure in exposures]
+        planes = [(_retained or {}).get(exposure.label, plane)
+                  for exposure, (_, _, plane) in zip(exposures, peeled, strict=True)]
+        def active_sides(label: str) -> tuple[str, ...]:
+            return tuple(side for side in ("1", "2") if (label, side) in traversals
+                         or (label, side) in self._used_outputs
+                         or (label, "2" if side == "1" else "1") in self._connections)
+
+        unused = [label for label in self._components if self._is_reference(label) and not active_sides(label)]
+        if unused:
+            raise ValueError(f"Reference components {unused} must connect to an exposed run "
+                             "or downstream output graph.")
+        internal = [label for label in self._components if self._is_reference(label)
+                    and any((label, side) not in traversals for side in active_sides(label))]
+        if internal:
+            if _embedded is not None:
+                raise ValueError("Reference graph cannot be reduced to exposed downstream fields.")
+            # A component can have an exposed inbound leg and a branched outbound
+            # leg. Preserve each traversal separately when forming the unitary core.
+            from copy import copy
+            bypassed = copy(self)
+            bypassed._components = dict(self._components)
+            embedded: dict[TerminalKey, ReferenceElement] = {}
+            for label in internal:
+                component = self._components[label]
+                sides = active_sides(label)
+                for side in sides:
+                    if (label, side) in traversals or (component._kind == "amplifier" and side == "1"):
+                        continue
+                    if component._kind in {"isolator", "attenuator"}:
+                        element = self._reference_element(label, output_side=side)
+                    else:
+                        element = self._reference_element(label)
+                    embedded[(label, side)] = element
+                bypassed._components[label] = replace(
+                    component, _kind="through", _parameters={}, _transfer=None,
+                    input_names=tuple("2" if side == "1" else "1" for side in sides), output_names=sides,
+                    scattering=np.eye(len(sides), dtype=complex), _row_inputs=tuple((i,) for i in range(len(sides))),
+                    _local_ports=(None,)*len(sides), _hidden_pairs=(), sides=())
+            retained = {exposure.label: plane for exposure, plane in zip(exposures, planes, strict=True)}
+            return bypassed._compile(_embedded=embedded, _retained=retained)
         core = [component for component in self.components if not self._is_reference(component.label)]
         covered_inputs = {boundary_input for boundary_input, _, _ in peeled}
         covered_outputs = {boundary_output for _, boundary_output, _ in peeled}
@@ -1448,7 +1637,8 @@ class PortNetwork:
         free_outputs = all_outputs - set(self._used_outputs) - covered_outputs
         if free_inputs or free_outputs:
             raise ValueError(
-                "PortNetwork has free terminals; connect or expose them explicitly: "
+                (f"Reference components {list(_embedded)} must be outside a feedback loop with all terminals covered. "
+                 if _embedded else "") + "PortNetwork has free terminals; connect or expose them explicitly: "
                 f"inputs={sorted(free_inputs)}, outputs={sorted(free_outputs)}."
             )
         if len(covered_inputs) != len(exposures) or len(covered_outputs) != len(exposures):
@@ -1487,8 +1677,10 @@ class PortNetwork:
 
         feeds = {terminal: _feeders(terminal) for terminal in nodes}
         generated_pairs: list[tuple[str, str, Any]] = []
+        groups = []
         for members in _strongly_connected(nodes, lambda terminal: [up for _, _, up in feeds[terminal] if up]):
             cyclic = len(members) > 1 or any(up == members[0] for _, _, up in feeds[members[0]])
+            groups.append((members, cyclic))
             if cyclic:
                 solved = self._solve_loop(members, nodes, feeds, input_fields, output_fields, size)
             else:
@@ -1548,7 +1740,47 @@ class PortNetwork:
             scattering=scattering,
             generated_pairs=tuple(generated_pairs),
             support=support_matrix,
+            output_network=(self._output_network(_embedded, groups, nodes, feeds, output_fields,
+                                                 input_fields, peeled, scattering, boundary)
+                            if _embedded else None),
         )
+
+    @staticmethod
+    def _output_network(embedded, groups, nodes, feeds, fields, inputs, peeled, scattering, boundary):
+        """Freeze acyclic downstream field maps, preserving a unitary solver boundary."""
+        from quchip.engine.output_network import OutputNetwork, OutputStep, pad_mixing
+        xp = select_array_module(contains_tracer(scattering))
+        inverse = xp.conj(xp.asarray(scattering).T)
+        affected = set()
+        steps = []
+        for members, cyclic in groups:
+            local = {}
+            for terminal in members:
+                reference = embedded.get(terminal)
+                changed = reference is not None or any(upstream in affected for _, _, upstream in feeds[terminal])
+                local[terminal] = (reference, changed)
+            if cyclic and any(changed for _, changed in local.values()):
+                raise ValueError(f"Reference components {sorted({key[0] for key in embedded})} must remain "
+                                 "outside feedback loops; "
+                                 "only acyclic downstream scattering is supported.")
+            for terminal in members:
+                reference, changed = local[terminal]
+                component, row = nodes[terminal]
+                if changed and component._local_ports[row] is not None:
+                    raise ValueError("An internal reference component feeds a quantum coupling; "
+                                     "place amplifiers on output lines and use a dynamical model for internal filters.")
+                base = xp.asarray(fields[terminal].scattering) @ inverse
+                terms = ()
+                if changed:
+                    affected.add(terminal)
+                    terms = tuple((coefficient, upstream,
+                                   xp.asarray(inputs[boundary_input].scattering) @ inverse
+                                   if boundary_input is not None else None)
+                                  for coefficient, boundary_input, upstream in feeds[terminal])
+                steps.append(OutputStep(terminal, base, terms, reference))
+        size = len(scattering)
+        full_boundary = xp.eye(size, dtype=complex) if boundary is None else pad_mixing(boundary, size, xp)
+        return OutputNetwork(tuple(steps), tuple(output for _, output, _ in peeled), full_boundary, size)
 
     @staticmethod
     def _incoming(
@@ -1808,7 +2040,7 @@ class PortNetwork:
         elif kind == "beam_splitter":
             matrix = self._transmission_matrix(parameters["eta"])
         elif kind == "attenuator":
-            matrix = self._attenuator_matrix(parameters["eta"])
+            matrix = self._attenuator_matrix(attenuation_value(parameters))
         else:
             matrix = component.scattering
         xp = select_array_module(contains_tracer(matrix))
@@ -1890,26 +2122,26 @@ class PortNetwork:
         raise ValueError(f"Port {port.label!r} is not owned by this PortNetwork.")
 
     def _side_of(
-        self, value: Port | SLHComponent | FieldSide, *, leaving: bool | None
-    ) -> FieldSide:
-        """Resolve a physical side for ``link`` or ``expose``.
+        self, value: Port | SLHComponent | ComponentPort, *, leaving: bool | None
+    ) -> ComponentPort:
+        """Resolve a component port for ``link`` or ``expose``.
 
         For a two-sided component, ``leaving=True`` selects side 2,
         ``leaving=False`` selects side 1, and ``leaving=None`` requires an
         explicit side.
         """
-        if isinstance(value, FieldSide):
+        if isinstance(value, ComponentPort):
             self._validate_terminal(value.input, "input")
             self._validate_terminal(value.output, "output")
             return value
         component = self._component_of(value)
         if len(component.sides) == 1:
-            return component.side(component.sides[0])
+            return component.port(component.sides[0])
         if len(component.sides) == 2 and leaving is not None:
-            return component.side(component.sides[1 if leaving else 0])
+            return component.port(component.sides[1 if leaving else 0])
         raise ValueError(
-            f"Cannot infer a physical side for component {component.label!r} with "
-            f"{len(component.sides)} sides; pass component.side(k) for a "
+            f"Cannot infer a component port for component {component.label!r} with "
+            f"{len(component.sides)} ports; pass component.port(k) for a "
             "multi-sided component or use cascade() for a directional one."
         )
 
@@ -1963,3 +2195,8 @@ class PortNetwork:
 
 
 __all__ = ["PortNetwork"]
+
+
+# Compatibility class names; remove in quchip 0.5.
+FieldExposure = NetworkPort
+FieldSide = ComponentPort
