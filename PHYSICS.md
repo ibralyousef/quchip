@@ -1,4 +1,4 @@
-# quchip Physics Reference
+# Physics reference
 
 This document states the physics contracts implemented by quchip. It distinguishes authored and resolved Hamiltonians, records where local bases, frames, and RWA are applied, and states the engine's assumptions.
 
@@ -111,8 +111,8 @@ Source: [`quchip/devices/base.py`](quchip/devices/base.py)
 The standard dissipators are:
 
 - `T1`: relaxation through `a`
-- `T2`: pure dephasing through `sqrt(2*gamma_phi) * n` with `gamma_phi = 1/T2 - 1/(2*T1)`. The factor `2` makes the 0–1 coherence decay at `1/(2*T1) + gamma_phi = 1/T2`, so the input `T2` is the resulting coherence time (when `thermal_population == 0`). The number operator `n` gives the standard `(m-n)^2` dephasing scaling across higher levels.
-- thermal up/down channels when `thermal_population` is set
+- `T2`: pure dephasing through `sqrt(2*gamma_phi) * n` with `gamma_phi = 1/T2 - 1/(2*T1)`. The factor `2` makes the 0–1 coherence decay at `1/(2*T1) + gamma_phi = 1/T2`, so the input `T2` is the resulting coherence time (when `thermal_occupation == 0`). The number operator `n` gives the standard `(m-n)^2` dephasing scaling across higher levels.
+- thermal up/down channels when `thermal_occupation` is set
 
 Devices, drives, couplings, and baths author `CollapseChannel` records that
 keep the local operator separate from its non-negative rate in `1/ns`. The
@@ -217,7 +217,7 @@ effective channel coefficient with magnitude squared `2γ(1 + cos φ)` and adds
 `φ = 2π f τ = ωτ`, with `f` in GHz and `τ` in ns, matches the
 `Δ = γ sin φ` convention of Kockum et al., Phys. Rev. A 90, 013837 (2014).
 
-`port.side` and `component.side(k)` each select one physical connector, pairing
+`port.side` and `component.port(k)` each select one physical connector, pairing
 that side's input and output terminals. `network.link(...)` cables consecutive
 sides in both directions; each cable compiles to two directed terminal
 connections. An ideal circulator routes `1 -> 2 -> 3 -> 1`; an isolator is a
@@ -709,6 +709,8 @@ The engine then applies the inbound and outbound factors to that response.
 Nonlinear, pumped, active, dynamic, or opaque operator models retain the
 stationary-Liouvillian route. This selection is structural and does not depend
 on the numerical value of a traced parameter.
+Active local terms also retain the general route: a weight-only RWA does not
+establish whether a local parametric term is off resonance in its authored frame.
 
 `VNA.sweep()` and `VNA.finite_power()` cover small-signal scattering and
 stationary finite-power mean fields, respectively. Ring-up, ring-down, wave
@@ -731,6 +733,136 @@ rank or condition diagnostic is `None`, not a successful check.
 
 If frame and approximation resolution leave dynamic terms, the stationary
 APIs raise. Periodic/Floquet stationary states are not implemented.
+
+### 8.2 Captured noisy VNA measurements
+
+`VNA.measure(frequencies, amplitudes, input=..., outputs=...)` prepares one
+stationary operating point for each probe/sweep coordinate and captures means
+and normally ordered IQ cross-spectra. Receiver integration, calibration, and
+Gaussian draws act on these captured arrays. They never call a stationary
+solver or consult a later mutable chip. `measurement.parameters` records the
+numerical model parameters in flattened sweep order; `noise_frequencies`
+records the stored offset grid. The finite-power ratio is output mean divided
+by the probe amplitude, not the small-signal derivative around a separate pump.
+
+For eligible passive harmonic models, `measure()` uses the same compact
+mode-space lowering and backend response solver as `sweep()`. With response
+matrix T(f) and input occupations n, the normal output spectrum at the Markov
+boundary is `T(f) diag(n) T(f)†`. Subtracting `S diag(n) S†` supplies the
+device-generated excess to the shared downstream propagation; that owner adds
+the direct sources once. This is the exact stationary Gaussian field solution,
+including thermal fluctuations, without a Fock-space truncation. All modes
+must decay. Concrete acquisitions check stability; traced paths retain the
+usual host-validation limitation. Thermal device collapse declarations,
+nonlinear or active terms, fixed pump configurations, branched output graphs,
+and explicit solver options retain the operator-space acquisition. Passing
+`options={}` requests that general route for cross-checks.
+
+Measurements also capture internal Fock-mode observables. `mode_amplitude(r)`
+returns `<a_r>` in the stationary frame reported by `mode_frequency(r)`;
+`photon_number(r)` returns `<a_r† a_r>`. Both follow the measurement sweep
+axes and retain the full declared input wiring. The compact backend solves
+`A N + N A† + B diag(n) B† = 0` for the centered normal covariance
+`N_ij = <delta a_j† delta a_i>` and adds its diagonal to the coherent
+occupation `|<a_r>|²`. This covariance is independent of the output spectral
+grid. The general path evaluates the authored `a` and `n` operators in the
+resolved basis against the solved reduced density matrix, retaining nonlinear
+and active physics and the declared truncation. These queries use captured
+arrays; receiver processing does not change internal occupation.
+
+An attenuator, isolator load, or `network.termination()` can declare
+`occupation=n` or `temperature=T, noise_frequency=f`. Temperature is mK and
+`f` is a positive physical frequency in GHz. The Markov occupation is evaluated
+at this declared frequency and held constant over the simulated band. It is
+never evaluated at a rotating-frame offset. Vacuum remains the default.
+
+Attenuators also accept positive `loss_db` instead of `eta`.
+Amplifiers accept `gain_db` instead of linear power gain and either equivalent
+input `noise_temperature` in mK or `noise_figure_db` referenced to 290 K,
+with a positive `noise_frequency` in GHz. The conversion is
+`n_add = k_B T_e/(h f)` and `T_e = 290 K (10^(NF/10)-1)`. This is an
+equivalent symmetrized noise temperature, not a physical Planck occupation.
+The phase-preserving quantum floor still applies. Authored dB/temperature
+parameters remain the rebinding and serialization paths; conversion has one
+owner at resolution. As with direct added quanta, these values are flat at
+their declared noise reference over the modeled band.
+
+For a full unitary scattering matrix S, input j couples through
+`K_j = (S† L)_j`. In addition to vacuum `sum_i D[L_i]`, its thermal population
+adds `n_j D[K_j] + n_j D[K_j†]`. Thermal input is therefore part of the
+stationary and transient quantum dynamics. It does not become a second
+independent device bath. SLH composition retains the surviving input's state
+and rejects an independent thermal declaration on an input that is connected
+away. Arbitrary passive nonideal components use `network.component()` with
+unitary scattering and explicit dissipative terminals connected to declared
+loads; insertion loss and isolation numbers alone do not define this matrix.
+
+Normal output spectra include the direct term `S diag(n) S†` and the
+input-system interference in the regression source
+`B_i = (L_i-<L_i>) rho + sum_k (S diag(n) S†)_ik [L_k,rho]`.
+This interference prevents double counting fluorescence on top of an
+incident thermal field at equilibrium. Real IQ sources constructed from B
+retain normal, anomalous, and cross-output second moments. `output_spectrum()`
+selects the scalar normal spectrum from the same calculation as `measure()`.
+The Fourier convention is `integral exp(+i 2π offset τ) <δb†(0) δb(τ)> dτ`;
+a mode above the carrier peaks at positive offset. This corrects the mirrored
+detuned-fluorescence spectrum in 0.3.0.
+
+Physical source budgets separate directly propagated fields from
+`device.correlations`. The latter includes nonlinear response and interference,
+so it need not be positive or independently sampleable. A matched absorptive
+filter declares `loss_occupation` or `loss_temperature` and emits
+`(1-|H(f)|²)n` in each direction. A scalar H(f) without that declaration does
+not imply an absorptive thermal model. Colored emission may propagate to
+external outputs, but colored noise that feeds a quantum coupling is rejected:
+a colored reservoir requires an explicit dynamical model. Source color follows
+propagation order. A vacuum filter before occupied attenuators does not color
+their emission. Source backaction follows `S†L`, so fields mixed only after
+the device may carry filtered thermal noise without heating it.
+
+`measurement.noise_spectrum(output)` recovers the normally ordered scalar
+spectrum from the captured IQ matrix, retaining upper/lower sideband asymmetry.
+It excludes the coherent carrier and final receiver vacuum. `unit="W/Hz"`
+multiplies by `h f_absolute`; `unit="dBm/Hz"` reports its power ratio to
+1 mW/Hz. Power conversions require positive absolute sideband frequencies.
+Receiver source budgets remain integrated IQ covariances in photons/ns;
+their trace is the complex-field variance, not a spectral power density.
+
+Acyclic output networks can place an amplifier before a splitter or between
+passive components. The compiler retains a unitary Markovian boundary and
+captures a separate directed field map with source cross-spectra. These
+sections cannot feed quantum couplings or instantaneous feedback loops.
+Amplifiers retain the output-line convention above; `added_noise` never
+implies reverse HEMT emission. The separate inbound and outbound traversals
+of an exposed reference section are preserved. Branched reference networks
+currently support stationary fields; transient output observables and direct
+SLH composition reject them explicitly. Compose their physical PortNetwork
+before resolving it. Their VNA response uses the general stationary solver.
+
+`IQReceiver(integration_time=T)` applies a normalized boxcar with frequency
+weight `sinc(offset*T)²`. For `b=I+iQ`, ideal heterodyne detection adds one
+complex vacuum quantum at the final plane, or `1/2` on each IQ diagonal.
+Thus flat normally ordered noise N gives `Var(I)=Var(Q)=(N+1)/(2T)`.
+Joint outputs retain their complex cross-spectrum and relative delays;
+independent detector vacuum is added once per output. Calibration multiplies
+the mean and transforms both covariance axes. Zero probe amplitude leaves
+field statistics defined and ratios undefined.
+
+An optional receiver `transfer(offset)` is a digital complex amplitude
+response and also scales the mean by its DC value. White noise is integrated
+analytically for an ordinary boxcar; colored terms and digital filters use
+the captured grid. The receiver compares full and coarsened quadrature and
+checks spectral edges. These local checks do not prove that an arbitrary
+spectrum has no unsampled feature. Use a wider or finer capture for unsupported
+bandwidths or integration times. Concrete validation must be run outside JAX
+tracing; deterministic integration and keyed reparameterized draws remain
+differentiable on fixed shapes.
+
+Gaussian samples reproduce the captured second moments. They do not supply
+higher-order non-Gaussian photon statistics or continuous correlated records.
+Normalized `g1` and `g2` for network thermal fields require a detection bandwidth
+and are rejected by the unfiltered correlation API.
+
 
 ## 9. Dressing
 
@@ -851,7 +983,7 @@ the *full* resonator pull per qubit excitation. This is **2×** the σ_z-convent
 
 Analytic cross-checks (2nd-order dispersive): two-level `chi = 2g^2/Delta`; Duffing transmon `chi = 2g^2*alpha/(Delta*(Delta+alpha))` with `Delta = f_q − f_r` (Koch et al., PRA 76, 042319, §IV). Critical photon number `n_crit = Delta^2/(4g^2)`.
 
-`effective_params[q]["kappa"]` is the eliminated mode's total intrinsic downward decay rate, in 1/ns, as returned by `intrinsic_decay_rate()`. For a resonator it includes `2π*f_r/Q_internal` when `internal_quality_factor` is set and the inherited thermal-emission rate when `T1` or `thermal_population` is set. The latter is `(nbar + 1)/T1` with `T1`, or `nbar + 1` when only `thermal_population` is present. The reported value is `0.0` only when none of these intrinsic lowering channels is configured. An external default port on a linear resonator is transformed separately as described in §10.5 and is not folded into survivor `T1`; this avoids counting its Purcell channel twice. Bridge legs report `chi = 0.0`: bus/coupler modes are not readout modes, and their dressed pull would double-count the mediated exchange.
+`effective_params[q]["kappa"]` is the eliminated mode's total intrinsic downward decay rate, in 1/ns, as returned by `intrinsic_decay_rate()`. For a resonator it includes `2π*f_r/Q_internal` when `internal_quality_factor` is set and the inherited thermal-emission rate when `T1` or `thermal_occupation` is set. The latter is `(nbar + 1)/T1` with `T1`, or `nbar + 1` when only `thermal_occupation` is present. The reported value is `0.0` only when none of these intrinsic lowering channels is configured. An external default port on a linear resonator is transformed separately as described in §10.5 and is not folded into survivor `T1`; this avoids counting its Purcell channel twice. Bridge legs report `chi = 0.0`: bus/coupler modes are not readout modes, and their dressed pull would double-count the mediated exchange.
 
 Gradients through `chi` follow the same rule as `Chip.freq` (§13): the eigensystem must come from a JAX-capable backend.
 
@@ -1011,3 +1143,32 @@ When you need to audit a physics path, start here:
 - Schrieffer-Wolff kernels and the exact reduction route: [`quchip/chip/sw.py`](quchip/chip/sw.py)
 - control-line retargeting across reductions: [`quchip/chip/retarget.py`](quchip/chip/retarget.py)
 - readout pointer states and figures of merit: [`quchip/analysis/dispersive_readout.py`](quchip/analysis/dispersive_readout.py)
+
+## Measurement of saved states
+
+`SimulationResult.measure(*devices, t=None, basis="energy")` projects a retained
+ket or density matrix in the captured local isolated energy bases. `t=None`
+selects the final state. A custom basis supplies orthonormal columns in those
+energy coordinates in the stored integration frame, without an automatic
+phase-frame conversion; `basis="solver"` selects the solver's product basis.
+Joint probabilities are obtained before marginalizing unmeasured devices.
+Independent partition components may be combined at the probability level.
+
+Shot sampling applies the Born rule without further quantum evolution.
+`assignment[recorded, physical]` is column-stochastic. `IQReadout` defines one
+conditional complex Gaussian distribution per physical outcome; its total
+mixture covariance includes both within-outcome covariance and the covariance
+of conditional means. These readout models do not change solver
+selection, return collapsed states, or describe continuous quantum trajectories.
+
+`IQReadout.from_wiring(chip, output, ...)` resolves a detector without quantum
+evolution. `result.iq_readout()` uses the simulation's captured wiring instead.
+Both propagate supplied conditional coherent fields through
+captured output reference sections and downstream mixing. Unspecified boundary
+channels are vacuum. It includes downstream added noise and ideal heterodyne
+vacuum through the same propagation and integration used by VNA. Boundary
+thermal noise, device correlations and transient field correlations are outside
+this coherent-field readout model; calibrated conditional distributions may include
+those effects instead. A calibrated full covariance must not receive the same
+apparatus noise a second time. Input baths and port decay remain in the declared
+quantum dynamics, irrespective of the readout model.

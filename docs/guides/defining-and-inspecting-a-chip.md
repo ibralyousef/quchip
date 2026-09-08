@@ -1,4 +1,4 @@
-# Declare and inspect a chip
+# Your first chip
 
 Build a coupled transmon–resonator model, read its dressed frequencies, and
 find bare parameters that meet a design target. Frequencies are in GHz.
@@ -34,9 +34,9 @@ Hilbert  : 4 x 5 = 20 levels
 Devices (2)
 ───────────
 q — DuffingTransmon
-    T1 = None   T2 = None   thermal_population = None   freq = 5 GHz   anharmonicity = -0.25 GHz   levels = 4
+    T1 = None   T2 = None   thermal_occupation = None   freq = 5 GHz   anharmonicity = -0.25 GHz   levels = 4
 r — Resonator
-    T1 = None   T2 = None   thermal_population = None   freq = 7 GHz   internal_quality_factor = None   levels = 5
+    T1 = None   T2 = None   thermal_occupation = None   freq = 7 GHz   internal_quality_factor = None   levels = 5
 
 Couplings (1)
 ─────────────
@@ -86,12 +86,12 @@ Changed bare / dressed: 5.100 / 5.098470 GHz
 
 ## Inspect the Hamiltonian
 
-`unresolved_hamiltonian()` is the authored physics. `hamiltonian()` is the
+`unresolved_hamiltonian()` shows the Hamiltonian you declared. `hamiltonian()` is the
 expression selected for simulation, after basis, frame, and RWA choices.
 Both render as equations when displayed in a notebook.
 
 ```python
-authored = chip.unresolved_hamiltonian()
+declared = chip.unresolved_hamiltonian()
 resolved = chip.resolve(frame="rotating")
 print(resolved.dropped_terms_summary())
 ```
@@ -157,6 +157,6 @@ bare parameters (GHz):
 
 </details>
 
-Continue with [statics and parameter studies](statics-and-parameter-studies.md)
+Continue with [spectra and parameter sweeps](statics-and-parameter-studies.md)
 to sweep the coupled spectrum. For imported or custom models, see
 [scqubits interoperability](../api.md) and [extensions](../extensions.md).

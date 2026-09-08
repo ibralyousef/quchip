@@ -53,16 +53,7 @@ Ruff uses a 120-character line limit. Public API docstrings use NumPy-style sect
 
 ## Examples and notebooks
 
-Examples are executable physics guides. Keep each one focused on a single question and use the real device, coupling, control, and solver APIs. Do not replace the declared model with raw QuTiP operators or a hand-written effective Hamiltonian.
-
-- Keep the flow linear and use object references for devices, couplings, and drives.
-- Separate quchip setup and simulation from supporting calculations, result extraction, and custom plotting.
-- Avoid one-use aliases and helper layers that hide the main quchip calls.
-- Use `chip.state()` for dressed-state preparation. Use `chip.bare_state()` only when the question requires a bare product state, and explain why.
-- Let analysis methods such as `chip.freq()` dress automatically.
-- Use `sequence.simulate_batch()` for simulation sweeps; do not write one solve per parameter value.
-- Put explanation in Markdown. Reserve stdout for compact `RESULT name=value` receipts.
-- Keep figures limited to what the example needs, with labeled axes and explicit reductions or traced-out subsystems.
+The [guides](docs/guides/index.md) and [cookbook](docs/cookbook.md) explain how to use quchip, including model construction, parameter changes, sweeps and result interpretation. Follow the same workflows in contributed examples. [Writing examples](docs/contribute/writing-examples.md) covers organization, figures and numerical checks.
 
 Readable Jupytext Markdown is the canonical source. Commit its executed `.ipynb` partner with the `python3` kernel, identical code cells, and inspected outputs. Use standard fenced Python cells rather than percent-format scripts.
 

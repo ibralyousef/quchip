@@ -1,10 +1,11 @@
 # Contribute
 
-Extend quchip with a model, improve the documentation, or contribute a fix.
+Add a model, improve the documentation, or contribute a fix.
 
-- {doc}`Extend quchip <../extensions>` with devices, couplings, drives,
+- {doc}`Extending quchip <../extensions>` with devices, couplings, drives,
   envelopes, dissipation, and interoperability mappings.
 - Read the {doc}`contributing guide <../contributing>` for development and validation.
+- Follow {doc}`writing-examples` when adding a guide or worked calculation.
 - Check the {doc}`release notes <../release-notes>` for changes and migration notes.
 - Follow the {doc}`code of conduct <../conduct>` when participating.
 
@@ -18,7 +19,8 @@ Software citation metadata is in [CITATION.cff](https://github.com/quchip/quchip
 :hidden:
 :maxdepth: 1
 
-Extend quchip <../extensions>
+Extending quchip <../extensions>
+Writing examples <writing-examples>
 Contributing <../contributing>
 Release notes <../release-notes>
 Code of conduct <../conduct>

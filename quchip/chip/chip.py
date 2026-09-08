@@ -917,7 +917,7 @@ class Chip:
                 raise ValueError(f"Unknown device {label!r}; this chip has {sorted(self._device_map)}")
             if label in resolved:
                 raise ValueError(f"Device {label!r} appears more than once in the noise config")
-            resolved[label] = params
+            resolved[label] = self._device_map[label]._normalize_parameter_names(params)
 
         # Validate the complete target state before writing anything.
         new_baths = list(baths) if baths else []
@@ -1424,7 +1424,7 @@ class Chip:
                     else (
                         self._port_network.label,
                         tuple(component.label for component in self._port_network.components),
-                        tuple(exposure.label for exposure in self._port_network.exposures),
+                        tuple(exposure.label for exposure in self._port_network.external_ports),
                     )
                 ),
                 "frame": self._frame_spec,
@@ -1437,6 +1437,16 @@ class Chip:
         """Return an isolated structural copy with component-owned values rebound."""
         from quchip.utils.values import copy_value
 
+        bindings = dict(bindings)
+        for device in self._devices:
+            prefix = f"{device.label}."
+            legacy = prefix + "thermal_population"
+            if legacy in bindings:
+                canonical = prefix + "thermal_occupation"
+                local = {"thermal_population": bindings.pop(legacy)}
+                if canonical in bindings:
+                    local["thermal_occupation"] = bindings[canonical]
+                bindings[canonical] = device._normalize_parameter_names(local)["thermal_occupation"]
         targets = self._parameter_targets()
         unknown = set(bindings) - set(targets)
         if unknown:

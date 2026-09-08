@@ -190,6 +190,7 @@ def _synthesize_device_init(cls: Any) -> Any:
     signature = build_declared_signature(param_fields, trailing)
 
     def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
+        kwargs = BaseDevice._normalize_parameter_names(kwargs)
         bound = signature.bind(self, *args, **kwargs)
         bound.apply_defaults()
         arguments = dict(bound.arguments)
@@ -292,11 +293,12 @@ class DeviceModel(BaseDevice, metaclass=DeclarativeMeta):
     label: Any = constructor_field(default=None, kw_only=True)
     T1: Any = constructor_field(default=None, kw_only=True, runtime=BaseDevice.T1)
     T2: Any = constructor_field(default=None, kw_only=True, runtime=BaseDevice.T2)
-    thermal_population: Any = constructor_field(
+    thermal_occupation: Any = constructor_field(
         default=None,
         kw_only=True,
-        runtime=BaseDevice.thermal_population,
+        runtime=BaseDevice.thermal_occupation,
     )
+    thermal_population: Any = constructor_field(default=None, kw_only=True, runtime=BaseDevice.thermal_population)
 
     #: Declared approximation-regime statement surfaced by
     #: :meth:`physics_notes` — the mechanism that keeps a model's stated
@@ -323,6 +325,26 @@ class DeviceModel(BaseDevice, metaclass=DeclarativeMeta):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
+        names = cls.__dict__.get("tunable_param_names")
+        if isinstance(names, tuple) and "thermal_population" in names:
+            from quchip.utils.deprecation import warn_renamed
+
+            warn_renamed("thermal_population", "thermal_occupation")
+            cls.tunable_param_names = tuple(
+                "thermal_occupation" if name == "thermal_population" else name for name in names
+            )
+        legacy = cls.__dict__.get("thermal_population")
+        if isinstance(legacy, Parameter):
+            from quchip.utils.deprecation import warn_renamed
+
+            if "thermal_occupation" in cls.__dict__:
+                raise TypeError("Declare thermal_occupation only, not both thermal occupation names.")
+            warn_renamed("thermal_population", "thermal_occupation")
+            cls.thermal_occupation = legacy
+            annotations = dict(cls.__dict__.get("__annotations__", {}))
+            annotations["thermal_occupation"] = annotations.pop("thermal_population", Any)
+            cls.__annotations__ = annotations
+            delattr(cls, "thermal_population")
         validate_declared_fields(cls)
         # Cache resolved parameter fields once per class. ``__init__`` and
         # the pytree closures both read this — no per-instance re-walk of
@@ -397,6 +419,7 @@ class DeviceModel(BaseDevice, metaclass=DeclarativeMeta):
         **params: Any,
     ) -> None:
         """Initialize the device from declared parameters and noise kwargs."""
+        params = self._normalize_parameter_names(params)
         settings = resolve_declared_settings(type(self), params)
         values = resolve_declared_params(
             type(self), params, fields=type(self).__quchip_param_fields__
@@ -516,6 +539,7 @@ class DeviceModel(BaseDevice, metaclass=DeclarativeMeta):
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "DeviceModel":
         """Reconstruct the device from :meth:`to_dict` output."""
+        d = cls._normalize_parameter_names(d)
         fields = cls.__quchip_param_fields__
         params = {
             name: d[name]

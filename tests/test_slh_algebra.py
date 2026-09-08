@@ -232,3 +232,18 @@ def test_concrete_jax_operands_stay_in_jax() -> None:
     for result in (series_product(system, other), feedback_reduce(stacked, output="g.0", input="o.0")):
         assert isinstance(result.S, jax.Array)
         assert all(isinstance(operator.values, jax.Array) for operator in result.L)
+
+
+def test_thermal_input_survives_series_and_feedback_at_its_input_column() -> None:
+    """SLH composition retains a surviving external bath and rejects an overwritten one."""
+    first = _system("first", np.eye(2), [_lowering(), _lowering()], None)
+    first = replace(first, channels=(replace(first.channels[0], input_occupation=0.3), first.channels[1]))
+    second = _system("second", np.eye(2), [_lowering(), _lowering()], None)
+    cascaded = series_product(first, second)
+    assert [channel.input_occupation for channel in cascaded.channels] == [0.3, None]
+    combined = concatenate(first, second)
+    assert [channel.input_occupation for channel in combined.channels] == [0.3, None, None, None]
+    reduced = feedback_reduce(first, output="first.0", input="first.1")
+    assert reduced.channels[0].input_occupation == 0.3
+    with pytest.raises(ValueError, match="independent thermal"):
+        series_product(second, first)

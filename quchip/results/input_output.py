@@ -164,10 +164,11 @@ class MeanFieldResponseResult:
 class OutputSpectrumResult:
     """Stationary output-field fluctuation spectra and signal photon fluxes.
 
-    ``signal_fluctuation_spectrum`` is the normally ordered signal spectral
-    density. ``added_noise_spectrum`` is the amplifier added-noise density,
+    ``signal_fluctuation_spectrum`` is device-generated spectral excess,
+    including input-system interference for thermal fields. It may be negative.
+    ``added_noise_spectrum`` is directly propagated thermal and amplifier noise,
     and ``total_fluctuation_spectrum`` is their sum. ``signal_photon_flux``
-    is the signal's mean normally ordered flux, split into
+    is the propagated device-field flux, split into
     ``signal_coherent_flux`` and ``signal_incoherent_flux``. Added noise is
     not included in these fluxes because converting a spectral density to
     flux requires a detection bandwidth.

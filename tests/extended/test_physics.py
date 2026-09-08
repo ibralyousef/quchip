@@ -386,7 +386,7 @@ class TestResonatorEigenvalues:
 class TestCollapseOperators:
     """Verify collapse-operator physics."""
 
-    def test_thermal_population(self) -> None:
+    def test_thermal_occupation(self) -> None:
         """At thermal equilibrium, P(1)/P(0) matches the Boltzmann ratio exp(-freq/(k_B*T))."""
         from quchip.utils.constants import k_B
 
@@ -400,7 +400,7 @@ class TestCollapseOperators:
             levels=3,
             label="q",
             T1=500.0,
-            thermal_population=n_bar,
+            thermal_occupation=n_bar,
         )
         chip = Chip([q])
         chip.set_frame("rotating")
