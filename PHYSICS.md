@@ -732,6 +732,89 @@ rank or condition diagnostic is `None`, not a successful check.
 If frame and approximation resolution leave dynamic terms, the stationary
 APIs raise. Periodic/Floquet stationary states are not implemented.
 
+### 8.2 Captured noisy VNA measurements
+
+`VNA.measure(frequencies, amplitudes, input=..., outputs=...)` prepares one
+stationary operating point for each probe/sweep coordinate and captures means
+and normally ordered IQ cross-spectra. Receiver integration, calibration, and
+Gaussian draws act on these captured arrays. They never call a stationary
+solver or consult a later mutable chip. `measurement.parameters` records the
+numerical model parameters in flattened sweep order; `noise_frequencies`
+records the stored offset grid. The finite-power ratio is output mean divided
+by the probe amplitude, not the small-signal derivative around a separate pump.
+
+An attenuator, isolator load, or `network.termination()` can declare
+`occupation=n` or `temperature=T, noise_frequency=f`. Temperature is mK and
+`f` is a positive physical frequency in GHz. The Markov occupation is evaluated
+at this declared frequency and held constant over the simulated band. It is
+never evaluated at a rotating-frame offset. Vacuum remains the default.
+
+For a full unitary scattering matrix S, input j couples through
+`K_j = (S† L)_j`. In addition to vacuum `sum_i D[L_i]`, its thermal population
+adds `n_j D[K_j] + n_j D[K_j†]`. Thermal input is therefore part of the
+stationary and transient quantum dynamics. It does not become a second
+independent device bath. SLH composition retains the surviving input's state
+and rejects an independent thermal declaration on an input that is connected
+away. Arbitrary passive nonideal components use `network.component()` with
+unitary scattering and explicit dissipative terminals connected to declared
+loads; insertion loss and isolation numbers alone do not define this matrix.
+
+Normal output spectra include the direct term `S diag(n) S†` and the
+input-system interference in the regression source
+`B_i = (L_i-<L_i>) rho + sum_k (S diag(n) S†)_ik [L_k,rho]`.
+This interference prevents double counting fluorescence on top of an
+incident thermal field at equilibrium. Real IQ sources constructed from B
+retain normal, anomalous, and cross-output second moments. `output_spectrum()`
+selects the scalar normal spectrum from the same calculation as `measure()`.
+The Fourier convention is `integral exp(+i 2π offset τ) <δb†(0) δb(τ)> dτ`;
+a mode above the carrier peaks at positive offset. This corrects the mirrored
+detuned-fluorescence spectrum in 0.3.0.
+
+Physical source budgets separate directly propagated fields from
+`device.correlations`. The latter includes nonlinear response and interference,
+so it need not be positive or independently sampleable. A matched absorptive
+filter declares `loss_occupation` or `loss_temperature` and emits
+`(1-|H(f)|²)n` in each direction. A scalar H(f) without that declaration does
+not imply an absorptive thermal model. Colored emission may propagate to
+external outputs, but a thermal reference filter that feeds a quantum coupling
+is rejected: a colored reservoir requires an explicit dynamical model.
+
+Acyclic output networks can place an amplifier before a splitter or between
+passive components. The compiler retains a unitary Markovian boundary and
+captures a separate directed field map with source cross-spectra. These
+sections cannot feed quantum couplings or instantaneous feedback loops.
+Amplifiers retain the output-line convention above; `added_noise` never
+implies reverse HEMT emission. The separate inbound and outbound traversals
+of an exposed reference section are preserved. Branched reference networks
+currently support stationary fields; transient output observables and direct
+SLH composition reject them explicitly. Compose their physical PortNetwork
+before resolving it. Their VNA response uses the general stationary solver.
+
+`IQReceiver(integration_time=T)` applies a normalized boxcar with frequency
+weight `sinc(offset*T)²`. For `b=I+iQ`, ideal heterodyne detection adds one
+complex vacuum quantum at the final plane, or `1/2` on each IQ diagonal.
+Thus flat normally ordered noise N gives `Var(I)=Var(Q)=(N+1)/(2T)`.
+Joint outputs retain their complex cross-spectrum and relative delays;
+independent detector vacuum is added once per output. Calibration multiplies
+the mean and transforms both covariance axes. Zero probe amplitude leaves
+field statistics defined and ratios undefined.
+
+An optional receiver `transfer(offset)` is a digital complex amplitude
+response and also scales the mean by its DC value. White noise is integrated
+analytically for an ordinary boxcar; colored terms and digital filters use
+the captured grid. The receiver compares full and coarsened quadrature and
+checks spectral edges. These local checks do not prove that an arbitrary
+spectrum has no unsampled feature. Use a wider or finer capture for unsupported
+bandwidths or integration times. Concrete validation must be run outside JAX
+tracing; deterministic integration and keyed reparameterized draws remain
+differentiable on fixed shapes.
+
+Gaussian samples reproduce the captured second moments. They do not supply
+higher-order non-Gaussian photon statistics or continuous correlated records.
+Normalized `g1` and `g2` for network thermal fields require a detection bandwidth
+and are rejected by the unfiltered correlation API.
+
+
 ## 9. Dressing
 
 Sources: [`quchip/chip/chip.py`](quchip/chip/chip.py), [`quchip/chip/analysis.py`](quchip/chip/analysis.py)

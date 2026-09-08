@@ -11,12 +11,15 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 
 from quchip.chip.ports import Port
+from quchip.engine.field_noise import noise_parameters, occupation_value
 from quchip.engine.reference import (
     ReferenceAmplifier,
     ReferenceDelay,
     ReferenceElement,
     ReferenceFilter,
     ReferencePlane,
+    ReferenceLoss,
+    noise_density,
 )
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar, select_array_module
 from quchip.utils.labeling import auto_label, resolve_label
@@ -276,6 +279,7 @@ _SERIALIZED_FACTORIES = frozenset(
         "attenuator",
         "delay",
         "amplifier",
+        "termination",
     }
 )
 
@@ -304,6 +308,7 @@ class _CompiledNetwork:
     scattering: Any
     generated_pairs: tuple[tuple[str, str, Any], ...]
     support: np.ndarray
+    output_network: Any = None
 
 
 class PortNetwork:
@@ -527,11 +532,16 @@ class PortNetwork:
         names = tuple(str(index) for index in range(len(order)))
         return self._permutation_component(label, names, order, kind="permutation", sided=False)
 
-    def attenuator(self, label: str, *, eta: Any) -> SLHComponent:
+    def attenuator(
+        self, label: str, *, eta: Any, occupation: Any = None,
+        temperature: Any = None, noise_frequency: Any = None,
+    ) -> SLHComponent:
         """Add a reciprocal two-sided attenuator with power transmission ``eta``.
 
         Each direction has amplitude transmission ``sqrt(eta)`` and couples to
-        one of two hidden vacuum channels with amplitude ``sqrt(1-eta)``.
+        one of two hidden loss channels with amplitude ``sqrt(1-eta)``.
+        They default to vacuum. Declare occupation, or temperature in mK with
+        noise_frequency in GHz, to give both loads a thermal state.
         """
         concrete = maybe_concrete_scalar(eta)
         if concrete is not None and not 0.0 <= concrete <= 1.0:
@@ -549,7 +559,8 @@ class PortNetwork:
             ),
             _row_inputs=((1, 3), (0, 2), (0, 2), (1, 3)),
             _kind="attenuator",
-            _parameters={"eta": eta},
+            _parameters={"eta": eta, **noise_parameters(
+                occupation=occupation, temperature=temperature, noise_frequency=noise_frequency)},
         )
         return self._add_component(component)
 
@@ -562,13 +573,16 @@ class PortNetwork:
         Place it with :meth:`link` or :meth:`connect` like any other component.
         The compiler peels adjacent runs from each exposure leg, so the section
         never enters Markovian ``S``, ``L``, or ``H``. Every reference section must
-        belong to one of these runs. Its duration is tracked at
+        belong to an exposed run or an acyclic downstream output graph. Its duration is tracked at
         ``network.component.<label>.duration``.
         """
         ReferenceDelay(label, duration)
         return self._reference_component(label, kind="delay", parameters={"duration": duration})
 
-    def filter(self, label: str, *, transfer: Callable[..., Any], **parameters: Any) -> SLHComponent:
+    def filter(
+        self, label: str, *, transfer: Callable[..., Any], loss_occupation: Any = None,
+        loss_temperature: Any = None, noise_frequency: Any = None, **parameters: Any,
+    ) -> SLHComponent:
         """Add a two-sided passive filter reference section.
 
         ``transfer(frequency, **parameters)`` must accept scalar or array frequencies
@@ -583,7 +597,17 @@ class PortNetwork:
         evaluations with ``|H| > 1`` raise. Networks containing filters cannot be
         serialized with :meth:`to_dict`; ``Chip.clone()`` and ``Chip.with_params()``
         preserve the callable.
+
+        Declare loss_occupation, or loss_temperature in mK with noise_frequency
+        in GHz, for a matched absorptive realization emitting (1-|H|²)n.
+        A scalar transfer alone does not distinguish absorption from reflection.
+        Colored thermal emission cannot feed a quantum coupling through a
+        reference section; use a dynamical filter/bath model for that case.
         """
+        noise = noise_parameters(occupation=loss_occupation, temperature=loss_temperature,
+                                 noise_frequency=noise_frequency)
+        parameters.update({f"loss_{name}" if name != "noise_frequency" else name: value
+                           for name, value in noise.items()})
         return self._reference_component(label, kind="filter", parameters=dict(parameters), transfer=transfer)
 
     def amplifier(self, label: str, *, gain: Any, added_noise: Any) -> SLHComponent:
@@ -598,7 +622,8 @@ class PortNetwork:
         The compiler rejects a section that would amplify an incident field into
         the chip or put the output plane on side 1. Both parameters are tracked at
         ``network.component.<label>.<name>`` and remain sweepable and
-        differentiable. The section remains outside Markovian ``S``, ``L``, and
+        differentiable. Acyclic downstream splitters retain its shared output
+        noise. The section remains outside Markovian ``S``, ``L``, and
         ``H`` and serializes normally.
         """
         ReferenceAmplifier(label, gain, added_noise)
@@ -634,19 +659,42 @@ class PortNetwork:
         sources = tuple((row - 1) % ports for row in range(ports))
         return self._permutation_component(label, names, sources, kind="circulator")
 
-    def isolator(self, label: str) -> SLHComponent:
+    def isolator(
+        self, label: str, *, occupation: Any = None,
+        temperature: Any = None, noise_frequency: Any = None,
+    ) -> SLHComponent:
         """Add an ideal isolator routing side 1 to side 2.
 
         The reverse field is dumped into ``hidden.<label>.load``, whose vacuum
         travels back toward side 1.
         """
-        return self._permutation_component(
+        component = self._permutation_component(
             label,
             ("1", "2", "load"),
             (2, 0, 1),
             kind="isolator",
             hidden_pairs=(("load", "load", f"hidden.{label}.load"),),
         )
+        component._parameters.update(noise_parameters(
+            occupation=occupation, temperature=temperature, noise_frequency=noise_frequency))
+        return component
+
+    def termination(
+        self, label: str, *, occupation: Any = None,
+        temperature: Any = None, noise_frequency: Any = None,
+    ) -> SLHComponent:
+        """Add a matched one-sided load with an optional thermal input state.
+
+        Specify occupation directly, or temperature in mK and the positive
+        physical noise_frequency in GHz defining the Markov occupation.
+        """
+        component = self._permutation_component(
+            label, ("1", "load"), (1, 0), kind="termination",
+            hidden_pairs=(("load", "load", f"hidden.{label}.load"),),
+        )
+        component._parameters.update(noise_parameters(
+            occupation=occupation, temperature=temperature, noise_frequency=noise_frequency))
+        return component
 
     def _permutation_component(
         self,
@@ -782,7 +830,9 @@ class PortNetwork:
             self._cache_value(self._authored_scattering),
         )
 
-    def resolve(self, base: "ResolvedSLH", *, _compiled: _CompiledNetwork | None = None) -> "ResolvedSLH":
+    def resolve(
+        self, base: "ResolvedSLH", *, _compiled: _CompiledNetwork | None = None,
+    ) -> "ResolvedSLH":
         """Compose this boundary onto port channels in an input-free SLH value."""
         from quchip.engine.ir import (
             CollapseTerm,
@@ -807,6 +857,10 @@ class PortNetwork:
         channels: list[SLHChannel] = []
         for entry in compiled.channels:
             exposure, mapping = entry.exposure, entry.coupling
+            input_occupation = (
+                occupation_value(self._components[exposure._input_key[0]]._parameters)
+                if exposure._hidden else None
+            )
             frame_frequency = self._common_frame_frequency(
                 mapping, port_channels, boundary=f"exposure {exposure.label!r}"
             )
@@ -822,6 +876,7 @@ class PortNetwork:
                         key=exposure.label,
                         accessibility="hidden" if exposure._hidden else "exposed",
                         reference=entry.reference,
+                        input_occupation=input_occupation,
                     )
                 )
                 continue
@@ -839,6 +894,7 @@ class PortNetwork:
                     collapse=template,
                     coupling_operator=coupling,
                     reference=entry.reference,
+                    input_occupation=input_occupation,
                 )
             )
 
@@ -858,6 +914,26 @@ class PortNetwork:
                 full_scattering = full_scattering.at[: len(channels), : len(channels)].set(compiled.scattering)
             else:
                 full_scattering[: len(channels), : len(channels)] = compiled.scattering
+        for index, entry in enumerate(compiled.channels):
+            sources = [element for element in entry.reference.inbound
+                       if ((isinstance(element, ReferenceLoss) and element.occupation is not None)
+                           or (isinstance(element, ReferenceFilter) and element.loss_occupation is not None))]
+            if not sources:
+                continue
+            filters = [element for element in entry.reference.inbound if isinstance(element, ReferenceFilter)]
+            if filters:
+                # A colored thermal input is not a Markov bath. It is safe to
+                # process at a downstream plane only when it cannot drive L.
+                coupled = any(compiled.support[row, index] and bool(channel.coupling)
+                              for row, channel in enumerate(compiled.channels))
+                if coupled:
+                    raise ValueError("A thermal reference filter feeds a quantum coupling; use an explicit "
+                                     "dynamical filter/bath for colored thermal backaction.")
+            input_noise = noise_density(entry.reference.inbound, 0.0, xp)
+            # No filters may feed a quantum coupling, so only flat Markov noise
+            # reaches the solver. Downstream-only color stays in output spectra.
+            if not filters:
+                channels[index] = replace(channels[index], input_occupation=input_noise)
         return ResolvedSLH(
             scattering=full_scattering,
             hamiltonian=HamiltonianProgram(
@@ -866,6 +942,7 @@ class PortNetwork:
             ),
             channels=tuple((*channels, *hidden)),
             support=full_support,
+            output_network=compiled.output_network,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1175,9 +1252,9 @@ class PortNetwork:
         """Return the boundary convention and approximation scope."""
         return [
             "This instantaneous Markovian boundary uses b_out = S b_in + L; scalar S is unitary after "
-            "explicit vacuum loss dilation, and instantaneous core feedback is reduced algebraically.",
+            "explicit loss dilation; declared thermal input states enter the quantum dynamics.",
             "Reference sections shift incident and reported fields at external planes only; they do not "
-            "enter S, L, or H and cannot sit inside feedback loops.",
+            "enter S, L, or H and cannot sit inside feedback loops. Acyclic output mixing preserves joint noise.",
         ]
 
     def dynamical_supports(
@@ -1358,6 +1435,8 @@ class PortNetwork:
                 )
         hidden: list[FieldExposure] = []
         for component in self.components:
+            if self._is_reference(component.label):
+                continue
             for input_name, output_name, label in component._hidden_pairs:
                 hidden.append(
                     FieldExposure(
@@ -1371,7 +1450,23 @@ class PortNetwork:
         return tuple((*exposed, *hidden))
 
     def _is_reference(self, label: str) -> bool:
-        return self._components[label]._kind in {"delay", "filter", "amplifier"}
+        kind = self._components[label]._kind
+        if kind in {"delay", "filter", "amplifier"}:
+            return True
+        # A passive two-sided section downstream of a reference run belongs
+        # to that same external run. Its directed vacuum/thermal dilation is
+        # retained in ReferenceLoss rather than becoming an internal amplifier.
+        visited: set[str] = set()
+        while kind in {"attenuator", "isolator"} and label not in visited:
+            visited.add(label)
+            previous = self._connections.get((label, "1"))
+            if previous is None or previous[1] != "2":
+                return False
+            label = previous[0]
+            kind = self._components[label]._kind
+            if kind in {"delay", "filter", "amplifier"}:
+                return True
+        return False
 
     def _reference_element(self, label: str) -> ReferenceElement:
         component = self._components[label]
@@ -1382,9 +1477,17 @@ class PortNetwork:
         if kind == "amplifier":
             return ReferenceAmplifier(label, parameters["gain"], parameters["added_noise"])
         assert component._transfer is not None
-        return ReferenceFilter(label, component._transfer, MappingProxyType(dict(parameters)))
+        noise = occupation_value({name: parameters[key] for name, key in
+                                  (("occupation", "loss_occupation"), ("temperature", "loss_temperature"),
+                                   ("noise_frequency", "noise_frequency")) if key in parameters})
+        transfer_parameters = {name: value for name, value in parameters.items()
+                               if name not in {"loss_occupation", "loss_temperature", "noise_frequency"}}
+        return ReferenceFilter(label, component._transfer, MappingProxyType(transfer_parameters),
+                               noise, parameters.get("noise_frequency"))
 
-    def _peel(self, exposure: FieldExposure) -> tuple[TerminalKey, TerminalKey, ReferencePlane]:
+    def _peel(
+        self, exposure: FieldExposure, *, traversals: set[TerminalKey] | None = None,
+    ) -> tuple[TerminalKey, TerminalKey, ReferencePlane]:
         """Peel adjacent reference runs from ``exposure`` to the Markov boundary.
 
         The returned plane orders inbound sections from exposure to boundary and
@@ -1397,6 +1500,8 @@ class PortNetwork:
             run: list[ReferenceElement] = []
             while self._is_reference(key[0]):
                 label, name = key
+                if traversals is not None:
+                    traversals.add((label, name if outbound else ("2" if name == "1" else "1")))
                 if any(element.label == label for element in run):
                     raise ValueError(f"Reference component {label!r} feeds back into itself.")
                 if self._components[label]._kind == "amplifier":
@@ -1408,6 +1513,12 @@ class PortNetwork:
                         )
                     if outbound:
                         run.append(self._reference_element(label))
+                elif self._components[label]._kind in {"attenuator", "isolator"}:
+                    component = self._components[label]
+                    forward = (name == "2") if outbound else (name == "1")
+                    eta = (component._parameters["eta"] if component._kind == "attenuator"
+                           else float(forward))
+                    run.append(ReferenceLoss(label, eta, occupation_value(component._parameters)))
                 else:
                     run.append(self._reference_element(label))
                 other = (label, "2" if name == "1" else "1")
@@ -1424,21 +1535,54 @@ class PortNetwork:
         plane = ReferencePlane(inbound=tuple(inbound), outbound=tuple(reversed(outbound)))
         return boundary_input, boundary_output, plane
 
-    def _compile(self) -> _CompiledNetwork:
+    def _compile(
+        self, *, _embedded: Mapping[TerminalKey, ReferenceElement] | None = None,
+        _retained: Mapping[str, ReferencePlane] | None = None,
+    ) -> _CompiledNetwork:
         exposures = self._effective_exposures()
-        peeled = [self._peel(exposure) for exposure in exposures]
-        planes = [plane for _, _, plane in peeled]
-        reached = {
-            element.label for plane in planes for element in (*plane.inbound, *plane.outbound)
-        }
-        unreached = [
-            label for label in self._components if self._is_reference(label) and label not in reached
-        ]
-        if unreached:
-            raise ValueError(
-                f"Reference components {unreached} must sit on a run between an exposure and the Markov "
-                "boundary, not inside the core graph or an instantaneous feedback loop."
-            )
+        traversals: set[TerminalKey] = set()
+        peeled = [self._peel(exposure, traversals=traversals) for exposure in exposures]
+        planes = [(_retained or {}).get(exposure.label, plane)
+                  for exposure, (_, _, plane) in zip(exposures, peeled, strict=True)]
+        def active_sides(label: str) -> tuple[str, ...]:
+            return tuple(side for side in ("1", "2") if (label, side) in traversals
+                         or (label, side) in self._used_outputs
+                         or (label, "2" if side == "1" else "1") in self._connections)
+
+        unused = [label for label in self._components if self._is_reference(label) and not active_sides(label)]
+        if unused:
+            raise ValueError(f"Reference components {unused} must connect to an exposed run "
+                             "or downstream output graph.")
+        internal = [label for label in self._components if self._is_reference(label)
+                    and any((label, side) not in traversals for side in active_sides(label))]
+        if internal:
+            if _embedded is not None:
+                raise ValueError("Reference graph cannot be reduced to exposed downstream fields.")
+            # A component can have an exposed inbound leg and a branched outbound
+            # leg. Preserve each traversal separately when forming the unitary core.
+            from copy import copy
+            bypassed = copy(self)
+            bypassed._components = dict(self._components)
+            embedded: dict[TerminalKey, ReferenceElement] = {}
+            for label in internal:
+                component = self._components[label]
+                sides = active_sides(label)
+                for side in sides:
+                    if (label, side) in traversals or (component._kind == "amplifier" and side == "1"):
+                        continue
+                    if component._kind in {"isolator", "attenuator"}:
+                        eta = component._parameters["eta"] if component._kind == "attenuator" else float(side == "2")
+                        element: ReferenceElement = ReferenceLoss(label, eta, occupation_value(component._parameters))
+                    else:
+                        element = self._reference_element(label)
+                    embedded[(label, side)] = element
+                bypassed._components[label] = replace(
+                    component, _kind="through", _parameters={}, _transfer=None,
+                    input_names=tuple("2" if side == "1" else "1" for side in sides), output_names=sides,
+                    scattering=np.eye(len(sides), dtype=complex), _row_inputs=tuple((i,) for i in range(len(sides))),
+                    _local_ports=(None,)*len(sides), _hidden_pairs=(), sides=())
+            retained = {exposure.label: plane for exposure, plane in zip(exposures, planes, strict=True)}
+            return bypassed._compile(_embedded=embedded, _retained=retained)
         core = [component for component in self.components if not self._is_reference(component.label)]
         covered_inputs = {boundary_input for boundary_input, _, _ in peeled}
         covered_outputs = {boundary_output for _, boundary_output, _ in peeled}
@@ -1448,7 +1592,8 @@ class PortNetwork:
         free_outputs = all_outputs - set(self._used_outputs) - covered_outputs
         if free_inputs or free_outputs:
             raise ValueError(
-                "PortNetwork has free terminals; connect or expose them explicitly: "
+                (f"Reference components {list(_embedded)} must be outside a feedback loop with all terminals covered. "
+                 if _embedded else "") + "PortNetwork has free terminals; connect or expose them explicitly: "
                 f"inputs={sorted(free_inputs)}, outputs={sorted(free_outputs)}."
             )
         if len(covered_inputs) != len(exposures) or len(covered_outputs) != len(exposures):
@@ -1487,8 +1632,10 @@ class PortNetwork:
 
         feeds = {terminal: _feeders(terminal) for terminal in nodes}
         generated_pairs: list[tuple[str, str, Any]] = []
+        groups = []
         for members in _strongly_connected(nodes, lambda terminal: [up for _, _, up in feeds[terminal] if up]):
             cyclic = len(members) > 1 or any(up == members[0] for _, _, up in feeds[members[0]])
+            groups.append((members, cyclic))
             if cyclic:
                 solved = self._solve_loop(members, nodes, feeds, input_fields, output_fields, size)
             else:
@@ -1548,7 +1695,51 @@ class PortNetwork:
             scattering=scattering,
             generated_pairs=tuple(generated_pairs),
             support=support_matrix,
+            output_network=(self._output_network(_embedded, groups, nodes, feeds, output_fields,
+                                                 input_fields, peeled, scattering, boundary)
+                            if _embedded else None),
         )
+
+    @staticmethod
+    def _output_network(embedded, groups, nodes, feeds, fields, inputs, peeled, scattering, boundary):
+        """Freeze acyclic downstream field maps, preserving a unitary solver boundary."""
+        from quchip.engine.output_network import OutputNetwork, OutputStep
+        xp = select_array_module(contains_tracer(scattering))
+        inverse = xp.conj(xp.asarray(scattering).T)
+        affected = set()
+        steps = []
+        for members, cyclic in groups:
+            local = {}
+            for terminal in members:
+                reference = embedded.get(terminal)
+                changed = reference is not None or any(upstream in affected for _, _, upstream in feeds[terminal])
+                local[terminal] = (reference, changed)
+            if cyclic and any(changed for _, changed in local.values()):
+                raise ValueError(f"Reference components {sorted({key[0] for key in embedded})} must remain "
+                                 "outside feedback loops; "
+                                 "only acyclic downstream scattering is supported.")
+            for terminal in members:
+                reference, changed = local[terminal]
+                component, row = nodes[terminal]
+                if changed and component._local_ports[row] is not None:
+                    raise ValueError("An internal reference component feeds a quantum coupling; "
+                                     "place amplifiers on output lines and use a dynamical model for internal filters.")
+                base = xp.asarray(fields[terminal].scattering) @ inverse
+                terms = ()
+                if changed:
+                    affected.add(terminal)
+                    terms = tuple((coefficient, upstream,
+                                   xp.asarray(inputs[boundary_input].scattering) @ inverse
+                                   if boundary_input is not None else None)
+                                  for coefficient, boundary_input, upstream in feeds[terminal])
+                steps.append(OutputStep(terminal, base, terms, reference))
+        size = len(scattering)
+        full_boundary = xp.eye(size, dtype=complex)
+        if boundary is not None:
+            count = len(boundary)
+            full_boundary = xp.block([[boundary, xp.zeros((count, size-count))],
+                                      [xp.zeros((size-count, count)), xp.eye(size-count)]])
+        return OutputNetwork(tuple(steps), tuple(output for _, output, _ in peeled), full_boundary, size)
 
     @staticmethod
     def _incoming(

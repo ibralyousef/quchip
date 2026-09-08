@@ -566,3 +566,36 @@ serialized field.
 - {doc}`Dynamics, pulses, observables, and readout <guides/dynamics-pulses-and-readout>`
 - {doc}`Chip transformations <guides/chip-transformations>`
 - {doc}`Differentiability <guides/differentiability>`
+
+## Capture a VNA measurement, then choose a receiver
+
+Once the chip and its exposed `drive` and `readout` planes are declared:
+
+```python
+from quchip import IQReceiver, VNA
+
+measurement = VNA(chip).measure(frequencies, amplitudes=0.02, input=drive, outputs=[readout])
+receiver = IQReceiver(integration_time=200_000)  # ns
+statistics = measurement.statistics(receiver=receiver)
+draws = measurement.sample(256, receiver=receiver, seed=7)
+iq = draws.field(readout)
+```
+
+The physical calculation captures the mean and noise at each probe point.
+Changing the integration time, calibration, or number of draws reuses the
+stored spectra. `statistics.covariance(readout)` returns a 2×2 IQ block;
+`statistics.covariance(readout, other)` returns the simultaneous cross block.
+`statistics.calibrate({readout: factor})` transforms both mean and covariance.
+Samples have a leading draw axis followed by sweep coordinates and outputs.
+Pass an explicit `key=` for JAX sampling.
+
+Declare physical load states on `network.attenuator()`, `network.isolator()`,
+or `network.termination()` with `occupation=` or with `temperature=` in mK
+and `noise_frequency=` in GHz. A matched absorptive `network.filter()` uses
+`loss_occupation=` or `loss_temperature=`. Gain and thermal sources propagate
+in their declared network order, including shared noise at splitter outputs.
+A load that reaches a quantum coupling changes the dynamics.
+
+See [the executed resonator example](guides/noisy-vna-measurement.md) for the
+comparison, covariance budget, and captured-grid limits. Draws use a Gaussian
+second-moment approximation; they are not quantum trajectories.

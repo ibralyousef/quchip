@@ -18,7 +18,9 @@ from quchip.engine.input_output import (
     same_frequency,
 )
 from quchip.engine.linear_response import try_build_linear_response_problem
-from quchip.engine.reference import carrier_transfer, cw_transfer, has_amplifier, noise_density
+from quchip.results.measurement import MeasurementResult
+from quchip.engine.output_network import output_mixing
+from quchip.engine.reference import cw_transfer, has_amplifier, ReferenceFilter, ReferenceLoss
 from quchip.engine.ir import CanonicalOperator, EngineResult, SteadyStateProblem
 from quchip.engine.steady_state import solve_steadystate_problem
 from quchip.results.input_output import (
@@ -32,6 +34,7 @@ from quchip.results.steady_state import SteadyStateResult
 from quchip.sweep import Sweep, ZippedSweep, _axis_metadata, _iter_axis_points
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar
 from quchip.utils.labeling import resolve_label
+from quchip.analysis.field_statistics import canonical as _canonical_matrix
 
 _TONE_PREFIX = "__vna_tone_"
 
@@ -309,6 +312,24 @@ class VNA:
         if duplicates:
             raise ValueError(f"VNA axis names must be unique, got duplicates {duplicates}.")
 
+    def measure(
+        self, frequencies: Any, amplitudes: Any, *variations: Sweep | ZippedSweep,
+        input: Any = None, outputs: Sequence[Any] | None = None, noise_frequencies: Any = None,
+        options: dict | None = None, progress: bool = False,
+    ) -> MeasurementResult:
+        """Capture stationary means and joint physical noise before choosing a receiver.
+
+        Frequencies are probe GHz, amplitudes are in 1/sqrt(ns). Optional
+        noise_frequencies are an increasing symmetric grid of offsets in GHz,
+        including zero. The default spans ±0.1 GHz with logarithmic spacing
+        down to 1 Hz. Choose a grid covering the model's noise features.
+        Returned data supports receiver integration and Gaussian sampling
+        without another solve; it is not a quantum-trajectory distribution.
+        """
+        from quchip.analysis.measurement import measure
+        return measure(self, frequencies, amplitudes, variations, input=input, outputs=outputs,
+                       noise_frequencies=noise_frequencies, options=options, progress=progress)
+
     def output_spectrum(
         self,
         output: Any,
@@ -332,36 +353,27 @@ class VNA:
         rho = xp.asarray(self.chip.backend.to_array(state.state), dtype=complex)
         channel = next(item for item in engine.slh.external_channels if item.key == output_port)
         carrier = _output_carrier(engine, output_port, tones)
-        boundary_field = _output_field_matrix(
-            operators[output_port], incoming.get(output_port, 0.0), xp
-        )
+        all_fields = xp.stack([_output_field_matrix(operators[item.key], incoming.get(item.key, 0.0), xp)
+                               for item in engine.slh.channels])
+        index = next(i for i, item in enumerate(engine.slh.channels) if item.key == output_port)
+        boundary_field = xp.einsum("i,ijk->jk", output_mixing(engine.slh, carrier, xp)[index], all_fields)
         field = cw_transfer(channel.reference.outbound, carrier, xp) * boundary_field
         mean = xp.trace(field @ rho)
-        identity = xp.eye(rho.shape[0], dtype=complex)
-        fluctuation = boundary_field - xp.trace(boundary_field @ rho) * identity
         intensity = xp.real(xp.trace(xp.conj(xp.swapaxes(field, -1, -2)) @ field @ rho))
         coherent_flux = xp.abs(mean) ** 2
-        source = _canonical_matrix(
-            -(fluctuation @ rho),
-            operators[output_port],
-            tag=f"spectrum-source:{output_port}",
-        )
-        observable = _canonical_matrix(
-            xp.conj(xp.swapaxes(fluctuation, -1, -2)),
-            operators[output_port],
-            tag=f"spectrum-observable:{output_port}",
-        )
-        response = self.chip.backend.stationary_resolvent(
-            engine,
-            ((output_port, source),),
-            ((output_port, observable),),
-            frequency_values,
-            prepared=operating.prepared,
-        )[(output_port, output_port)]
-        sideband = carrier + xp.asarray(frequency_values)
-        offset_gain = xp.abs(carrier_transfer(channel.reference.outbound, sideband, xp)) ** 2
-        added_noise = noise_density(channel.reference.outbound, sideband, xp)
-        signal = 2.0 * xp.real(response) * offset_gain
+        from quchip.analysis.measurement import capture_noise
+        components, _ = capture_noise(operating, self.chip.backend, (output_port,), carrier,
+                                      xp.asarray(frequency_values))
+
+        def normal_spectrum(pair: tuple[Any, Any]) -> Any:
+            white, excess = pair
+            spectrum = white + excess
+            return xp.real(spectrum[..., 0, 0] + spectrum[..., 1, 1]
+                           + 1j * (spectrum[..., 1, 0] - spectrum[..., 0, 1]))
+
+        signal = normal_spectrum(components["device.correlations"])
+        added_noise = sum((normal_spectrum(pair) for name, pair in components.items()
+                           if name != "device.correlations"), xp.zeros_like(frequency_values))
         return OutputSpectrumResult(
             port=output_port,
             frequencies=frequency_values,
@@ -418,11 +430,20 @@ class VNA:
         xp = backend.array_module
         rho = xp.asarray(backend.to_array(state.state), dtype=complex)
         runs = {item.key: item.reference.outbound for item in engine.slh.external_channels}
-        if has_amplifier(runs[output_port]) or has_amplifier(runs[input_port]):
+        if engine.slh.output_network is not None or has_amplifier(runs[output_port]) or has_amplifier(runs[input_port]):
             raise NotImplementedError(
                 "Normalized g1 and g2 through an amplifier require a detection bandwidth for its "
                 "broadband added noise. Request the correlation at a plane before the amplifier."
             )
+
+        thermal = any(channel.input_occupation is not None or any(
+            (isinstance(element, ReferenceLoss) and element.occupation is not None)
+            or (isinstance(element, ReferenceFilter) and element.loss_occupation is not None)
+            for element in (*channel.reference.inbound, *channel.reference.outbound))
+            for channel in engine.slh.channels)
+        if thermal:
+            raise NotImplementedError("Normalized g1 and g2 with thermal network fields require a detection "
+                                      "bandwidth. Use measure().statistics() for integrated second moments.")
 
         def plane_field(key: str) -> Any:
             factor = cw_transfer(runs[key], _output_carrier(engine, key, tones), xp)
@@ -585,6 +606,11 @@ def _exposure_reference_frequency(chip: Any, label: str) -> Any:
     for channel in resolved.slh.external_channels:
         if channel.key == label:
             frequency = channel.collapse.frame_frequency
+            if frequency is None and resolved.slh.output_network is not None:
+                carriers = [item.collapse.frame_frequency for item in resolved.slh.channels
+                            if item.collapse.frame_frequency is not None]
+                if carriers and all(same_frequency(carriers[0], other) for other in carriers[1:]):
+                    return carriers[0]
             return 0.0 if frequency is None else frequency
     available = [channel.key for channel in resolved.slh.external_channels]
     raise ValueError(f"Unknown VNA exposure {label!r}. Available exposures: {available}.")
@@ -701,7 +727,7 @@ def _small_signal_matrix(
     response = backend.stationary_resolvent(
         engine,
         tuple(sources),
-        tuple((label, channels[label]) for label in labels),
+        tuple((channel.key, channels[channel.key]) for channel in engine.slh.channels),
         (0.0,),
         prepared=operating.prepared,
     )
@@ -710,13 +736,15 @@ def _small_signal_matrix(
 
     def gather(kind: str) -> Any:
         columns = range(len(labels))
-        return xp.stack([xp.stack([response[(f"{kind}:{c}", out_label)][0] for c in columns]) for out_label in labels])
+        return xp.stack([xp.stack([response[(f"{kind}:{c}", channel.key)][0] for c in columns])
+                         for channel in engine.slh.channels])
 
-    direct = xp.stack([xp.stack([scattering[o, i] for i in indices]) for o in indices])
+    direct = scattering[:, xp.asarray(indices)]
+    mixing = output_mixing(engine.slh, frequency, xp)[xp.asarray(indices)]
     gain = outbound[:, None]
     return (
-        gain * inbound[None, :] * (direct + gather("normal")),
-        gain * xp.conj(inbound)[None, :] * gather("conjugate"),
+        gain * inbound[None, :] * (mixing @ (direct + gather("normal"))),
+        gain * xp.conj(inbound)[None, :] * (mixing @ gather("conjugate")),
     )
 
 
@@ -729,7 +757,8 @@ def _output_carrier(engine: EngineResult, key: str, tones: Any) -> Any:
     external = {item.key: index for index, item in enumerate(engine.slh.external_channels)}
     row = external[key]
     channel = engine.slh.external_channels[row]
-    if channel.collapse.frame_frequency is not None or not channel.reference.outbound:
+    if channel.collapse.frame_frequency is not None or (not channel.reference.outbound
+                                                       and engine.slh.output_network is None):
         return channel.carrier
     feeding = [frequency for label, frequency, _ in tones if engine.slh.feeds(row, external[label])]
     if not feeding or any(not same_frequency(feeding[0], other) for other in feeding[1:]):
@@ -759,16 +788,25 @@ def _plane_means(
     operators = port_operators(engine, backend)
     backgrounds = _stationary_output_backgrounds(engine, tones, backend)
     channels = {channel.key: channel for channel in engine.slh.external_channels}
+    boundaries = xp.stack([backgrounds.get(channel.key, 0.0)
+                           + xp.trace(xp.asarray(operators[channel.key].to_dense()) @ rho)
+                           for channel in engine.slh.channels])
+    boundaries = output_mixing(engine.slh, frequency, xp) @ boundaries
     means = []
+    indices = {channel.key: i for i, channel in enumerate(engine.slh.channels)}
     for label in labels:
         channel = channels[label]
         carrier = _output_carrier(engine, label, tones)
-        if not same_frequency(carrier, frequency):
+        # A coupling-free, unilluminated output is zero at any requested carrier.
+        is_zero = not any(engine.slh.feeds(
+            indices[label], indices[tone[0]],
+        ) for tone in tones) and channel.collapse.frame_frequency is None
+        if not is_zero and not same_frequency(carrier, frequency):
             raise ValueError(
                 f"Plane {label!r} resolves at {carrier!r} GHz, not at the probe frequency "
                 f"{frequency!r} GHz. Narrow VNA(..., ports=...) to ports at the probe carrier."
             )
-        boundary = backgrounds[label] + xp.trace(xp.asarray(operators[label].to_dense(), dtype=complex) @ rho)
+        boundary = boundaries[indices[label]]
         means.append(cw_transfer(channel.reference.outbound, carrier, xp) * boundary)
     return xp.stack(means)
 
@@ -776,19 +814,3 @@ def _plane_means(
 def _output_field_matrix(operator: CanonicalOperator, incoming: Any, xp: Any) -> Any:
     coupling = xp.asarray(operator.to_dense(), dtype=complex)
     return xp.asarray(incoming) * xp.eye(coupling.shape[0], dtype=complex) + coupling
-
-
-def _canonical_matrix(
-    values: Any,
-    template: CanonicalOperator,
-    *,
-    tag: str,
-) -> CanonicalOperator:
-    """Attach resolved subsystem metadata to a stationary query matrix."""
-    return CanonicalOperator.from_dense(
-        values,
-        dims=template.dims,
-        basis=template.basis,
-        subsystem_labels=template.subsystem_labels,
-        tag=tag,
-    )
