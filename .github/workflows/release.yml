@@ -20,6 +20,10 @@ jobs:
             echo "::error::Tag ${GITHUB_REF_NAME} does not match the built package version."
             exit 1
           fi
+          if [[ ! -s "RELEASE_NOTES_${version}.md" ]]; then
+            echo "::error::Missing release notes for ${GITHUB_REF_NAME}."
+            exit 1
+          fi
       - name: Check package metadata
         run: uvx twine check dist/*
       - uses: actions/upload-artifact@v4
@@ -39,3 +43,24 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists."
+            exit 0
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "quchip ${version}" \
+            --notes-file "RELEASE_NOTES_${version}.md"
