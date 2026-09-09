@@ -1,7 +1,7 @@
 # Guides
 
-Choose a physical question. Each guide starts with a runnable calculation,
-then develops the model and interprets its observables.
+Learn the main quchip workflows through coupled models, pulse simulations,
+microwave measurements, reductions and fitting.
 
 New to quchip? Start with {doc}`your first chip <defining-and-inspecting-a-chip>`.
 
@@ -9,37 +9,38 @@ New to quchip? Start with {doc}`your first chip <defining-and-inspecting-a-chip>
 
 - {doc}`Spectra and parameter sweeps <statics-and-parameter-studies>`:
   compare dressed observables and track states through avoided crossings.
-- {doc}`Pulses and readout <dynamics-pulses-and-readout>`:
+- {doc}`Pulses, leakage, and readout <dynamics-pulses-and-readout>`:
   compare pulse bandwidth, leakage, and conditional resonator response.
 
 ## Microwave networks
 
-- {doc}`Resonator reflection <steady-state-and-vna>`:
-  follow the measured signal through the fridge wiring.
-- {doc}`Purcell filtering and T1 <slh-networks>`:
-  compare circuits and identify where an excitation is lost.
+- {doc}`Readout and fridge wiring <steady-state-and-vna>`:
+  calculate VNA traces and qubit readout with receiver noise.
 
-## Reduction and inference
+## Model reduction and fitting
 
-- {doc}`Chip transformations <chip-transformations>`:
-  reduce a model and replay its controls.
-- {doc}`Gradients and fitting <differentiability>`:
+- {doc}`Model reduction <chip-transformations>`:
+  compare a reduced model with the full pulse simulation.
+- {doc}`Gradients and parameter fitting <differentiability>`:
   differentiate observables and fit shared model parameters.
 
 ## From the talk
 
-The {doc}`SQA 2026 companion <from-sqa-2026>` collects five short calculations
-from the presentation. The guides above stand on their own.
+The {doc}`SQA 2026 examples <from-sqa-2026>` cover five short calculations
+from the talk.
+
+For studies of specific physical questions, see {doc}`../studies/index`.
+For API choices and common pitfalls, see the {doc}`cookbook <../cookbook>`.
 
 ```{toctree}
 :hidden:
 :maxdepth: 1
 
-Spectra and sweeps <statics-and-parameter-studies>
-Pulses and readout <dynamics-pulses-and-readout>
-Resonator reflection <steady-state-and-vna>
-Purcell filtering and T1 <slh-networks>
-Chip transformations <chip-transformations>
-Gradients and fitting <differentiability>
-SQA 2026 companion <from-sqa-2026>
+Spectra and parameter sweeps <statics-and-parameter-studies>
+Pulses, leakage, and readout <dynamics-pulses-and-readout>
+Readout and fridge wiring <steady-state-and-vna>
+Model reduction <chip-transformations>
+Gradients and parameter fitting <differentiability>
+Cookbook <../cookbook>
+SQA 2026 examples <from-sqa-2026>
 ```

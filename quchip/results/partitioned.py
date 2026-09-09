@@ -105,6 +105,27 @@ class PartitionedSimulationResult:
     def _owner_result(self, device: Any) -> Any:
         return self._results[self._partition.owner_of(device)]
 
+    def iq_readout(self, output: Any, **kwargs: Any) -> Any:
+        """Build a detector from the unique component owning an exposed output."""
+        label = resolve_label(output)
+        owners = [result for result in self._results if result._readout_wiring is not None
+                  and label in result._readout_wiring.exposed]
+        if len(owners) != 1:
+            raise ValueError(f"Output {label!r} must belong to exactly one partition; inspect component results.")
+        return owners[0].iq_readout(output, **kwargs)
+
+    def measure(self, *devices: Any, t: Any = None, basis: Any = "energy") -> Any:
+        """Measure retained states in local energy bases, without further evolution.
+
+        Pass multiple devices for joint outcomes, t for an exact saved time,
+        or basis='solver'. Custom local unitary columns are expressed in the
+        captured energy basis of the stored integration frame: one matrix for
+        one device, or a device mapping. No phase-frame conversion is applied.
+        Samples at different times represent independently terminated experiments.
+        """
+        from quchip.results.terminal import measure_result
+        return measure_result(self, devices, t=t, basis=basis)
+
     def population(self, device: Any, level: int = 0) -> Any:
         return self._owner_result(device).population(device, level)
 

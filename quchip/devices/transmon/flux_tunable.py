@@ -154,7 +154,7 @@ class FluxTunableTransmon(FockDevice):
         Auto-generated as ``fluxtunable_{idx}`` when omitted.
     **noise_kwargs
         Forwarded to :class:`~quchip.devices.base.BaseDevice` — ``T1``,
-        ``T2``, ``thermal_population``.
+        ``T2``, ``thermal_occupation``.
     """
 
     _type_prefix: ClassVar[str] = "fluxtunable"

@@ -1,4 +1,4 @@
-# Backend and solver options
+# Backends and solvers
 
 QuTiP is the default backend. Use dynamiqs for JAX gradients, compiled batches,
 or accelerator execution. Both solve the declared model with its chosen frame,

@@ -53,7 +53,7 @@ def test_dissipation_exclusion_is_explicit_and_captured(backend):
     assert not problem.engine_result.collapse_terms
     np.testing.assert_allclose(result.population("q", 1), 1.0, atol=1e-8)
     with pytest.raises((KeyError, ValueError)):
-        result.collapse_flux("hidden.q.thermal_emission")
+        result.jump_rate("hidden.q.thermal_emission")
     assert seq.build_problem(times).engine_result.collapse_terms
 
 

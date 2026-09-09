@@ -76,7 +76,7 @@ class KerrCavity(FockDevice):
         ``kerr_cavity_0``, ``kerr_cavity_1``, …
     **noise_kwargs
         Forwarded to :class:`~quchip.devices.base.BaseDevice`:
-        ``T1``, ``T2``, ``thermal_population``, etc.
+        ``T1``, ``T2``, ``thermal_occupation``, etc.
 
     Notes
     -----

@@ -37,7 +37,7 @@ e-folding of energy, so energy decays as
 must not be moved to the units boundary in ``assembly.py``.
 
 Noise hooks inherited from :class:`~quchip.devices.base.BaseDevice`
-(``T1``, ``T2``, ``thermal_population``) produce the Lindblad
+(``T1``, ``T2``, ``thermal_occupation``) produce the Lindblad
 channels described in that base class. For circuit-QED conventions
 see Krantz et al., *Applied Physics Reviews* **6**, 021318 (2019), §V.
 
@@ -94,7 +94,7 @@ class Resonator(FockDevice):
         labeling counter.
     **noise_kwargs
         Forwarded verbatim to :class:`BaseDevice` — ``T1``, ``T2``,
-        ``thermal_population``.
+        ``thermal_occupation``.
 
     Example
     -------
@@ -138,10 +138,10 @@ class Resonator(FockDevice):
     def intrinsic_decay_rate(self) -> Any | None:
         """Combined lowering-channel rate: ``κ = 2π·freq/Q`` photon loss plus the thermal-emission rate.
 
-        Both :attr:`internal_quality_factor` and ``T1``/``thermal_population`` build
+        Both :attr:`internal_quality_factor` and ``T1``/``thermal_occupation`` build
         independent lowering-operator collapse channels on this device (the
         ``internal_photon_loss`` channel, a pure loss channel unaffected by
-        ``thermal_population``, and the inherited
+        ``thermal_occupation``, and the inherited
         thermal-emission channel — see
         :meth:`~quchip.devices.base.BaseDevice.intrinsic_decay_rate` for its
         ``(n̄+1)/T1`` / ``n̄+1`` formulas); this hook reports their summed
