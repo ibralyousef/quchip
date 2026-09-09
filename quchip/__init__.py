@@ -23,7 +23,7 @@ del _jax
 import os  # noqa: E402
 from importlib import import_module  # noqa: E402
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from quchip.analysis import (  # noqa: E402
     CRHamiltonianResult,
@@ -47,6 +47,8 @@ from quchip.chip import (
     Bath,
     Port,
     PortNetwork,
+    ComponentPort,
+    NetworkPort,
     Capacitive,
     Chip,
     ChipTransform,
@@ -137,6 +139,8 @@ from quchip.results import (
     OutputCorrelationResult,
     OutputSpectrumResult,
 )
+from quchip.results.receiver import IQReceiver
+from quchip.results.measurement import VNAMeasurement, VNAMeasurementStatistics, VNAMeasurementSamples
 from quchip.sweep import SpectrumSweep, Sweep, ZippedSweep
 from quchip.utils.constants import Phi_0, hbar, k_B
 
@@ -156,7 +160,12 @@ _LAZY_VIZ_EXPORTS = {
     "plot_wigner": ("quchip.viz.results", "plot_wigner"),
 }
 
+from quchip.results.terminal import IQReadout, StateMeasurement, StateSamples
+
 __all__ = [
+    "IQReadout",
+    "StateMeasurement",
+    "StateSamples",
     # Version
     "__version__",
     # Engine approximation strategies
@@ -213,6 +222,8 @@ __all__ = [
     "Bath",
     "Port",
     "PortNetwork",
+    "ComponentPort",
+    "NetworkPort",
     "ChipTransform",
     "EliminationResult",
     "ReductionMap",
@@ -243,6 +254,10 @@ __all__ = [
     "SteadyStateResult",
     "SteadyStateBatchResult",
     "MeanFieldResponseResult",
+    "IQReceiver",
+    "VNAMeasurement",
+    "VNAMeasurementStatistics",
+    "VNAMeasurementSamples",
     "SParameterResult",
     "OutputSpectrumResult",
     "OutputCorrelationResult",

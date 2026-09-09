@@ -65,7 +65,7 @@ def series_product(first: ResolvedSLH, second: ResolvedSLH) -> ResolvedSLH:
     support = (np.asarray(second.support, dtype=int) @ np.asarray(first.support, dtype=int)) > 0
     channels = tuple(
         _channel(
-            downstream,
+            replace(downstream, input_occupation=upstream.input_occupation),
             couplings[index],
             template,
             reference=ReferencePlane(inbound=upstream.reference.inbound, outbound=downstream.reference.outbound),
@@ -123,6 +123,8 @@ def concatenate(*systems: ResolvedSLH, prefixes: Sequence[str] | None = None) ->
         + [index for index, channel in enumerate(entries) if channel.accessibility == "hidden"],
         dtype=int,
     )
+    if any(system.output_network is not None for system in systems):
+        raise ValueError("Compose the physical PortNetwork before resolving branched output reference sections.")
     xp = _array_module(systems)
     grid = np.ix_(order, order)
     scattering = _block_diagonal([xp.asarray(system.scattering, dtype=complex) for system in systems], xp)[grid]
@@ -185,6 +187,7 @@ def feedback_reduce(slh: ResolvedSLH, *, output: str | SLHChannel, input: str | 
         replace(
             closed_input,
             key=f"{closed_output.key}->{closed_input.key}",
+            input_occupation=closed_output.input_occupation,
             reference=ReferencePlane(inbound=closed_output.reference.inbound, outbound=closed_input.reference.outbound),
         )
         if index == merged
@@ -238,6 +241,8 @@ def _require_common_space(*systems: ResolvedSLH) -> None:
 
 def _arrays(*systems: ResolvedSLH) -> tuple[Any, list[tuple[Any, Any]]]:
     """Return the shared array module and each system's dense ``(S, stacked L)``."""
+    if any(system.output_network is not None for system in systems):
+        raise ValueError("Compose the physical PortNetwork before resolving branched output reference sections.")
     xp = _array_module(systems)
     return xp, [
         (
@@ -261,6 +266,8 @@ def _require_joinable(operation: str, upstream: SLHChannel, downstream: SLHChann
         raise ValueError(prefix + "both channels must share accessibility.")
     if not _same_carrier(upstream.carrier, downstream.carrier):
         raise ValueError(prefix + "carriers are not statically known to be equal.")
+    if downstream.input_occupation is not None:
+        raise ValueError(prefix + "the connected input cannot retain an independent thermal bath declaration.")
     if upstream.reference.outbound or downstream.reference.inbound:
         raise ValueError(prefix + "reference runs must be empty on the joined legs.")
 
@@ -327,4 +334,5 @@ def _channel(source: SLHChannel, values: Any, template: CanonicalOperator, *, re
         collapse=collapse,
         coupling_operator=coupling,
         reference=reference,
+        input_occupation=source.input_occupation,
     )

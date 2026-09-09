@@ -348,11 +348,11 @@ def _fridge_chip() -> tuple[qc.Chip, qc.PortNetwork]:
     loss = network.attenuator("cold_loss", eta=0.1)
     cable = network.delay("cable", duration=3.2)
     hemt = network.amplifier("hemt", gain=100.0, added_noise=2.0)
-    network.link(loss, circulator.side(1))
-    network.link(port, circulator.side(2))
-    network.link(circulator.side(3), isolator, cable, hemt)
-    network.expose("drive", at=loss.side(1))
-    network.expose("readout", at=hemt.side(2))
+    network.link(loss, circulator.port(1))
+    network.link(port, circulator.port(2))
+    network.link(circulator.port(3), isolator, cable, hemt)
+    network.expose("drive", at=loss.port(1))
+    network.expose("readout", at=hemt.port(2))
     return qc.Chip([resonator], port_network=network), network
 
 
@@ -439,9 +439,9 @@ def test_plot_port_network_draws_asymmetric_planes_with_two_arrows() -> None:
     port = network.port("p", target=resonator, rate=0.02)
     circ = network.circulator("circ")
     pad = network.attenuator("pad", eta=0.5)
-    network.link(port, circ.side(2))
-    network.link(pad, circ.side(1))
-    network.expose("through", input=pad.side(1).input, output=circ.side(3).output)
+    network.link(port, circ.port(2))
+    network.link(pad, circ.port(1))
+    network.expose("through", input=pad.port(1).input, output=circ.port(3).output)
     fig = qc.viz.plot_port_network(network)
     arrows = [a for a in fig.findobj(matplotlib.text.Annotation) if a.arrow_patch is not None]
     styles = sorted(type(a.arrow_patch.get_arrowstyle()).__name__ for a in arrows)
@@ -450,8 +450,8 @@ def test_plot_port_network_draws_asymmetric_planes_with_two_arrows() -> None:
 
     same_component = qc.PortNetwork(label="one")
     circ = same_component.circulator("circ")
-    same_component.link(same_component.port("p", target=resonator, rate=0.02), circ.side(2))
-    same_component.expose("split", input=circ.side(1).input, output=circ.side(3).output)
+    same_component.link(same_component.port("p", target=resonator, rate=0.02), circ.port(2))
+    same_component.expose("split", input=circ.port(1).input, output=circ.port(3).output)
     fig = qc.viz.plot_port_network(same_component)
     arrows = [a for a in fig.findobj(matplotlib.text.Annotation) if a.arrow_patch is not None]
     assert sorted(type(a.arrow_patch.get_arrowstyle()).__name__ for a in arrows) == ["CurveAB", "CurveB", "CurveB"]

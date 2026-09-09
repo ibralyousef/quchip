@@ -133,10 +133,10 @@ class TestNoiseValidation:
         with pytest.raises(ValueError, match="T2 must satisfy T2 <= 2\\*T1"):
             DuffingTransmon(freq=5.0, anharmonicity=-0.25, T1=1000.0, T2=2500.0)
 
-    def test_thermal_population_negative(self) -> None:
-        """thermal_population < 0 raises ValueError."""
-        with pytest.raises(ValueError, match="thermal_population must be non-negative"):
-            DuffingTransmon(freq=5.0, anharmonicity=-0.25, thermal_population=-0.1)
+    def test_thermal_occupation_negative(self) -> None:
+        """thermal_occupation < 0 raises ValueError."""
+        with pytest.raises(ValueError, match="thermal_occupation must be non-negative"):
+            DuffingTransmon(freq=5.0, anharmonicity=-0.25, thermal_occupation=-0.1)
 
 class TestCollapseOperators:
     """Verify collapse operator counts, rates, and formulas."""
@@ -184,13 +184,13 @@ class TestCollapseOperators:
         assert len(c_ops) == 1  # Only the T1 relaxation op
 
     def test_thermal_only_with_nbar(self) -> None:
-        """thermal_population > 0 without T1 → downward + upward = 2 ops."""
+        """thermal_occupation > 0 without T1 → downward + upward = 2 ops."""
         n_bar = 0.05
         q = DuffingTransmon(
             freq=5.0,
             anharmonicity=-0.25,
             levels=3,
-            thermal_population=n_bar,
+            thermal_occupation=n_bar,
         )
         c_ops = q.collapse_operators()
         assert len(c_ops) == 2  # downward (a) + upward (a†)
@@ -210,18 +210,18 @@ class TestCollapseOperators:
         )
 
     def test_thermal_zero_nbar_one_op(self) -> None:
-        """thermal_population == 0 → only downward channel (1 op)."""
+        """thermal_occupation == 0 → only downward channel (1 op)."""
         q = DuffingTransmon(
             freq=5.0,
             anharmonicity=-0.25,
             levels=3,
-            thermal_population=0.0,
+            thermal_occupation=0.0,
         )
         c_ops = q.collapse_operators()
         assert len(c_ops) == 1  # Only downward: √(γ·(0+1)) · a
 
     def test_T1_thermal_foldin(self) -> None:
-        """T1 + thermal_population → fold-in with γ=1/T1."""
+        """T1 + thermal_occupation → fold-in with γ=1/T1."""
         T1 = 10_000.0
         n_bar = 0.05
         q = DuffingTransmon(
@@ -229,7 +229,7 @@ class TestCollapseOperators:
             anharmonicity=-0.25,
             levels=3,
             T1=T1,
-            thermal_population=n_bar,
+            thermal_occupation=n_bar,
         )
         c_ops = q.collapse_operators()
 
@@ -250,14 +250,14 @@ class TestCollapseOperators:
         )
 
     def test_T1_thermal_zero_nbar_foldin(self) -> None:
-        """T1 + thermal_population=0 → fold-in, only downward (1 op)."""
+        """T1 + thermal_occupation=0 → fold-in, only downward (1 op)."""
         T1 = 10_000.0
         q = DuffingTransmon(
             freq=5.0,
             anharmonicity=-0.25,
             levels=3,
             T1=T1,
-            thermal_population=0.0,
+            thermal_occupation=0.0,
         )
         c_ops = q.collapse_operators()
         assert len(c_ops) == 1

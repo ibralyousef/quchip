@@ -15,7 +15,7 @@ jupyter:
 
 <!-- reader-content -->
 
-# Statics and parameter studies
+# Spectra and parameter sweeps
 
 Track an avoided crossing, inspect its dressed-state assignments, and compare
 a fluxonium model with published spectroscopy and readout data.
@@ -412,7 +412,7 @@ observable are needed.
 
 Near an avoided crossing, a dressed eigenstate can be shared between several
 bare product states. `dressed_index()` tracks the assigned branch across the
-sweep, while `assignment_overlaps` records how confident that assignment is.
+sweep, while `assignment_overlaps` records the squared overlap with the assigned bare state.
 For one chip, `state_components()` exposes the largest bare-basis weights.
 
 ```python

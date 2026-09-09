@@ -120,14 +120,16 @@ class SimulationResult:
         channels: tuple[SLHChannel, ...] = (),
         bases: dict[str, Any] | None = None,
         dissipation: bool = True,
+        readout_wiring: Any = None,
     ) -> None:
+        self._readout_wiring = readout_wiring
         self._backend = backend
         self._truncation: Any = None
         self._boundary_traces: tuple[Any, ...] | None = None
         self.dissipation = dissipation
         self._bases = {} if bases is None else dict(bases)
         self._channels: dict[str, SLHChannel] = {channel.key: channel for channel in channels}
-        self._collapse_flux_cache: dict[str, Any] = {}
+        self._jump_rate_cache: dict[str, Any] = {}
         self.times = backend.array_module.asarray(solver_result.times, dtype=float)
         self._states = solver_result.states
         self._expect_data: dict[Any, ObservableTrace | list[ObservableTrace]] | None = observable_traces
@@ -205,17 +207,17 @@ class SimulationResult:
 
     @property
     def outputs(self) -> dict[Any, OutputFieldTrace]:
-        """Return complete output-field traces keyed by exposure label."""
+        """Return complete output-field traces keyed by network port label."""
         return dict(self._output_data)
 
     def output(self, exposure: Any) -> OutputFieldTrace:
-        """Return one field trace by exposure object or label."""
+        """Return one field trace by network port or label."""
         label = resolve_label(exposure)
         try:
             return self._output_data[label]
         except KeyError as exc:
             raise KeyError(
-                f"No output for {label!r}. Available exposures: {sorted(self._output_data)}"
+                f"No output for {label!r}. Available network ports: {sorted(self._output_data)}"
             ) from exc
 
     # ------------------------------------------------------------------
@@ -224,11 +226,11 @@ class SimulationResult:
 
     @property
     def collapse_channels(self) -> tuple[str, ...]:
-        """Return the resolved SLH channel keys accepted by :meth:`collapse_flux`.
+        """Return the resolved SLH channel keys accepted by :meth:`jump_rate`.
 
         Hidden channels use keys such as ``"hidden.q.thermal_emission"`` and
         ``"hidden.r.internal_photon_loss"``. Channels exposed at external
-        planes use their exposure labels.
+        ports use their network labels.
         """
         return tuple(self._channels)
 
@@ -242,22 +244,22 @@ class SimulationResult:
         detail = "matches several channels" if matches else "matches no channel"
         raise KeyError(f"{label!r} {detail}. Available channels: {list(self._channels)}")
 
-    def collapse_flux(self, key: Any) -> Any:
+    def jump_rate(self, key: Any) -> Any:
         """Return the cached jump rate ``<L†L>(t)`` for one resolved channel.
 
         The rate is evaluated post-solve from stored states and has units of
         ``1/ns``. ``key`` may be a resolved key from
-        :attr:`collapse_channels`, an exposure, or a
+        :attr:`collapse_channels`, a network port, or a
         ``"<device>.<channel>"`` label that identifies one channel. Address a
-        port composed into a network through its exposure.
+        port composed into a network through its external network port.
 
-        For an exposed plane, this rate equals ``raw_photon_flux`` only with
+        At an external network port, this rate equals ``raw_photon_flux`` only with
         vacuum input. Dephasing and thermal-absorption channels can also have
         nonzero jump rates, so this quantity alone is not an excitation-loss
         rate.
         """
         name = self._channel_key(key)
-        if name not in self._collapse_flux_cache:
+        if name not in self._jump_rate_cache:
             from quchip.engine.observables import collapse_number_operator
 
             operator = collapse_number_operator(self._channels[name].coupling, self._backend, tag=f"flux:{name}")
@@ -265,19 +267,26 @@ class SimulationResult:
             from quchip.utils.jax_utils import contains_tracer
 
             if not contains_tracer(flux):
-                self._collapse_flux_cache[name] = flux
+                self._jump_rate_cache[name] = flux
             return flux
-        return self._collapse_flux_cache[name]
+        return self._jump_rate_cache[name]
+
+    def collapse_flux(self, key: Any) -> Any:
+        """Deprecated alias for :meth:`jump_rate`."""
+        from quchip.utils.deprecation import warn_renamed
+
+        warn_renamed("collapse_flux()", "jump_rate()")
+        return self.jump_rate(key)
 
     def collapse_integral(self, key: Any) -> Any:
         """Return the cumulative expected jump count for one channel.
 
-        This is the cumulative trapezoid integral of :meth:`collapse_flux` on
+        This is the cumulative trapezoid integral of :meth:`jump_rate` on
         the result grid. Its last entry is the expected number of jumps over
         the whole solve.
         """
         xp = self._backend.array_module
-        flux = self.collapse_flux(key)
+        flux = self.jump_rate(key)
         increments = 0.5 * (flux[1:] + flux[:-1]) * (self.times[1:] - self.times[:-1])
         return xp.concatenate([xp.zeros((1,), dtype=increments.dtype), xp.cumsum(increments)])
 
@@ -408,6 +417,35 @@ class SimulationResult:
         if self._final_state is not None:
             return self._final_state
         raise RuntimeError('No final state available; run with states="all" or states="final" to retain it.')
+
+    def iq_readout(self, output: Any, *, means: Any, frequency: Any, receiver: Any,
+                   noise_frequencies: Any = None) -> Any:
+        """Propagate conditional coherent boundary fields through captured output wiring.
+
+        means gives one noiseless complex field per outcome, in 1/sqrt(ns),
+        at the selected Markov boundary channel. A mapping supplies fields at
+        several boundary channels; unspecified fields are vacuum. The output
+        line adds its resolved gain, filter loss noise, and amplifier noise.
+        This stationary coherent-state readout model excludes quantum-device
+        correlations and occupied boundary inputs. Use calibrated IQReadout
+        distributions when those effects are included in a detector calibration.
+        """
+        if self._readout_wiring is None:
+            raise RuntimeError("No captured output wiring is available for this result.")
+        return self._readout_wiring.iq_readout(output, means=means, frequency=frequency,
+                                             receiver=receiver, noise_frequencies=noise_frequencies)
+
+    def measure(self, *devices: Any, t: Any = None, basis: Any = "energy") -> Any:
+        """Measure retained states in local energy bases, without further evolution.
+
+        Pass multiple devices for joint outcomes, t for an exact saved time,
+        or basis='solver'. Custom local unitary columns are expressed in the
+        captured energy basis of the stored integration frame: one matrix for
+        one device, or a device mapping. No phase-frame conversion is applied.
+        Samples at different times represent independently terminated experiments.
+        """
+        from quchip.results.terminal import measure_result
+        return measure_result(self, devices, t=t, basis=basis)
 
     def reduced_state(self, t: float, device: str | BaseDevice) -> Any:
         """Partial-trace the state at time *t* down to *device*'s subspace."""
@@ -585,6 +623,18 @@ class SimulationBatchResult(BatchResult[SimulationResult]):
     a loss function that sums over the batch stays JAX-traceable end-to-end.
     """
 
+    def measure(self, *devices: Any, t: Any = None, basis: Any = "energy") -> Any:
+        """Measure retained states in local energy bases, without further evolution.
+
+        Pass multiple devices for joint outcomes, t for an exact saved time,
+        or basis='solver'. Custom local unitary columns are expressed in the
+        captured energy basis of the stored integration frame: one matrix for
+        one device, or a device mapping. No phase-frame conversion is applied.
+        Samples at different times represent independently terminated experiments.
+        """
+        from quchip.results.terminal import measure_result
+        return measure_result(self, devices, t=t, basis=basis)
+
     def _require_shared_times(self, values: Any) -> Any:
         from quchip.results._time import require_valid
 
@@ -652,13 +702,20 @@ class SimulationBatchResult(BatchResult[SimulationResult]):
         """Return population traces reshaped to the natural sweep grid."""
         return self._trace_values([r.population(device, level) for r in self._results], reduce)
 
-    def collapse_flux(self, key: Any, *, reduce: str | None = None) -> Any:
+    def jump_rate(self, key: Any, *, reduce: str | None = None) -> Any:
         """Return one channel's jump-rate traces on the natural sweep grid.
 
         ``reduce`` accepts ``None``, ``"last"``, ``"max"``, or ``"mean"``
         and acts on the time axis.
         """
-        return self._trace_values([r.collapse_flux(key) for r in self._results], reduce)
+        return self._trace_values([r.jump_rate(key) for r in self._results], reduce)
+
+    def collapse_flux(self, key: Any, *, reduce: str | None = None) -> Any:
+        """Deprecated alias for :meth:`jump_rate`."""
+        from quchip.utils.deprecation import warn_renamed
+
+        warn_renamed("collapse_flux()", "jump_rate()")
+        return self.jump_rate(key, reduce=reduce)
 
     def collapse_integral(self, key: Any, *, reduce: str | None = None) -> Any:
         """Return one channel's cumulative jump counts on the natural sweep grid.
@@ -722,6 +779,8 @@ def _wrap(
             resolved_frame=resolved_frame,
             engine_result=engine_result,
         )
+    from quchip.analysis.field_noise import ReadoutWiring
+
     return SimulationResult(
         solver_result=solver_result,
         backend=backend,
@@ -732,6 +791,7 @@ def _wrap(
         channels=engine_result.slh.channels if engine_result.dissipation else (),
         bases=engine_result.bases,
         dissipation=engine_result.dissipation,
+        readout_wiring=ReadoutWiring.capture(engine_result.slh, backend.array_module),
     )
 
 

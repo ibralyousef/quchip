@@ -36,7 +36,7 @@ def test_eliminate_retargets_port_without_double_counting_purcell() -> None:
     reduced = eliminate(chip, "r").chip
 
     assert reduced.port_network is not None
-    assert tuple(plane.label for plane in reduced.port_network.exposures) == ("readout",)
+    assert tuple(plane.label for plane in reduced.port_network.external_ports) == ("readout",)
     assert reduced.port("readout").resolve_targets(reduced) == ("q",)
     assert reduced["q"].T1 is None
     channel = reduced.resolve().slh.external_channels[0]
@@ -53,7 +53,7 @@ def test_eliminate_preserves_scattering_and_explicit_exposure() -> None:
     after = reduced.resolve().slh
 
     assert reduced.port_network is not None
-    assert tuple(plane.label for plane in reduced.port_network.exposures) == ("feedline",)
+    assert tuple(plane.label for plane in reduced.port_network.external_ports) == ("feedline",)
     np.testing.assert_allclose(after.S, before.S)
     assert after.external_channels[0].key == "feedline"
     assert after.external_channels[0].reference == before.external_channels[0].reference

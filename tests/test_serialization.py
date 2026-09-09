@@ -108,7 +108,7 @@ def test_device_round_trip_is_json_safe() -> None:
         label="q0",
         T1=12.0,
         T2=18.0,
-        thermal_population=0.02,
+        thermal_occupation=0.02,
     )
 
     payload = device.to_dict()
@@ -120,7 +120,7 @@ def test_device_round_trip_is_json_safe() -> None:
     assert restored.anharmonicity == pytest.approx(device.anharmonicity)
     assert restored.levels == device.levels
     assert restored.label == device.label
-    assert restored.thermal_population == pytest.approx(device.thermal_population)
+    assert restored.thermal_occupation == pytest.approx(device.thermal_occupation)
     for levels in (3.5, "3"):
         with pytest.raises(TypeError):
             DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=levels)

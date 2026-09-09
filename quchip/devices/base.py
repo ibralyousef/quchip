@@ -32,7 +32,8 @@ import jax.numpy as jnp
 from quchip.backend import get_default_backend
 from quchip.backend.protocol import Operator, State
 from quchip.declarative.dissipation import CollapseChannel
-from quchip.declarative.parameters import parameter
+from quchip.declarative.parameters import UNBOUND, parameter
+from quchip.utils.deprecation import warn_renamed
 from quchip.utils.jax_utils import maybe_concrete_scalar
 from quchip.utils.labeling import auto_label
 from quchip.utils.registry import Registrable
@@ -51,7 +52,7 @@ if TYPE_CHECKING:
 _NOISE_FIELDS: tuple[str, ...] = (
     "T1",
     "T2",
-    "thermal_population",
+    "thermal_occupation",
 )
 
 
@@ -97,9 +98,9 @@ def _matrix_element_emission_channel(
         authored_lower = _semantic_level_operator(record, lower)
         rate = 1.0 / p.T1 if device.T1 is not None else 1.0
         occupation = (
-            p.thermal_population
-            if device.thermal_population is not None
-            else device.thermal_population
+            p.thermal_occupation
+            if device.thermal_occupation is not None
+            else device.thermal_occupation
         )
         return BaseDevice._emission_channels(
             rate,
@@ -108,7 +109,7 @@ def _matrix_element_emission_channel(
             authored_lower.conj().T,
             emission_name="matrix_element_emission",
             absorption_name="matrix_element_absorption",
-        ) if device.T1 is not None or device.thermal_population is not None else []
+        ) if device.T1 is not None or device.thermal_occupation is not None else []
     if device.T1 is None:
         return []
 
@@ -136,9 +137,9 @@ def _matrix_element_emission_channel(
                 BaseDevice._emission_channels(
                     rate_ratio / p.T1,
                     (
-                        p.thermal_population
-                        if device.thermal_population is not None
-                        else device.thermal_population
+                        p.thermal_occupation
+                        if device.thermal_occupation is not None
+                        else device.thermal_occupation
                     ),
                     down,
                     down.conj().T,
@@ -190,7 +191,7 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
     * ``T1`` — relaxation time (ns); emission channel at rate ``1/T1``.
     * ``T2`` — total 0-1 coherence time (ns, requires ``T2 <= 2*T1``);
       adds pure dephasing at ``gamma_phi = 1/T2 - 1/(2*T1)``.
-    * ``thermal_population`` — unitless bath occupation ``n̄``; adds thermal
+    * ``thermal_occupation`` — unitless bath occupation ``n̄``; adds thermal
       absorption and enhances emission.
 
     They are ordinary attributes: set them at construction or at any time
@@ -217,7 +218,7 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
 
     T1: Any = parameter(default=None, positive=True, unit="ns", noise=True, kw_only=True)
     T2: Any = parameter(default=None, positive=True, unit="ns", noise=True, kw_only=True)
-    thermal_population: Any = parameter(
+    thermal_occupation: Any = parameter(
         default=None,
         nonnegative=True,
         noise=True,
@@ -262,16 +263,22 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         *,
         T1: float | None = None,
         T2: float | None = None,
-        thermal_population: float | None = None,
+        thermal_occupation: float | None = None,
+        thermal_population: Any = UNBOUND,
     ) -> None:
+        if thermal_population is not UNBOUND:
+            if thermal_occupation is not None:
+                raise TypeError("Pass thermal_occupation only, not both thermal occupation names.")
+            warn_renamed("thermal_population", "thermal_occupation")
+            thermal_occupation = thermal_population
         if index(levels) < 2:
             raise ValueError(f"levels must be >= 2, got {levels}")
         self.levels = levels
 
-        _validate_noise_params(T1, T2, thermal_population)
+        _validate_noise_params(T1, T2, thermal_occupation)
         self.T1 = T1
         self.T2 = T2
-        self.thermal_population = thermal_population
+        self.thermal_occupation = thermal_occupation
 
         self.label = label if label is not None else auto_label(type(self)._type_prefix)
 
@@ -289,12 +296,37 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         The JAX pytree ``_unflatten`` path uses
         ``object.__setattr__`` and bypasses this hook entirely.
         """
+        if name == "thermal_population":
+            warn_renamed(name, "thermal_occupation")
+            name = "thermal_occupation"
         if getattr(self, "_tracking_enabled", False):
             if name == "label":
                 raise AttributeError("Device label is fixed at construction; create a replacement device.")
             if not name.startswith("_"):
                 self._validate_param_write(name, value)
         super().__setattr__(name, value)
+
+    @property
+    def thermal_population(self) -> Any:
+        """Deprecated alias for the bath's mean thermal occupation."""
+        warn_renamed("thermal_population", "thermal_occupation")
+        return self.thermal_occupation
+
+    @thermal_population.setter
+    def thermal_population(self, value: Any) -> None:
+        warn_renamed("thermal_population", "thermal_occupation")
+        self.thermal_occupation = value
+
+    @staticmethod
+    def _normalize_parameter_names(values: Mapping[str, Any]) -> dict[str, Any]:
+        """Read legacy thermal occupation inputs without duplicating parameter state."""
+        values = dict(values)
+        if "thermal_population" in values:
+            if "thermal_occupation" in values:
+                raise TypeError("Pass thermal_occupation only, not both thermal occupation names.")
+            warn_renamed("thermal_population", "thermal_occupation")
+            values["thermal_occupation"] = values.pop("thermal_population")
+        return values
 
     def _validate_param_write(self, name: str, value: Any) -> None:
         """Constructor-grade validation for one post-construction write.
@@ -448,6 +480,9 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
 
     def set_parameter_value(self, name: str, value: Any) -> None:
         """Apply one validated local parameter value on an isolated device copy."""
+        if name == "thermal_population":
+            warn_renamed(name, "thermal_occupation")
+            name = "thermal_occupation"
         tunable = self.tunable_params()
         if name in tunable:
             self.set_tunable_param(name, value)
@@ -461,6 +496,7 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
 
     def set_parameter_values(self, values: Mapping[str, Any]) -> None:
         """Validate a complete candidate before applying a local parameter group."""
+        values = self._normalize_parameter_names(values)
         if not values:
             return
         from quchip.utils.jax_utils import contains_tracer
@@ -633,7 +669,7 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
             notes.append(
                 "Pure dephasing couples to the level-number operator "
                 "(rate scales as (m-n)^2 across levels); the input T2 equals "
-                "the resulting 0-1 coherence time only when thermal_population "
+                "the resulting 0-1 coherence time only when thermal_occupation "
                 "is 0."
             )
         return notes
@@ -903,14 +939,14 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
     def dissipation(self, op: Any, p: Any) -> tuple[CollapseChannel, ...]:
         """Return the common T1, T2, and thermal device channels."""
         channels: list[CollapseChannel] = []
-        if self.T1 is not None or self.thermal_population is not None:
-            occupation = 0.0 if self.thermal_population is None else p.thermal_population
+        if self.T1 is not None or self.thermal_occupation is not None:
+            occupation = 0.0 if self.thermal_occupation is None else p.thermal_occupation
             base_rate = 1.0 / p.T1 if self.T1 is not None else 1.0
             channels.append(
                 CollapseChannel(op.a, base_rate * (occupation + 1.0), "thermal_emission")
             )
             occupation_value = maybe_concrete_scalar(
-                0.0 if self.thermal_population is None else self.thermal_population
+                0.0 if self.thermal_occupation is None else self.thermal_occupation
             )
             if occupation_value is None or occupation_value > 0:
                 channels.append(
@@ -958,7 +994,7 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         """Materialize the device's authored Lindblad collapse operators.
 
         The built-in channels cover ``T1``, ``T2``, and
-        ``thermal_population``; subclasses append channels in
+        ``thermal_occupation``; subclasses append channels in
         :meth:`dissipation`.
 
         References
@@ -1011,11 +1047,11 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         the common thermal-emission construction exactly
         rather than approximating it:
 
-        * ``T1`` set (``thermal_population`` set or not): ``(n̄+1)/T1`` —
+        * ``T1`` set (``thermal_occupation`` set or not): ``(n̄+1)/T1`` —
           the ``sqrt(gamma*(n̄+1))·a`` channel's rate, ``gamma = 1/T1``;
-          ``n̄`` defaults to ``0`` when ``thermal_population`` is unset, so
+          ``n̄`` defaults to ``0`` when ``thermal_occupation`` is unset, so
           this reduces to plain ``1/T1``.
-        * ``T1`` unset, ``thermal_population`` set: ``n̄+1`` — the same
+        * ``T1`` unset, ``thermal_occupation`` set: ``n̄+1`` — the same
           channel with ``gamma = 1`` (the unitless-bath-occupation branch).
         * Neither set: ``None`` — no lowering channel.
 
@@ -1028,13 +1064,13 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
 
         This is the *downward* rate only — the ``sqrt(gamma*n̄)·a†`` upward
         (thermal-absorption) channel is not represented; a caller that needs
-        to know whether that channel is present reads ``thermal_population``
+        to know whether that channel is present reads ``thermal_occupation``
         directly. Whether a channel exists, and which formula applies, is a
-        *static* decision (is ``T1``/``thermal_population`` set?), never a
+        *static* decision (is ``T1``/``thermal_occupation`` set?), never a
         traced-zero comparison on the resulting rate, which would concretize
         a traced value and break differentiability.
         """
-        n_bar = self.thermal_population
+        n_bar = self.thermal_occupation
         if self.T1 is not None:
             n_bar_eff = 0.0 if n_bar is None else n_bar
             return (n_bar_eff + 1.0) / self.T1
@@ -1141,12 +1177,12 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
 def _validate_noise_params(
     T1: float | None,
     T2: float | None,
-    thermal_population: float | None,
+    thermal_occupation: float | None,
 ) -> None:
-    """Validate T1 / T2 / thermal_population on concrete scalars only (JAX-safe)."""
+    """Validate T1 / T2 / thermal_occupation on concrete scalars only (JAX-safe)."""
     T1_value = maybe_concrete_scalar(T1)
     T2_value = maybe_concrete_scalar(T2)
-    thermal_value = maybe_concrete_scalar(thermal_population)
+    thermal_value = maybe_concrete_scalar(thermal_occupation)
 
     if T1_value is not None and T1_value <= 0:
         raise ValueError(f"T1 must be positive, got {T1}")
@@ -1159,5 +1195,5 @@ def _validate_noise_params(
             )
     if thermal_value is not None and thermal_value < 0:
         raise ValueError(
-            f"thermal_population must be non-negative, got {thermal_population}"
+            f"thermal_occupation must be non-negative, got {thermal_occupation}"
         )

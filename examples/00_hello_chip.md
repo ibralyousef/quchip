@@ -480,4 +480,4 @@ for level in (0, 1):
 
 The excited preparation also carries its dressed qubit excitation, so zero
 mean field does not imply a vacuum state. For the signal at the instrument
-ports, continue with [resonator readout and fridge wiring](steady-state-and-vna.md).
+ports, continue with [readout and fridge wiring](steady-state-and-vna.md).

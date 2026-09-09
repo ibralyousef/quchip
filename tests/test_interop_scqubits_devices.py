@@ -113,12 +113,12 @@ def test_import_label_override():
 
 
 def test_import_forwards_noise_kwargs():
-    """T1/T2/thermal_population reach the imported device unchanged, given an explicit coupling_channel."""
+    """T1/T2/thermal_occupation reach the imported device unchanged, given an explicit coupling_channel."""
     tmon = scq.Transmon(EJ=30.0, EC=0.2, ng=0.0, ncut=31, truncated_dim=3)
-    dev = from_scqubits(tmon, T1=30000.0, T2=20000.0, thermal_population=0.01, coupling_channel="charge")
+    dev = from_scqubits(tmon, T1=30000.0, T2=20000.0, thermal_occupation=0.01, coupling_channel="charge")
     assert dev.T1 == 30000.0
     assert dev.T2 == 20000.0
-    assert dev.thermal_population == 0.01
+    assert dev.thermal_occupation == 0.01
 
 
 # ---------------------------------------------------------------------------

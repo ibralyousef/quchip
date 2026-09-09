@@ -18,9 +18,9 @@ def _leaf(backend, g=0.05, thermal=False):
         levels=4,
         label="q",
         T1=300.0 if thermal else None,
-        thermal_population=0.2 if thermal else None,
+        thermal_occupation=0.2 if thermal else None,
     )
-    r = Resonator(freq=7.0, levels=4, label="r", T1=100.0, thermal_population=0.7 if thermal else None)
+    r = Resonator(freq=7.0, levels=4, label="r", T1=100.0, thermal_occupation=0.7 if thermal else None)
     return Chip([q, r], [Capacitive(q, r, g=g, label="qr")], backend=backend, approximation=RWA())
 
 
