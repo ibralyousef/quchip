@@ -3,6 +3,9 @@ name: ci
 # Installs are locked with ci-constraints-<python>.txt so runs are
 # reproducible; regenerate with tools/compile_ci_constraints.sh. The weekly
 # fresh-resolution check lives in deps-canary.yml.
+# Documentation, Markdown metadata, and release-workflow-only pull requests
+# keep the required lint check lightweight and skip the physics test jobs.
+# Changes to this policy or its workflows always run the full lanes.
 
 on:
   push:
@@ -15,22 +18,70 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  lint:
+  changes:
+    name: classify changes
     runs-on: ubuntu-latest
+    outputs:
+      full_ci: ${{ steps.classify.outputs.full_ci }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: classify
+        uses: ./.github/actions/classify-pr
+
+  lint:
+    needs: changes
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful change classification
+        if: ${{ needs.changes.result != 'success' }}
+        run: |
+          echo "::error::Could not classify this change."
+          exit 1
+      - name: Require a valid change classification
+        env:
+          FULL_CI: ${{ needs.changes.outputs.full_ci }}
+        run: |
+          if [[ "$FULL_CI" != "true" && "$FULL_CI" != "false" ]]; then
+            echo "::error::Change classification returned '${FULL_CI}'."
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Validate documentation, metadata, or release workflow
+        if: ${{ needs.changes.outputs.full_ci != 'true' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+          ruby -e 'require "yaml"; Dir[".github/**/*.{yml,yaml}"].sort.each { |file| Psych.parse_file(file) }'
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/repo" \
+            --workdir /repo \
+            rhysd/actionlint:1.7.12 -color
       - uses: astral-sh/setup-uv@v6
+        if: ${{ needs.changes.outputs.full_ci == 'true' }}
         with:
           enable-cache: true
           cache-dependency-glob: |
             pyproject.toml
             ci-constraints-*.txt
-      - run: uv venv --python 3.11
-      - run: uv pip install -e '.[dev,test,dynamiqs]' -c ci-constraints-3.11.txt
-      - run: uv run --no-sync ruff check .
-      - run: uv run --no-sync mypy quchip tests/typing/external_declarative_models.py
+      - if: ${{ needs.changes.outputs.full_ci == 'true' }}
+        run: uv venv --python 3.11
+      - if: ${{ needs.changes.outputs.full_ci == 'true' }}
+        run: uv pip install -e '.[dev,test,dynamiqs]' -c ci-constraints-3.11.txt
+      - if: ${{ needs.changes.outputs.full_ci == 'true' }}
+        run: uv run --no-sync ruff check .
+      - if: ${{ needs.changes.outputs.full_ci == 'true' }}
+        run: uv run --no-sync mypy quchip tests/typing/external_declarative_models.py
 
   test-fast:
+    needs: changes
+    if: ${{ needs.changes.outputs.full_ci == 'true' }}
     strategy:
       fail-fast: false
       matrix:
