@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeAlias, cast
 import jax.tree_util as jtu
 import numpy as np
 
-from quchip.engine.reference import ReferencePlane
+from quchip.engine.reference import FieldChannel, ReferencePlane
 from quchip.utils.jax_utils import (
     array_namespace,
     contains_tracer,
@@ -1048,7 +1048,7 @@ class CollapseTerm:
         symbols = {
             "T1": "T_1",
             "T2": "T_2",
-            "thermal_population": r"\bar n",
+            "thermal_occupation": r"\bar n",
             "internal_quality_factor": "Q_\\mathrm{int}",
             "external_quality_factor": "Q_\\mathrm{ext}",
         }
@@ -1086,6 +1086,7 @@ class SLHChannel:
     collapse: CollapseTerm
     coupling_operator: CanonicalOperator | None = None
     reference: ReferencePlane = field(default_factory=ReferencePlane)
+    input_occupation: Any = None
 
     @property
     def carrier(self) -> Any:
@@ -1131,6 +1132,7 @@ class ResolvedSLH:
     hamiltonian: HamiltonianProgram
     channels: tuple[SLHChannel, ...] = ()
     support: Any = None
+    output_network: Any = None
 
     @property
     def has_network_hamiltonian(self) -> bool:
@@ -1249,7 +1251,26 @@ class ResolvedSLH:
     @property
     def collapse_terms(self) -> tuple[CollapseTerm, ...]:
         """Return solver-facing collapse records in resolved channel order."""
-        return tuple(channel.collapse_term for channel in self.channels)
+        terms = [channel.collapse_term for channel in self.channels]
+        thermal = [(index, channel) for index, channel in enumerate(self.channels)
+                   if channel.input_occupation is not None]
+        if not thermal:
+            return tuple(terms)
+        xp = select_array_module(contains_tracer((self.S, *(c.input_occupation for _, c in thermal),
+                                                  *(operator.values for operator in self.L))))
+        operators = xp.stack([xp.asarray(operator.to_dense()) for operator in self.L])
+        for index, channel in thermal:
+            # Input j couples through K_j = (S† L)_j, not the output row L_j.
+            values = xp.einsum("i,ijk->jk", xp.conj(xp.asarray(self.S)[:, index]), operators)
+            for name, matrix in (("emission", values), ("absorption", xp.conj(values.T))):
+                template = channel.coupling
+                operator = CanonicalOperator.from_dense(
+                    matrix, dims=template.dims, basis=template.basis,
+                    subsystem_labels=template.subsystem_labels, tag=f"thermal:{channel.key}:{name}",
+                )
+                terms.append(CollapseTerm(operator=operator, rate=channel.input_occupation,
+                                          source=channel.key, channel=f"thermal_{name}"))
+        return tuple(terms)
 
 @dataclass(frozen=True)
 class DroppedTerm:
@@ -1395,7 +1416,7 @@ class EngineResult:
         """Return active collapse records in SLH channel order."""
         if not self.dissipation:
             return ()
-        return tuple(channel.collapse_term for channel in self.slh.channels)
+        return self.slh.collapse_terms
 
     def dress(
         self,
@@ -1842,6 +1863,7 @@ class LinearResponseProblem:
     plane_indices: tuple[int, ...]
     inbound_transfer: Any
     outbound_transfer: Any
+    field_channels: tuple[FieldChannel, ...] = ()
 
 
 @dataclass(frozen=True)

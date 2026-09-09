@@ -51,7 +51,7 @@ References
   the ``T1`` / ``T2`` / thermal channels that the base class attaches.
 
 Noise hooks inherited from :class:`~quchip.devices.base.BaseDevice`
-(``T1``, ``T2``, ``thermal_population``) produce the standard
+(``T1``, ``T2``, ``thermal_occupation``) produce the standard
 Lindblad channels described in that base class.
 
 Example
@@ -108,7 +108,7 @@ class DuffingTransmon(FockDevice):
         labeling counter.
     **noise_kwargs
         Forwarded to :class:`BaseDevice` — ``T1``, ``T2``,
-        ``thermal_population``.
+        ``thermal_occupation``.
 
     Example
     -------

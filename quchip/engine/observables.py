@@ -244,6 +244,9 @@ def _append_output_eops(
     backend: Backend,
 ) -> None:
     """Lower one field recipe to the moments the backend must evaluate."""
+    if engine_result.slh.output_network is not None:
+        raise NotImplementedError("Branched reference networks currently support stationary VNA measurements. "
+                                  "Transient output fields require propagation through the output graph.")
     external = {channel.key: channel for channel in engine_result.slh.external_channels}
     channel = external.get(observable.exposure)
     if channel is None:

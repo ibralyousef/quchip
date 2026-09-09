@@ -13,7 +13,7 @@ from quchip.utils.labeling import auto_label, resolve_label
 
 if TYPE_CHECKING:
     from quchip.chip.chip import Chip
-    from quchip.chip.port_network import FieldSide, FieldTerminal, PortNetwork, SLHComponent
+    from quchip.chip.port_network import ComponentPort, FieldTerminal, PortNetwork, SLHComponent
 
 
 class Port:
@@ -84,11 +84,11 @@ class Port:
         return self._network_component.output
 
     @property
-    def side(self) -> "FieldSide":
+    def side(self) -> "ComponentPort":
         """Return this port's physical side, pairing its input and output terminals."""
         if self._network_component is None:
             raise AttributeError("A Port has terminals only after it belongs to a PortNetwork.")
-        return self._network_component.side("field")
+        return self._network_component.port("field")
 
     @staticmethod
     def _validate_positive(name: str, value: Any) -> None:

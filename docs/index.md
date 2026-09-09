@@ -2,7 +2,7 @@
 <p class="docs-eyebrow">quchip documentation</p>
 ```
 
-# Start with a chip.
+# quchip documentation
 
 ```{container} docs-intro
 Model superconducting quantum devices in Python. Declare devices, couplings,
@@ -51,14 +51,16 @@ Hamiltonian and change a parameter.
 ```{raw} html
 <div class="docs-paths">
   <a href="guides/statics-and-parameter-studies.html"><strong>Spectra and interactions</strong><span>Sweep parameters and follow dressed states.</span><b aria-hidden="true">→</b></a>
-  <a href="guides/dynamics-pulses-and-readout.html"><strong>Pulses and readout</strong><span>Schedule drives, compare leakage, and read observables.</span><b aria-hidden="true">→</b></a>
-  <a href="guides/steady-state-and-vna.html"><strong>Microwave response and loss</strong><span>Measure reflection through a fridge and explore Purcell filtering.</span><b aria-hidden="true">→</b></a>
-  <a href="guides/differentiability.html"><strong>Gradients and fitting</strong><span>Differentiate observables and infer model parameters.</span><b aria-hidden="true">→</b></a>
+  <a href="guides/dynamics-pulses-and-readout.html"><strong>Pulses, leakage, and readout</strong><span>Schedule drives, compare leakage, and read observables.</span><b aria-hidden="true">→</b></a>
+  <a href="guides/steady-state-and-vna.html"><strong>Readout and fridge wiring</strong><span>Calculate microwave response and receiver noise.</span><b aria-hidden="true">→</b></a>
+  <a href="guides/differentiability.html"><strong>Gradients and parameter fitting</strong><span>Differentiate observables and infer model parameters.</span><b aria-hidden="true">→</b></a>
 </div>
 ```
 
 Browse all {doc}`guides <guides/index>` or look up the
 {doc}`API and physics conventions <reference/index>`.
+The {doc}`focused studies <studies/index>` investigate specific physical
+questions; the {doc}`cookbook <cookbook>` collects practical tips.
 
 ```{toctree}
 :maxdepth: 1
@@ -66,6 +68,7 @@ Browse all {doc}`guides <guides/index>` or look up the
 
 get-started/index
 guides/index
+studies/index
 reference/index
 contribute/index
 ```

@@ -1,11 +1,11 @@
-# Extend quchip
+# Extending quchip
 
 An extension declares local physics. quchip projects its operators into the
 resolved basis, embeds them in the chip Hilbert space, applies frames and RWA,
-and lowers the result to the selected backend. Extension code should not import
-engine IR or branch on a backend.
+and converts the result for the selected backend. Extension code returns
+quchip expressions and does not need to choose a numerical backend.
 
-## Choose the surface by ownership
+## Choose an extension type
 
 | Physics | Author writes | Installed reference |
 |---|---|---|

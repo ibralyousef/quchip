@@ -143,7 +143,7 @@ def test_hidden_dilation_channels_carry_probe_and_pump_fields() -> None:
     port = network.port("coupler", target=resonator, rate=0.04)
     loss = network.attenuator("cold_loss", eta=0.64)
     network.link(port, loss)
-    network.expose("readout", at=loss.side(2))
+    network.expose("readout", at=loss.port(2))
     chip = Chip([resonator], port_network=network)
     frequencies = np.array([5.99, 6.0, 6.01])
 
@@ -175,7 +175,7 @@ def test_filter_section_is_exact_for_continuous_waves_and_sweepable() -> None:
     port = network.port("coupler", target=resonator, rate=0.04)
     lowpass = network.filter("lowpass", transfer=_lowpass, cutoff=6.5, order=2)
     network.link(port, lowpass)
-    network.expose("readout", at=lowpass.side(2))
+    network.expose("readout", at=lowpass.port(2))
     chip = Chip([resonator], port_network=network)
     frequencies = np.array([5.98, 6.0, 6.02])
 
@@ -208,7 +208,7 @@ def test_filter_section_must_be_passive() -> None:
     port = network.port("coupler", target=resonator, rate=0.04)
     amplifier = network.filter("gain", transfer=lambda frequency, *, gain: gain, gain=2.0)
     network.link(port, amplifier)
-    network.expose("readout", at=amplifier.side(2))
+    network.expose("readout", at=amplifier.port(2))
 
     with pytest.raises(ValueError, match="passive"):
         VNA(Chip([resonator], port_network=network)).sweep([6.0])
@@ -224,7 +224,7 @@ def test_output_spectrum_is_filtered_at_the_offset_frequency() -> None:
         if with_filter:
             section = network.filter("lowpass", transfer=_lowpass, cutoff=6.02, order=1)
             network.link(port, section)
-            network.expose("readout", at=section.side(2))
+            network.expose("readout", at=section.port(2))
         else:
             network.expose("readout", at=port)
         vna = VNA(Chip([resonator], port_network=network))
@@ -251,14 +251,14 @@ def test_output_notch_filter_keeps_the_sideband_spectrum() -> None:
         network = PortNetwork(label="fridge")
         port = network.port("coupler", target=qubit, rate=0.04)
         circulator = network.circulator("circ")
-        network.link(port, circulator.side(2))
-        network.expose("drive", at=circulator.side(1))
+        network.link(port, circulator.port(2))
+        network.expose("drive", at=circulator.port(1))
         if with_filter:
             section = network.filter("notch", transfer=notch, center=6.0, width=0.01)
-            network.link(circulator.side(3), section)
-            network.expose("readout", at=section.side(2))
+            network.link(circulator.port(3), section)
+            network.expose("readout", at=section.port(2))
         else:
-            network.expose("readout", at=circulator.side(3))
+            network.expose("readout", at=circulator.port(3))
         vna = VNA(Chip([qubit], port_network=network))
         vna.pump("drive", freq=6.0, amplitude=0.02)
         return vna
@@ -288,10 +288,10 @@ def test_coupling_free_output_takes_its_carrier_from_the_feeding_tone() -> None:
             if delay_only
             else network.filter("line", transfer=tilt, slope=0.7)
         )
-        network.link(line, circulator.side(1))
-        network.link(port, circulator.side(2))
-        network.expose("drive", at=line.side(1))
-        network.expose("readout", at=circulator.side(3))
+        network.link(line, circulator.port(1))
+        network.link(port, circulator.port(2))
+        network.expose("drive", at=line.port(1))
+        network.expose("readout", at=circulator.port(3))
         vna = VNA(Chip([qubit], port_network=network))
         if pumped:
             vna.pump("readout", freq=6.0, amplitude=0.03)
@@ -322,7 +322,7 @@ def test_distinct_tones_stay_valid_with_traced_network_scattering() -> None:
     readout_port = network.port("readout_port", target=resonator, rate=0.03)
     loss = network.attenuator("loss", eta=0.5)
     network.link(readout_port, loss)
-    network.expose("readout", at=loss.side(2))
+    network.expose("readout", at=loss.port(2))
     chip = Chip(
         [qubit, resonator],
         [CrossKerr(qubit, resonator, chi=-0.03)],
@@ -373,21 +373,21 @@ def _amplified(
     network = PortNetwork(label="fridge")
     port = network.port("coupler", target=qubit, rate=0.04)
     circulator = network.circulator("circ")
-    network.link(port, circulator.side(2))
-    network.expose("drive", at=circulator.side(1))
-    tail = circulator.side(3)
+    network.link(port, circulator.port(2))
+    network.expose("drive", at=circulator.port(1))
+    tail = circulator.port(3)
     if gain is not None:
         amplifier = network.amplifier("hemt", gain=gain, added_noise=added_noise)
         if reverse:
-            network.link(tail, amplifier.side(2))
-            tail = amplifier.side(1)
+            network.link(tail, amplifier.port(2))
+            tail = amplifier.port(1)
         else:
             network.link(tail, amplifier)
-            tail = amplifier.side(2)
+            tail = amplifier.port(2)
     if second is not None:
         booster = network.amplifier("booster", gain=second[0], added_noise=second[1])
         network.link(tail, booster)
-        tail = booster.side(2)
+        tail = booster.port(2)
     network.expose("readout", at=tail)
     return Chip([qubit], port_network=network)
 
@@ -457,10 +457,10 @@ def test_traced_amplifier_gain_flows_through_the_linear_response() -> None:
     port = network.port("coupler", target=resonator, rate=0.04)
     circulator = network.circulator("circ")
     amplifier = network.amplifier("hemt", gain=10.0, added_noise=1.0)
-    network.link(port, circulator.side(2))
-    network.link(circulator.side(3), amplifier)
-    network.expose("drive", at=circulator.side(1))
-    network.expose("readout", at=amplifier.side(2))
+    network.link(port, circulator.port(2))
+    network.link(circulator.port(3), amplifier)
+    network.expose("drive", at=circulator.port(1))
+    network.expose("readout", at=amplifier.port(2))
     chip = Chip([resonator], port_network=network, backend="dynamiqs")
 
     def transmission(gain):
@@ -481,8 +481,8 @@ def test_amplifier_orientation_is_structural() -> None:
     network = PortNetwork(label="line")
     port = network.port("coupler", target=resonator, rate=0.04)
     amplifier = network.amplifier("hemt", gain=10.0, added_noise=1.0)
-    network.link(port, amplifier.side(2))
-    network.expose("drive", at=amplifier.side(1))
+    network.link(port, amplifier.port(2))
+    network.expose("drive", at=amplifier.port(1))
     with pytest.raises(ValueError, match="output"):
         Chip([resonator], port_network=network).resolve()
 
@@ -586,7 +586,7 @@ def test_vna_reference_delay_is_reciprocal() -> None:
         port = network.port("chip_port", target=resonator, rate=0.04)
         cable = network.delay("cable", duration=delay)
         network.link(port, cable)
-        network.expose("readout", at=cable.side(2))
+        network.expose("readout", at=cable.port(2))
         chip = Chip([resonator], port_network=network)
         return complex(VNA(chip, ports=["readout"]).sweep([6.01]).s11[0])
 

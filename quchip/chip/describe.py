@@ -98,7 +98,7 @@ def describe_chip(chip: "Chip") -> str:
         lines.append(f"    {detail}")
         noise = [
             _param_text(name, getattr(dev, name), unit)
-            for name, unit in (("T1", "ns"), ("T2", "ns"), ("thermal_population", None))
+            for name, unit in (("T1", "ns"), ("T2", "ns"), ("thermal_occupation", None))
             if getattr(dev, name) is not None
         ]
         if noise:
