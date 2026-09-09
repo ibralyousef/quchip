@@ -36,7 +36,7 @@ def _one_port_chip(
     port = network.port("coupler", target=resonator, rate=rate)
     cable = network.delay("cable", duration=delay)
     network.link(port, cable)
-    plane = network.expose("readout", at=cable.side(2))
+    plane = network.expose("readout", at=cable.port(2))
     chip = Chip([resonator], port_network=network, frame="lab", backend=backend)
     return chip, resonator, plane
 
@@ -63,8 +63,8 @@ def test_exposure_is_the_complete_transient_input_output_handle() -> None:
 
     assert plane.label == "readout"
     assert chip.port_network is not None
-    assert chip.port_network.exposure(plane) == plane
-    assert chip.port_network.exposures == (plane,)
+    assert chip.port_network.external_port(plane) == plane
+    assert chip.port_network.external_ports == (plane,)
     assert "_input_key" not in repr(plane)
     assert "_output_key" not in repr(plane)
     assert field.exposure == "readout"
@@ -152,10 +152,10 @@ def test_scattering_routes_the_direct_coherent_background() -> None:
     network = PortNetwork(scattering=[[0.0, 1.0], [1.0, 0.0]], label="swap")
     network.port("left", target=left, rate=0.04)
     network.port("right", target=right, rate=0.09)
-    left_plane = network.exposure("left")
-    right_plane = network.exposure("right")
-    assert network.exposure("left") == left_plane
-    assert hash(network.exposure("left")) == hash(left_plane)
+    left_plane = network.external_port("left")
+    right_plane = network.external_port("right")
+    assert network.external_port("left") == left_plane
+    assert hash(network.external_port("left")) == hash(left_plane)
     chip = Chip([left, right], port_network=network, frame="lab")
     sequence = QuantumSequence(chip)
     sequence.schedule(left_plane.input, envelope=Square(duration=0.2, amplitude=0.2))
@@ -228,7 +228,7 @@ def test_unknown_exposure_reports_the_available_boundary() -> None:
     assert chip.port_network is not None
 
     with pytest.raises(KeyError, match="missing.*readout"):
-        chip.port_network.exposure("missing")
+        chip.port_network.external_port("missing")
 
 
 def test_output_field_batch_preserves_grid_and_post_solve_analysis() -> None:
@@ -310,7 +310,7 @@ def test_transient_filters_apply_at_the_carrier() -> None:
         if with_filter:
             section = network.filter("tilt", transfer=_tilt, slope=1.3)
             network.link(port, section)
-            plane = network.expose("readout", at=section.side(2))
+            plane = network.expose("readout", at=section.port(2))
         else:
             plane = network.expose("readout", at=port)
         return Chip([resonator], port_network=network, frame="rotating"), plane
@@ -337,7 +337,7 @@ def test_outbound_filter_needs_a_known_output_carrier() -> None:
     port = network.port("coupler", target=resonator, rate=0.04)
     section = network.filter("tilt", transfer=_tilt, slope=1.3)
     network.link(port, section)
-    plane = network.expose("readout", at=section.side(2))
+    plane = network.expose("readout", at=section.port(2))
     chip = Chip([resonator], port_network=network, frame="lab")
 
     with pytest.raises(ValueError, match="carrier"):
@@ -362,7 +362,7 @@ def test_dynamiqs_transient_filter_parameter_is_differentiable() -> None:
     port = network.port("coupler", target=resonator, rate=0.04)
     section = network.filter("tilt", transfer=tilt, slope=1.3)
     network.link(port, section)
-    plane = network.expose("readout", at=section.side(2))
+    plane = network.expose("readout", at=section.port(2))
     chip = Chip([resonator], port_network=network, frame="rotating", backend="dynamiqs")
 
     def final_quadrature(slope: object) -> object:
@@ -389,14 +389,14 @@ def test_transient_output_through_an_amplifier_scales_by_root_gain() -> None:
         network = PortNetwork(label="fridge")
         port = network.port("coupler", target=resonator, rate=0.04)
         circulator = network.circulator("circ")
-        network.link(port, circulator.side(2))
-        drive = network.expose("drive", at=circulator.side(1))
+        network.link(port, circulator.port(2))
+        drive = network.expose("drive", at=circulator.port(1))
         if gain is None:
-            readout = network.expose("readout", at=circulator.side(3))
+            readout = network.expose("readout", at=circulator.port(3))
         else:
             amplifier = network.amplifier("hemt", gain=gain, added_noise=1.0)
-            network.link(circulator.side(3), amplifier)
-            readout = network.expose("readout", at=amplifier.side(2))
+            network.link(circulator.port(3), amplifier)
+            readout = network.expose("readout", at=amplifier.port(2))
         return Chip([resonator], port_network=network, frame="rotating"), drive, readout
 
     times = np.linspace(0.0, 20.0, 41)

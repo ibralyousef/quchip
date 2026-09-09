@@ -33,9 +33,9 @@ def test_thermal_bath_drives_mode_to_bose_occupation():
 
 def test_chip_bath_and_device_temperature_sum():
     """A chip-level thermal Bath raises steady-state occupation above the device's own thermal floor."""
-    # Chip-level Bath adds a second thermal channel on top of the device's own T1/thermal_population.
+    # Chip-level Bath adds a second thermal channel on top of the device's own T1/thermal_occupation.
     freq, rate = 5.0, 0.05
-    mode = Resonator(freq=freq, levels=12, label="m", T1=50.0, thermal_population=0.02)
+    mode = Resonator(freq=freq, levels=12, label="m", T1=50.0, thermal_occupation=0.02)
     chip = Chip([mode], baths=[Bath("thermal", temperature=300.0, rate=rate)])
     tlist = np.linspace(0.0, 400.0, 200)
     result = simulate(

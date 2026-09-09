@@ -30,7 +30,7 @@ def test_damped_mode_has_vacuum_steady_state() -> None:
 
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_state_positivity_is_computed_on_request_from_captured_state(backend, monkeypatch):
-    mode = Resonator(freq=6.0, levels=2, T1=20.0, thermal_population=0.1, label="r")
+    mode = Resonator(freq=6.0, levels=2, T1=20.0, thermal_occupation=0.1, label="r")
     chip = Chip([mode], frame="rotating", backend=backend)
     xp = chip.backend.array_module
     eigvalsh = xp.linalg.eigvalsh
@@ -44,7 +44,7 @@ def test_state_positivity_is_computed_on_request_from_captured_state(backend, mo
     result = chip.steadystate(e_ops={"r": "n"})
     assert result.expect("r") == pytest.approx(1 / 12, abs=1e-10)
     assert evaluated == []
-    mode.thermal_population = 0.5
+    mode.thermal_occupation = 0.5
     assert result.minimum_eigenvalue == pytest.approx(1 / 12, abs=1e-10)
     assert evaluated == [(2, 2)]
     assert result.positivity_error == pytest.approx(0.0, abs=1e-12)
@@ -60,7 +60,7 @@ def test_requested_stationary_diagnostic_keeps_native_gradient():
     @jax.value_and_grad
     def minimum(occupation):
         mode = Resonator(freq=6.0, levels=2, T1=20.0,
-                         thermal_population=occupation, label="r")
+                         thermal_occupation=occupation, label="r")
         return Chip([mode], frame="rotating", backend="dynamiqs").steadystate().minimum_eigenvalue
 
     value, derivative = minimum(jnp.asarray(0.1))
@@ -115,13 +115,13 @@ def test_dynamiqs_steady_state_is_jittable_and_differentiable() -> None:
     import jax
     import jax.numpy as jnp
 
-    mode = Resonator(freq=6.0, levels=5, label="r", T1=20.0, thermal_population=0.1)
+    mode = Resonator(freq=6.0, levels=5, label="r", T1=20.0, thermal_occupation=0.1)
     chip = Chip([mode], frame="rotating", backend="dynamiqs")
     number = mode.number_operator()
 
     @jax.jit
-    def occupation(thermal_population):
-        shifted = chip.with_params({"r.thermal_population": thermal_population})
+    def occupation(thermal_occupation):
+        shifted = chip.with_params({"r.thermal_occupation": thermal_occupation})
         result = shifted.steadystate(e_ops={"r": number})
         return jnp.real(result.expect("r"))
 
@@ -205,14 +205,14 @@ def test_time_dependent_resolved_hamiltonian_is_rejected() -> None:
 
 def test_steady_state_batch_preserves_sweep_shape_and_expectations() -> None:
     """Stationary parameter sweeps use the same named grid shape as other quchip batches."""
-    mode = Resonator(freq=6.0, levels=6, label="r", T1=20.0, thermal_population=0.0)
+    mode = Resonator(freq=6.0, levels=6, label="r", T1=20.0, thermal_occupation=0.0)
     chip = Chip([mode], frame="rotating", backend="qutip")
-    thermal = Sweep([0.0, 0.1, 0.2], name="r.thermal_population")
+    thermal = Sweep([0.0, 0.1, 0.2], name="r.thermal_occupation")
 
     result = chip.steadystate_batch(thermal, e_ops={mode: mode.number_operator()}, progress=False)
 
     assert result.shape == (3,)
-    assert result.axes[0][0] == "r.thermal_population"
+    assert result.axes[0][0] == "r.thermal_occupation"
     np.testing.assert_allclose(np.real(result.expect(mode)), [0.0, 0.09998, 0.19936], atol=8e-4)
     with pytest.raises(FrozenInstanceError):
         result._shape = (99,)

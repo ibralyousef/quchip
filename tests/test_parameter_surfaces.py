@@ -32,11 +32,11 @@ def test_chip_parameters_and_settings_separate_values_from_structure() -> None:
         "q.anharmonicity": -0.2,
         "q.T1": None,
         "q.T2": None,
-        "q.thermal_population": None,
+        "q.thermal_occupation": None,
         "r.freq": 7.0,
         "r.T1": None,
         "r.T2": None,
-        "r.thermal_population": None,
+        "r.thermal_occupation": None,
         "r.internal_quality_factor": None,
         "qr.g": 0.02,
     }

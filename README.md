@@ -4,9 +4,9 @@
 <p align="center">
   <a href="https://quchip.org">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/quchip-wordmark-dark.png">
-      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/quchip-wordmark-light.png">
-      <img src="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/quchip-wordmark-light.png" alt="quchip" width="400">
+      <source media="(prefers-color-scheme: dark)" srcset="https://docs.quchip.org/_static/quchip-wordmark-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="https://docs.quchip.org/_static/quchip-wordmark-light.png">
+      <img src="https://docs.quchip.org/_static/quchip-wordmark-light.png" alt="quchip" width="400">
     </picture>
   </a>
 </p>
@@ -32,9 +32,9 @@ A predictive chip model needs more than a Hamiltonian. Device physics, control-l
 Declare the chip once, then use the same model for dressed-state analysis, model reduction, control sequences, open-system simulation, parameter sweeps, and JAX gradients.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/quchip_pipeline_dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/quchip_pipeline_light.png">
-  <img src="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/quchip_pipeline_light.png" alt="quchip pipeline from declared devices and control parameters through model resolution, simulation, observables, and gradients" width="1084">
+  <source media="(prefers-color-scheme: dark)" srcset="https://docs.quchip.org/_static/readme/quchip_pipeline_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://docs.quchip.org/_static/readme/quchip_pipeline_light.png">
+  <img src="https://docs.quchip.org/_static/readme/quchip_pipeline_light.png" alt="quchip pipeline from declared devices and control parameters through model resolution, simulation, observables, and gradients" width="1084">
 </picture>
 
 QuTiP is the default simulation backend. The optional dynamiqs backend is JAX-native and keeps declared device and control parameters differentiable through a solve. The [backend guide](https://docs.quchip.org/guides/choosing-a-backend.html) compares their numerical and workflow tradeoffs. The scqubits integration imports and exports selected device and composite models.
@@ -112,27 +112,32 @@ The [defining and inspecting a chip guide](https://docs.quchip.org/guides/defini
 The [dynamics guide](https://docs.quchip.org/guides/dynamics-pulses-and-readout) adds control lines and pulse sequences to the chip above. It compares short and selective Gaussian qubit drives in the full multilevel model, then simulates conditional resonator readout.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_qubit_drive_leakage-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_qubit_drive_leakage.png">
-  <img src="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_qubit_drive_leakage.png" alt="Short and long Gaussian pulses with multilevel qubit populations" width="720">
+  <source media="(prefers-color-scheme: dark)" srcset="https://docs.quchip.org/_static/readme/hello_qubit_drive_leakage-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://docs.quchip.org/_static/readme/hello_qubit_drive_leakage.png">
+  <img src="https://docs.quchip.org/_static/readme/hello_qubit_drive_leakage.png" alt="Short and long Gaussian pulses with multilevel qubit populations" width="720">
 </picture>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_dispersive_readout_iq-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_dispersive_readout_iq.png">
-  <img src="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_dispersive_readout_iq.png" alt="Conditional resonator IQ paths with emphasized final points" width="560">
+  <source media="(prefers-color-scheme: dark)" srcset="https://docs.quchip.org/_static/readme/hello_dispersive_readout_iq-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://docs.quchip.org/_static/readme/hello_dispersive_readout_iq.png">
+  <img src="https://docs.quchip.org/_static/readme/hello_dispersive_readout_iq.png" alt="Conditional resonator IQ paths with emphasized final points" width="560">
 </picture>
 
 ## Guides
 
-- [Define and inspect a chip](https://docs.quchip.org/guides/defining-and-inspecting-a-chip): build a model, inspect its Hamiltonian, and see how frames and approximations change it.
-- [Statics and parameter studies](https://docs.quchip.org/guides/statics-and-parameter-studies): read dressed observables, sweep parameters, and follow states through an avoided crossing.
-- [Dynamics, pulses, observables, and readout](https://docs.quchip.org/guides/dynamics-pulses-and-readout): build pulse schedules, batch experiments, inspect states, and simulate resonator readout.
-- [Chip transformations](https://docs.quchip.org/guides/chip-transformations): rebind, serialize, partition, eliminate, fit, and replay reduced models.
-- [Differentiability](https://docs.quchip.org/guides/differentiability): differentiate static and dynamic losses, fit a published fluxonium spectrum, and combine experiments that share parameters.
-- [Extension guide](https://docs.quchip.org/extensions): define new devices, couplings, drives, envelopes, dissipation, local spaces, and interoperability mappings.
-- [Cookbook](https://docs.quchip.org/cookbook): the conventions used throughout quchip's examples.
-- [From the SQA 2026 talk](https://docs.quchip.org/guides/from-sqa-2026): short, runnable entry points into the main topics.
+- [Your first chip](https://docs.quchip.org/guides/defining-and-inspecting-a-chip): build a coupled model, inspect its Hamiltonian, and fit dressed targets.
+- [Spectra and parameter sweeps](https://docs.quchip.org/guides/statics-and-parameter-studies): follow an avoided crossing and compare a fluxonium model with measured spectroscopy.
+- [Pulses, leakage, and readout](https://docs.quchip.org/guides/dynamics-pulses-and-readout): compare pulse selectivity, conditional resonator response, and cavity depletion.
+- [Readout and fridge wiring](https://docs.quchip.org/guides/steady-state-and-vna): calculate VNA traces and qubit readout with receiver noise.
+- [Model reduction](https://docs.quchip.org/guides/chip-transformations): compare a reduced model with the full pulse simulation.
+- [Gradients and parameter fitting](https://docs.quchip.org/guides/differentiability): differentiate spectra and pulse responses, and fit measured circuit parameters.
+- [Extending quchip](https://docs.quchip.org/extensions): define custom models, controls, dissipation and interoperability mappings.
+- [Cookbook](https://docs.quchip.org/cookbook): practical API choices, tips and common pitfalls.
+- [SQA 2026 examples](https://docs.quchip.org/guides/from-sqa-2026): five short calculations from the talk.
+
+## Focused studies
+
+- [Purcell filtering and T1](https://docs.quchip.org/guides/slh-networks): how much can a Purcell filter suppress qubit decay while preserving readout bandwidth?
 
 ## Project status and contributing
 

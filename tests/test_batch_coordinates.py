@@ -21,7 +21,7 @@ def _batch(backend, times):
 def test_batch_trace_stacking_rejects_different_time_coordinates(backend, second):
     batch = _batch(backend, [[0.0, 1.0, 2.0], second])
     for getter in (lambda: batch.expect("q"), lambda: batch.population("q", 1), lambda: batch.times,
-                   lambda: batch.collapse_flux("q.thermal_emission"),
+                   lambda: batch.jump_rate("q.thermal_emission"),
                    lambda: batch.collapse_integral("q.thermal_emission")):
         with pytest.raises(ValueError, match="different time grids"):
             getter()
@@ -53,7 +53,7 @@ def test_output_field_stacking_rejects_different_time_coordinates(backend):
     mode = Resonator(freq=0.2, levels=2, label="r")
     network = PortNetwork(label="line")
     network.port("coupler", target=mode, rate=0.01)
-    plane = network.exposure("coupler")
+    plane = network.external_port("coupler")
     chip = Chip([mode], port_network=network, backend=backend, frame="rotating")
     sequence = QuantumSequence(chip)
     grids = [[0.0, 1.0, 3.0], [0.0, 2.0, 3.0]]

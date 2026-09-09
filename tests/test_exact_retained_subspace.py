@@ -10,7 +10,7 @@ from quchip.chip.sw import bare_hamiltonian
 
 def _chip(backend, g=.08):
     q = DuffingTransmon(freq=5., anharmonicity=-.3, levels=4, label='q')
-    r = Resonator(freq=7., levels=4, T1=100., thermal_population=.4, label='r')
+    r = Resonator(freq=7., levels=4, T1=100., thermal_occupation=.4, label='r')
     return Chip([q, r], [Capacitive(q, r, g=g, label='qr')], backend=backend, approximation=Exact())
 
 
