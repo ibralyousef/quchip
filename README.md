@@ -4,9 +4,9 @@
 <p align="center">
   <a href="https://quchip.org">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/quchip-wordmark-dark.png">
-      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/quchip-wordmark-light.png">
-      <img src="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/quchip-wordmark-light.png" alt="quchip" width="400">
+      <source media="(prefers-color-scheme: dark)" srcset="https://docs.quchip.org/_static/quchip-wordmark-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="https://docs.quchip.org/_static/quchip-wordmark-light.png">
+      <img src="https://docs.quchip.org/_static/quchip-wordmark-light.png" alt="quchip" width="400">
     </picture>
   </a>
 </p>
@@ -32,9 +32,9 @@ A predictive chip model needs more than a Hamiltonian. Device physics, control-l
 Declare the chip once, then use the same model for dressed-state analysis, model reduction, control sequences, open-system simulation, parameter sweeps, and JAX gradients.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/quchip_pipeline_dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/quchip_pipeline_light.png">
-  <img src="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/quchip_pipeline_light.png" alt="quchip pipeline from declared devices and control parameters through model resolution, simulation, observables, and gradients" width="1084">
+  <source media="(prefers-color-scheme: dark)" srcset="https://docs.quchip.org/_static/readme/quchip_pipeline_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://docs.quchip.org/_static/readme/quchip_pipeline_light.png">
+  <img src="https://docs.quchip.org/_static/readme/quchip_pipeline_light.png" alt="quchip pipeline from declared devices and control parameters through model resolution, simulation, observables, and gradients" width="1084">
 </picture>
 
 QuTiP is the default simulation backend. The optional dynamiqs backend is JAX-native and keeps declared device and control parameters differentiable through a solve. The [backend guide](https://docs.quchip.org/guides/choosing-a-backend.html) compares their numerical and workflow tradeoffs. The scqubits integration imports and exports selected device and composite models.
@@ -112,15 +112,15 @@ The [defining and inspecting a chip guide](https://docs.quchip.org/guides/defini
 The [dynamics guide](https://docs.quchip.org/guides/dynamics-pulses-and-readout) adds control lines and pulse sequences to the chip above. It compares short and selective Gaussian qubit drives in the full multilevel model, then simulates conditional resonator readout.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_qubit_drive_leakage-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_qubit_drive_leakage.png">
-  <img src="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_qubit_drive_leakage.png" alt="Short and long Gaussian pulses with multilevel qubit populations" width="720">
+  <source media="(prefers-color-scheme: dark)" srcset="https://docs.quchip.org/_static/readme/hello_qubit_drive_leakage-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://docs.quchip.org/_static/readme/hello_qubit_drive_leakage.png">
+  <img src="https://docs.quchip.org/_static/readme/hello_qubit_drive_leakage.png" alt="Short and long Gaussian pulses with multilevel qubit populations" width="720">
 </picture>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_dispersive_readout_iq-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_dispersive_readout_iq.png">
-  <img src="https://raw.githubusercontent.com/quchip/quchip/main/docs/images/hello_dispersive_readout_iq.png" alt="Conditional resonator IQ paths with emphasized final points" width="560">
+  <source media="(prefers-color-scheme: dark)" srcset="https://docs.quchip.org/_static/readme/hello_dispersive_readout_iq-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://docs.quchip.org/_static/readme/hello_dispersive_readout_iq.png">
+  <img src="https://docs.quchip.org/_static/readme/hello_dispersive_readout_iq.png" alt="Conditional resonator IQ paths with emphasized final points" width="560">
 </picture>
 
 ## Guides
