@@ -85,7 +85,8 @@ class TwoPhotonDrive(DeviceDrive):
         ----------
         device : BaseDevice
             The cavity device being driven.
-
+        signal : AnalyticSignal
+            Delivered two-photon pump signal.
         """
         a = device.lowering_operator()
         a_dag = device.raising_operator()

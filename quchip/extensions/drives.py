@@ -12,11 +12,29 @@ from quchip.devices.protocols import ChargeCoupled, PhaseCoupled
 
 
 class ChargePhaseDrive(DeviceDrive):
-    """Map delivered I and Q to charge and phase observables."""
+    """Map delivered I and Q quadratures to charge and phase observables.
+
+    Parameters
+    ----------
+    target : device or None, default None
+        Optional target device; ``None`` allows attachment through the normal
+        drive connection API.
+    label : str or None, default None
+        Drive label.
+    """
 
     _type_prefix = "charge_phase"
 
     def hamiltonian(self, target: Any, signal: Any) -> Any:
+        """Return the I/Q Hamiltonian for a charge-and-phase coupled target.
+
+        Parameters
+        ----------
+        target : device
+            Device implementing charge and phase coupling protocols.
+        signal : signal
+            Delivered I/Q signal.
+        """
         if not isinstance(target, ChargeCoupled) or not isinstance(target, PhaseCoupled):
             raise TypeError(
                 f"ChargePhaseDrive requires {type(target).__name__} to define "
@@ -29,7 +47,17 @@ class ChargePhaseDrive(DeviceDrive):
 
 
 class LossyChargeDrive(ChargeDrive):
-    """Charge-control line with an effective target-relaxation rate."""
+    """Charge-control line with an effective target-relaxation rate.
+
+    Parameters
+    ----------
+    line_loss_rate : float
+        Non-negative effective relaxation rate in 1/ns.
+    target : device or None, default None
+        Optional target passed to :class:`~quchip.control.drive.ChargeDrive`.
+    label : str or None, default None
+        Drive label.
+    """
 
     _type_prefix = "lossy_charge"
     line_loss_rate: Scalar = parameter(
@@ -41,6 +69,17 @@ class LossyChargeDrive(ChargeDrive):
     )
 
     def dissipation(self, device: BaseDevice, op: Any, p: Any) -> tuple[CollapseChannel, ...]:
+        """Return the effective line-loss collapse channel.
+
+        Parameters
+        ----------
+        device : BaseDevice
+            Target device.
+        op : operator namespace
+            Target lowering operator namespace.
+        p : ParameterNamespace
+            Bound drive parameters.
+        """
         return (
             CollapseChannel(
                 op.a,

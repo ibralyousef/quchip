@@ -28,7 +28,17 @@ from quchip.utils.values import DeferredValue
 
 
 class BatchSolveError(RuntimeError):
-    """A numerical or configuration failure at one batch point, safe across workers."""
+    r"""A numerical or configuration failure at one batch point, safe across workers.
+
+    Parameters
+    ----------
+    index : int
+        Zero-based flat batch index that failed.
+    detail : str
+        Underlying numerical or configuration failure.
+    parameters : dict or None, default None
+        Parameter values at the failing point; None stores an empty mapping.
+    """
 
     def __init__(self, index: int, detail: str, parameters: dict[str, Any] | None = None) -> None:
         self.index = index
@@ -76,7 +86,21 @@ class SolverResult:
 
 @dataclass(frozen=True)
 class SteadyStateSolverResult:
-    """Backend payload for one stationary Lindblad solve."""
+    r"""Backend payload for one stationary Lindblad solve.
+
+    Attributes
+    ----------
+    state : State
+        Stationary density matrix in the native backend basis.
+    expect : list or None
+        Expectations in the requested observable order; None when not evaluated.
+    stats : dict
+        Backend diagnostics, including whether uniqueness was checked.
+    residual : scalar or None
+        Norm of the stationary Liouvillian residual, or None if not computed.
+    nullity : int or None
+        Estimated Liouvillian null-space dimension, or None when unchecked.
+    """
 
     state: Any
     expect: list[Any] | None = None
@@ -92,7 +116,17 @@ class SteadyStateSolverResult:
 
 @dataclass(frozen=True)
 class LinearResponseSolverResult:
-    """Backend payload for one batched passive-linear scattering solve."""
+    r"""Backend payload for one batched passive-linear scattering solve.
+
+    Attributes
+    ----------
+    responses : array_like, shape (n_freq, n_ports, n_ports)
+        Complex scattering matrix indexed by frequency, output, then input.
+    mode_amplitudes : array_like, shape (n_freq, n_modes, n_ports)
+        Internal mode response to unit incident amplitude at each input port.
+    residuals : array_like, shape (n_freq,)
+        Linear-system residual norms at each probe frequency.
+    """
 
     responses: Any
     mode_amplitudes: Any
@@ -112,12 +146,19 @@ class LinearResponseSolverResult:
 
 @dataclass
 class PreparedHamiltonian:
-    """Backend-native Hamiltonian produced by :meth:`Backend.prepare_hamiltonian`.
+    r"""Backend-native Hamiltonian produced by :meth:`Backend.prepare_hamiltonian`.
 
     ``rhs`` is whatever the backend's solver accepts directly — a ``Qobj`` /
     ``QobjEvo`` for QuTiP, a dynamiqs ``TimeQArray`` / sum of them for
     dynamiqs. ``metadata`` passes engine-level hints (e.g.
     ``spectral_bound_ghz`` for integrator step heuristics) through opaquely.
+
+    Attributes
+    ----------
+    rhs : object
+        Native Hamiltonian consumed by the solver, already in angular-frequency units.
+    metadata : dict
+        Integration hints, including spectral/carrier bounds when available.
     """
 
     rhs: Any
@@ -126,7 +167,17 @@ class PreparedHamiltonian:
 
 @dataclass(frozen=True)
 class PreparedStationary:
-    """Temporary native generator shared by one stationary operating point."""
+    r"""Temporary native generator shared by one stationary operating point.
+
+    Attributes
+    ----------
+    backend : Backend
+        Backend instance that owns this preparation.
+    engine_result : EngineResult
+        Exact captured operating point associated with the generator.
+    liouvillian : object
+        Native stationary generator, with rates in 1/ns.
+    """
 
     backend: Any = field(repr=False, compare=False)
     engine_result: Any = field(repr=False, compare=False)
@@ -135,10 +186,21 @@ class PreparedStationary:
 
 @dataclass
 class EagerBatch:
-    """Batched-solve payload with one native RHS per element.
+    r"""Batched-solve payload with one native RHS per element.
 
     The default :meth:`Backend.solve_batch` dispatches each element's RHS
     through :meth:`Backend.batched_sesolve` / :meth:`Backend.batched_mesolve`.
+
+    Attributes
+    ----------
+    rhs_list : list
+        One native right-hand side per batch element.
+    batch_size : int
+        Number of batch elements.
+    metadata : dict
+        Shared lowering and integration hints.
+    tlist : array_like or None
+        Common save-time grid in ns, or None when unspecified.
     """
 
     rhs_list: list[Any]
@@ -149,11 +211,22 @@ class EagerBatch:
 
 @dataclass
 class VmappedBatch:
-    """Batched-solve payload with a single natively batched RHS.
+    r"""Batched-solve payload with a single natively batched RHS.
 
     ``rhs`` covers every element at once — the dynamiqs path, where the
     per-element signals are stacked along a leading batch axis and the
     solver runs one vmapped call.
+
+    Attributes
+    ----------
+    rhs : object
+        Native right-hand side including the batch axis.
+    batch_size : int
+        Number of batch elements.
+    metadata : dict
+        Shared lowering and integration hints.
+    tlist : array_like or None
+        Common save-time grid in ns, or None when unspecified.
     """
 
     rhs: Any
@@ -164,12 +237,23 @@ class VmappedBatch:
 
 @dataclass
 class DeferredBatch:
-    """Batched-solve payload whose RHS construction is deferred.
+    r"""Batched-solve payload whose RHS construction is deferred.
 
     ``shared`` carries backend-private state; the producing backend must
     override :meth:`Backend.solve_batch` to consume it. QuTiP assembles final
     ``QobjEvo`` objects inside its workers; Dynamiqs assembles a vmapped RHS
     inside its cached JIT.
+
+    Attributes
+    ----------
+    shared : object
+        Backend-private lowering payload consumed by solve_batch.
+    batch_size : int
+        Number of batch elements.
+    metadata : dict
+        Shared lowering and integration hints.
+    tlist : array_like or None
+        Common save-time grid in ns, or None when unspecified.
     """
 
     shared: Any
@@ -185,7 +269,7 @@ PreparedBatch: TypeAlias = EagerBatch | VmappedBatch | DeferredBatch
 
 @dataclass
 class EigensystemData:
-    """Hermitian eigensystem returned in a single diagonalization call.
+    r"""Hermitian eigensystem returned in a single diagonalization call.
 
     ``eigenvalues`` is ascending. ``eigenvector_matrix`` stacks the
     eigenvectors as columns in the bare-product basis used for the
@@ -198,6 +282,13 @@ class EigensystemData:
     Backends populate either ``_states_builder`` (a callable that materializes
     the ket list on demand) or prime ``_states_cache`` directly (when the
     diagonalizer already produced the kets, e.g. QuTiP's ``Qobj.eigenstates``).
+
+    Attributes
+    ----------
+    eigenvalues : array_like, shape (D,)
+        Ascending eigenvalues in the input operator's units.
+    eigenvector_matrix : array_like, shape (D, D)
+        Eigenvectors as columns in the input operator basis.
     """
 
     eigenvalues: Any

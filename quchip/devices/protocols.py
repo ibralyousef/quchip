@@ -79,5 +79,11 @@ class FrequencyControlled(Protocol):
     """
 
     def frequency_at(self, flux: Any) -> Any:
-        """Return the device's transition frequency at the given flux bias."""
+        """Return the device's transition frequency at a flux bias.
+
+        Parameters
+        ----------
+        flux : float or array-like
+            Reduced flux bias in units of ``Phi_0``.
+        """
         ...

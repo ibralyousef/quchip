@@ -75,12 +75,21 @@ class Registrable:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
-        """Reconstruct from :meth:`to_dict` output.
+        r"""Reconstruct from :meth:`to_dict` output.
 
         On the registry root, dispatch to the concrete subclass named by
         ``data["type"]`` (forwarding ``*args`` / ``**kwargs``). On a concrete
         subclass, defer to :meth:`_from_dict_payload`. Concrete subclasses
         that carry payload override this method directly.
+
+        Parameters
+        ----------
+        data : dict
+            Serialized declaration containing the fully qualified type key.
+        *args : object
+            Additional positional reconstruction arguments, such as coupling endpoints.
+        **kwargs : object
+            Keyword reconstruction arguments accepted by the registered class.
         """
         if cls is cls._registry_root:
             type_key = str(data["type"])

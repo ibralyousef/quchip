@@ -16,6 +16,14 @@ class FockDevice(DeviceModel):
     Subclasses still own their Hamiltonian and approximation. This base only
     declares the standard Fock-space operators used by charge, phase, and
     frequency-modulating drives.
+    Parameters
+    ----------
+    levels : int, keyword-only, default 2
+        Fock-space truncation dimension.
+    label : str or None, keyword-only, default None
+        Device label.
+    **params : Any
+        Subclass physics and noise parameters.
     """
 
     __init__ = DeviceModel.__init__
@@ -25,7 +33,15 @@ class FockDevice(DeviceModel):
 
     @abstractmethod
     def local_hamiltonian(self, op: LocalOps, p: Any) -> PhysicsExpr:
-        """Declare this device's local Hamiltonian in its Fock space."""
+        """Declare this device's local Hamiltonian in its Fock space.
+
+        Parameters
+        ----------
+        op : LocalOps
+            Fock operator namespace.
+        p : ParameterNamespace
+            Symbolic declared parameters.
+        """
         ...
 
     def charge_coupling_operator(self) -> PhysicsExpr:

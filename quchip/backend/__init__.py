@@ -159,7 +159,22 @@ def get_default_backend() -> Backend:
 
 
 def set_default_backend(backend: str | Backend) -> None:
-    """Set the active default backend by name (``"qutip"``/``"dynamiqs"``) or instance."""
+    """Set the default backend for subsequent calculations.
+
+    Parameters
+    ----------
+    backend : {"qutip", "dynamiqs"} or Backend
+        Backend name or instance. A chip-specific backend or a scoped
+        calculation override takes precedence. ``"dynamiqs"`` requires
+        the optional ``quchip[dynamiqs]`` dependencies.
+
+    Raises
+    ------
+    ValueError
+        The backend name is unknown.
+    TypeError
+        The value is neither a name nor a Backend instance.
+    """
     global _default_backend
     _default_backend = _coerce_backend(backend)
 

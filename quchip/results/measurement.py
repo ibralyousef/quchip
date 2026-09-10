@@ -32,7 +32,25 @@ def _index(ports: tuple[str, ...], output: Any) -> int:
 
 @dataclass(frozen=True)
 class VNAMeasurementSamples:
-    """Synthetic Gaussian IQ draws with sample, sweep, then output axes."""
+    """Synthetic Gaussian IQ draws with sample, sweep, then output axes.
+
+    Attributes
+    ----------
+    ports : tuple of str
+        Output labels in the final array axis.
+    input : str
+        Driven input label.
+    axes : tuple
+        Named sweep-axis metadata.
+    incident : array_like
+        Incident complex field in ``1/sqrt(ns)``.
+    values : array_like
+        Sampled complex fields with leading shot and final output axes.
+    receiver : IQReceiver
+        Receiver used to integrate the physical spectra.
+    distribution : str
+        Sampling approximation.
+    """
 
     ports: tuple[str, ...]
     input: str
@@ -47,11 +65,23 @@ class VNAMeasurementSamples:
         object.__setattr__(self, "incident", _capture(self.incident))
 
     def field(self, output: Any) -> Any:
-        """Return sampled complex fields in 1/sqrt(ns)."""
+        """Return sampled complex fields in ``1/sqrt(ns)``.
+
+        Parameters
+        ----------
+        output : port object or str
+            Output plane to select.
+        """
         return self.values[..., _index(self.ports, output)]
 
     def ratio(self, output: Any) -> Any:
-        """Return sampled output/input ratios, undefined for zero input."""
+        """Return sampled output/input ratios, undefined for zero input.
+
+        Parameters
+        ----------
+        output : port object or str
+            Output plane to select.
+        """
         xp = array_namespace(self.values)
         zero = self.incident == 0
         return xp.where(zero, xp.nan + 0j, self.field(output) / xp.where(zero, 1.0, self.incident))
@@ -59,7 +89,27 @@ class VNAMeasurementSamples:
 
 @dataclass(frozen=True)
 class VNAMeasurementStatistics:
-    """Integrated output means and full covariance of (I0,Q0,I1,Q1,...)."""
+    """Integrated output means and full covariance of ``(I0,Q0,I1,Q1,...)``.
+
+    Attributes
+    ----------
+    ports : tuple of str
+        Output labels in covariance order.
+    input : str
+        Driven input label.
+    axes : tuple
+        Named sweep-axis metadata.
+    incident : array_like
+        Incident complex field in ``1/sqrt(ns)``.
+    values : array_like
+        Integrated complex output means.
+    iq_covariance : array_like
+        Full real IQ covariance with two axes per output.
+    receiver : IQReceiver
+        Receiver used for integration.
+    contributions : mapping
+        Named integrated covariance contributions.
+    """
 
     ports: tuple[str, ...]
     input: str
@@ -77,17 +127,37 @@ class VNAMeasurementStatistics:
             {key: _capture(value) for key, value in self.contributions.items()}))
 
     def mean(self, output: Any) -> Any:
-        """Return the integrated complex mean at an output."""
+        """Return the integrated complex mean at an output.
+
+        Parameters
+        ----------
+        output : port object or str
+            Output plane to select.
+        """
         return self.values[..., _index(self.ports, output)]
 
     def covariance(self, output: Any, other: Any = None) -> Any:
-        """Return a 2x2 IQ covariance or cross-output covariance block."""
+        """Return a 2x2 IQ covariance or cross-output covariance block.
+
+        Parameters
+        ----------
+        output : port object or str
+            First output plane.
+        other : port object, str, or None, optional
+            Second output plane; ``None`` selects ``output``.
+        """
         i = 2 * _index(self.ports, output)
         j = i if other is None else 2 * _index(self.ports, other)
         return self.iq_covariance[..., i:i+2, j:j+2]
 
     def noise_contributions(self, output: Any) -> Mapping[str, Any]:
-        """Return integrated source covariance blocks, including detector vacuum."""
+        """Return integrated source covariance blocks, including detector vacuum.
+
+        Parameters
+        ----------
+        output : port object or str
+            Output plane to select.
+        """
         i = 2 * _index(self.ports, output)
         return MappingProxyType({key: value[..., i:i+2, i:i+2] for key, value in self.contributions.items()})
 
@@ -97,6 +167,15 @@ class VNAMeasurementStatistics:
         Use seed for NumPy draws or an explicit JAX random key. The covariance
         includes anomalous/cross-output second moments, but does not specify
         higher-order non-Gaussian photon statistics.
+
+        Parameters
+        ----------
+        count : int
+            Positive number of samples.
+        seed : int or None, optional
+            NumPy random seed.
+        key : jax.Array or None, optional
+            JAX random key; mutually exclusive with ``seed``.
         """
         xp = array_namespace(self.values)
         mean = xp.stack((xp.real(self.values), xp.imag(self.values)), axis=-1)
@@ -106,7 +185,13 @@ class VNAMeasurementStatistics:
         return VNAMeasurementSamples(self.ports, self.input, self.axes, self.incident, values, self.receiver)
 
     def calibrate(self, factors: Mapping[Any, Any]) -> VNAMeasurementStatistics:
-        """Multiply output fields and both covariance axes by calibration factors."""
+        """Multiply output fields and covariance axes by calibration factors.
+
+        Parameters
+        ----------
+        factors : mapping
+            Complex amplitude factor keyed by output plane; omitted outputs use one.
+        """
         xp = select_array_module(is_jax_array(self.values) or contains_tracer(tuple(factors.values())))
         normalized = {resolve_label(port): value for port, value in factors.items()}
         for port in normalized:
@@ -129,6 +214,41 @@ class VNAMeasurement(MeanFieldResponseResult):
     excess spectral covariance). The latter has an offset-frequency axis
     before its two IQ axes. Device-generated excess includes input-system
     correlations and can be negative; it is not an independent random source.
+
+    Attributes
+    ----------
+    ports : tuple of str
+        Captured output labels.
+    input : str
+        Driven input label.
+    values : array_like
+        Complex output means with the output axis last.
+    incident : array_like
+        Incident complex field in ``1/sqrt(ns)``.
+    frequencies, amplitudes : array_like
+        Probe frequencies in GHz and incident amplitudes.
+    shape : tuple of int
+        Broadcast sweep shape.
+    axes : tuple
+        Named sweep-axis metadata.
+    diagnostics : mapping
+        Captured solve diagnostics.
+    noise_frequencies : array_like
+        Two-sided offsets in GHz.
+    noise_components : mapping
+        Named white and excess IQ covariance spectra.
+    output_delays : array_like
+        Output reference-plane delays in ns.
+    parameters : tuple of mapping
+        Bound parameters for each sweep point.
+    modes : tuple of str
+        Captured internal Fock-mode labels.
+    mode_amplitudes, photon_numbers : array_like
+        Internal stationary means and occupations.
+    mode_frequencies : array_like
+        Internal stationary-frame frequencies in GHz.
+    conventions : tuple of str
+        Units and statistical conventions.
     """
 
     noise_frequencies: Any
@@ -169,6 +289,11 @@ class VNAMeasurement(MeanFieldResponseResult):
         Use ``mode_frequency(mode)`` for that frame's frequency in GHz.
         This is the internal field with the full declared wiring included.
         The returned array follows the measurement's sweep axes.
+
+        Parameters
+        ----------
+        mode : device object or str
+            Captured Fock mode.
         """
         return self.mode_amplitudes[..., self._mode_index(mode)]
 
@@ -178,15 +303,32 @@ class VNAMeasurement(MeanFieldResponseResult):
         Available for authored Fock modes, including nonlinear modes. The
         general solver retains the declared basis projection and truncation.
         Receiver integration and calibration do not change this occupation.
+
+        Parameters
+        ----------
+        mode : device object or str
+            Captured Fock mode.
         """
         return self.photon_numbers[..., self._mode_index(mode)]
 
     def mode_frequency(self, mode: Any) -> Any:
-        """Return the captured stationary frame frequency of a mode in GHz."""
+        """Return the captured stationary frame frequency of a mode in GHz.
+
+        Parameters
+        ----------
+        mode : device object or str
+            Captured Fock mode.
+        """
         return self.mode_frequencies[..., self._mode_index(mode)]
 
     def noise_contributions(self, output: Any) -> Mapping[str, Any]:
-        """Return physical IQ spectral contributions at the captured offsets."""
+        """Return physical IQ spectral contributions at the captured offsets.
+
+        Parameters
+        ----------
+        output : port object or str
+            Output plane to select.
+        """
         i = 2 * _index(self.ports, output)
         return MappingProxyType({name: white[..., None, i:i+2, i:i+2] + excess[..., i:i+2, i:i+2]
                                  for name, (white, excess) in self.noise_components.items()})
@@ -198,6 +340,13 @@ class VNAMeasurement(MeanFieldResponseResult):
         This normally ordered spectrum excludes coherent signal and receiver
         vacuum. Power units use hf times occupation at the absolute sideband
         frequency and require positive physical frequencies. No solve is run.
+
+        Parameters
+        ----------
+        output : port object or str
+            Output plane to select.
+        unit : {"quanta", "W/Hz", "dBm/Hz"}, default="quanta"
+            Spectral-density unit.
         """
         xp = array_namespace(self.values)
         spectrum = normal_spectrum(sum(self.noise_contributions(output).values()), xp)
@@ -214,7 +363,13 @@ class VNAMeasurement(MeanFieldResponseResult):
         return xp.where(power > 0, 10*xp.log10(xp.where(power > 0, power, 1.0)/1e-3), -xp.inf)
 
     def statistics(self, *, receiver: IQReceiver) -> VNAMeasurementStatistics:
-        """Integrate captured spectra and detector vacuum without a solver call."""
+        """Integrate captured spectra and detector vacuum without a solver call.
+
+        Parameters
+        ----------
+        receiver : IQReceiver
+            Boxcar receiver and optional digital transfer.
+        """
         covariance, contributions, mean_gain = integrate_noise(
             self.values, self.noise_frequencies, self.noise_components, self.output_delays, receiver)
         return VNAMeasurementStatistics(self.ports, self.input, self.axes, self.incident,
@@ -223,5 +378,17 @@ class VNAMeasurement(MeanFieldResponseResult):
     def sample(
         self, count: int, *, receiver: IQReceiver, seed: int | None = None, key: Any = None,
     ) -> VNAMeasurementSamples:
-        """Integrate for a receiver and draw samples from the captured moments."""
+        """Integrate for a receiver and draw samples from the captured moments.
+
+        Parameters
+        ----------
+        count : int
+            Positive number of samples.
+        receiver : IQReceiver
+            Boxcar receiver and optional digital transfer.
+        seed : int or None, optional
+            NumPy random seed.
+        key : jax.Array or None, optional
+            JAX random key; mutually exclusive with ``seed``.
+        """
         return self.statistics(receiver=receiver).sample(count, seed=seed, key=key)

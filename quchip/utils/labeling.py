@@ -16,7 +16,13 @@ _label_counters: dict[str, int] = {}
 
 
 def auto_label(prefix: str) -> str:
-    """Return the next ``"{prefix}_{n}"`` label; each prefix starts at zero."""
+    r"""Return the next ``"{prefix}_{n}"`` label; each prefix starts at zero.
+
+    Parameters
+    ----------
+    prefix : str
+        Component-type prefix used by its independent process-wide counter.
+    """
     idx = _label_counters.get(prefix, 0)
     _label_counters[prefix] = idx + 1
     return f"{prefix}_{idx}"
@@ -28,9 +34,14 @@ def reset_label_counters() -> None:
 
 
 def resolve_label(obj: str | Any) -> str:
-    """Return a string label from a string or labeled component.
+    r"""Return a string label from a string or labeled component.
 
     Raise ``TypeError`` if the object has no usable label.
+
+    Parameters
+    ----------
+    obj : str or object
+        Label string, returned unchanged, or an object with a non-None label attribute.
     """
     if isinstance(obj, str):
         return obj

@@ -32,11 +32,21 @@ if TYPE_CHECKING:
 
 
 class ZippedSweep:
-    """Element-wise pairing of sweep axes.
+    """Pair sweep axes element by element.
 
-    Built via :meth:`Sweep.zip`. All bundled axes must share the same
-    ``size``; iteration steps through them together, producing one
-    parameter dict per element rather than a Cartesian-product grid.
+    Use :meth:`Sweep.zip` to validate lengths before constructing this bundle.
+
+    Parameters
+    ----------
+    sweeps : tuple of Sweep
+        Nonempty axes with equal lengths and distinct names.
+
+    Attributes
+    ----------
+    sweeps : tuple of Sweep
+        Axes advanced together.
+    size : int
+        Length of the first axis.
     """
 
     def __init__(self, sweeps: tuple[Sweep, ...]) -> None:
@@ -49,29 +59,25 @@ class ZippedSweep:
 
 
 class Sweep:
-    """Declarative 1-D sweep axis over a named parameter.
+    """Declare a one-dimensional parameter axis.
 
-    ``values`` are in the swept parameter's own physical units (the
-    package-wide contract: GHz for frequencies and couplings, ns for
-    times, mK for temperatures).
+    Parameters
+    ----------
+    values : array_like, shape (n,)
+        Values in the parameter's units. JAX arrays are preserved; other
+        inputs are converted to NumPy arrays. Scalar inputs are unsupported.
+    name : str or None, default None
+        Parameter path such as ``"q.freq"``; omission gives ``"unnamed"``.
+        Names must be unique when axes are combined.
 
-    ``values`` may be a Python sequence, a NumPy array, or a JAX array;
-    JAX arrays are preserved as-is so any consumer that threads the
-    sweep through a JAX-traced path keeps full differentiability.
-    Non-JAX inputs are normalized through :func:`numpy.asarray` for
-    uniform ``len``/indexing behavior.
-
-    Examples
-    --------
-    >>> import numpy as np
-    >>> from quchip.sweep import Sweep
-    >>> freqs = Sweep(np.linspace(4.9, 5.1, 5), name="freq")
-    >>> freqs.size
-    5
-    >>> drives = Sweep([0.01, 0.02, 0.03], name="amp")
-    >>> points = Sweep.expand([freqs, drives])
-    >>> len(points)
-    15
+    Attributes
+    ----------
+    values : array_like
+        Stored axis values.
+    name : str
+        Parameter path or axis name.
+    size : int
+        Number of values.
     """
 
     def __init__(self, values: Any, *, name: str | None = None) -> None:
@@ -115,8 +121,16 @@ class Sweep:
     def expand(axes: Sequence[Sweep | ZippedSweep]) -> list[dict[str, Any]]:
         """Expand independent axes as a Cartesian product and zipped axes pairwise.
 
-        Return one parameter dict per grid point in C-order (last axis fastest).
-        Every axis name, including each member of a zipped group, must be unique.
+        Parameters
+        ----------
+        axes : sequence of Sweep or ZippedSweep
+            Axes in output order. Names must be unique across all groups.
+
+        Returns
+        -------
+        list of dict
+            Parameter mappings in C order (last axis fastest). No axes gives
+            one empty mapping; an empty axis gives no points.
         """
         _shape, points = _iter_axis_points(axes)
         return [params for _coord, params in points]
@@ -354,15 +368,39 @@ class SpectrumSweepResult:
         n_components: int = 5,
         **device_state_kwargs: int,
     ) -> dict[tuple[int, ...], float]:
-        """Top-``n_components`` bare-state probabilities of a dressed eigenstate.
+        """Return the largest bare-state probabilities of one dressed state.
 
-        ``state`` may either be an explicit dressed index (``int``) or
-        a bare-label specification that is resolved via the same
-        overlap-based map used by :meth:`dressed_index`. Requires the
-        sweep to have been run with ``store_eigenstates=True``.
+        Requires ``store_eigenstates=True`` when running the sweep.
 
-        Returns a dict mapping bare labels to squared-amplitude
-        probabilities, ordered from largest to smallest.
+        Parameters
+        ----------
+        point : int, tuple of int, or None
+            Grid coordinate; an integer selects a one-dimensional sweep.
+            ``None`` is valid only for a result with no sweep axes.
+        state : int, mapping, or None, default None
+            Dressed index, or device-object/label to bare-level mapping.
+            A mapping is resolved through the stored overlap assignment.
+            Omitted devices have level zero.
+        n_components : int, default 5
+            Positive maximum number of components returned.
+        **device_state_kwargs : int
+            Bare levels keyed by device label, as an alternative to a mapping.
+            Do not combine with a nonempty mapping.
+
+        Returns
+        -------
+        dict
+            Bare occupation tuples mapped to squared amplitudes, in descending order.
+
+        Raises
+        ------
+        ValueError
+            Eigenvectors were not saved, a coordinate is invalid, the requested
+            count is nonpositive, or the bare label has no confident assignment.
+
+        See Also
+        --------
+        SpectrumSweep : Dressed-spectrum conventions and physics reference.
         """
         if self.eigenvector_matrices is None:
             raise ValueError(
@@ -394,30 +432,32 @@ class SpectrumSweepResult:
 
 
 class SpectrumSweep:
-    """Sequential dressed-spectrum sweep driver.
+    """Compute dressed spectra over a parameter grid.
 
-    Each sweep name is a path from :attr:`Chip.parameters`. At every grid
-    point :meth:`Chip.with_params` creates an isolated chip and
-    :meth:`Chip.dress` computes its dressed spectrum. The
-    per-point eigenvalues and overlap-based bare→dressed assignments
-    are collected into a :class:`SpectrumSweepResult`.
+    Each point uses a fresh :meth:`Chip.with_params` clone and independent
+    bare-state overlap assignment; labels are not transported along the path.
 
-    This is the standard tool for two-tone spectroscopy maps, avoided
-    crossings, and any study that requires following dressed states
-    across parameter space. See Blais, Grimsmo, Girvin & Wallraff,
-    Rev. Mod. Phys. 93, 025005 (2021), for the dressed-state picture;
-    the overlap-based labeling follows the usual practice of assigning
-    a dressed eigenstate to the bare state with which it has maximum
-    overlap.
+    Parameters
+    ----------
+    chip : Chip
+        Model to dress in the lab frame.
+    axes : sequence of Sweep or ZippedSweep
+        Nonempty axes named by paths in ``chip.parameters``. Independent
+        axes form a Cartesian product; zipped axes advance together.
+    evals_count : int or None, default None
+        Number of lowest eigenvalues stored, from 1 to ``chip.total_dim``.
+        ``None`` stores all. Dressing still computes the full eigensystem.
+    store_eigenstates : bool, default False
+        Retain eigenvectors and backend states for component inspection.
+    overlap_threshold : float, default 0.5
+        Minimum squared overlap for a confident bare-state assignment.
+        Use a value between 0 and 1. Unassigned labels yield ``NaN``.
 
-    Examples
-    --------
-    >>> # Sweep a qubit frequency and record dressed levels
-    >>> # sweep = SpectrumSweep(
-    >>> #     chip,
-    >>> #     [Sweep(np.linspace(4.8, 5.2, 41), name="q.freq")],
-    >>> # )
-    >>> # result = sweep.run()  # doctest: +SKIP
+    References
+    ----------
+    Blais et al., *Circuit quantum electrodynamics*, Rev. Mod. Phys. 93,
+    025005 (2021), https://doi.org/10.1103/RevModPhys.93.025005.
+    The reference describes dressed states; grid traversal is quchip policy.
     """
 
     def __init__(

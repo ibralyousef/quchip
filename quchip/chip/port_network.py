@@ -41,7 +41,17 @@ TerminalKey = tuple[str, str]
 
 @dataclass(frozen=True)
 class FieldTerminal:
-    """One directional terminal owned by a :class:`PortNetwork`."""
+    """One directional terminal owned by a :class:`PortNetwork`.
+
+    Parameters
+    ----------
+    component : str
+        Owning component label.
+    name : str
+        Component-local terminal name.
+    direction : {"input", "output"}
+        Field-propagation direction.
+    """
 
     component: str
     name: str
@@ -56,7 +66,19 @@ class FieldTerminal:
 
 @dataclass(frozen=True)
 class SLHComponent:
-    """Minimal public boundary component: scalar ``S`` plus named terminals."""
+    """Boundary component with scalar scattering and named terminals.
+
+    Parameters
+    ----------
+    label : str
+        Unique component label.
+    input_names, output_names : tuple[str, ...]
+        Terminal names in scattering column and row order.
+    scattering : array-like
+        Dimensionless scalar scattering matrix.
+    sides : tuple[str, ...], default=()
+        Names pairing physical input and output terminals.
+    """
 
     label: str
     input_names: tuple[str, ...]
@@ -74,7 +96,13 @@ class SLHComponent:
     _transfer: Callable[..., Any] | None = field(default=None, repr=False, compare=False)
 
     def port(self, name: str | int) -> "ComponentPort":
-        """Return a component port with incoming and outgoing field connections."""
+        """Return a component port with both field directions.
+
+        Parameters
+        ----------
+        name : str or int
+            Physical side name.
+        """
         label = str(name)
         if not self.sides:
             raise ValueError(
@@ -86,7 +114,13 @@ class SLHComponent:
         return ComponentPort(self.input_terminal(label), self.output_terminal(label))
 
     def side(self, name: str | int) -> "ComponentPort":
-        """Deprecated alias for :meth:`port`."""
+        """Deprecated alias for :meth:`port`.
+
+        Parameters
+        ----------
+        name : str or int
+            Physical side name.
+        """
         warn_renamed("component.side()", "component.port()")
         return self.port(name)
 
@@ -107,7 +141,13 @@ class SLHComponent:
         )
 
     def input_terminal(self, name: str) -> FieldTerminal:
-        """Return one named input terminal."""
+        """Return one named input terminal.
+
+        Parameters
+        ----------
+        name : str
+            Input terminal name.
+        """
         try:
             index = self.input_names.index(name)
         except ValueError as exc:
@@ -117,7 +157,13 @@ class SLHComponent:
         return self.inputs[index]
 
     def output_terminal(self, name: str) -> FieldTerminal:
-        """Return one named output terminal."""
+        """Return one named output terminal.
+
+        Parameters
+        ----------
+        name : str
+            Output terminal name.
+        """
         try:
             index = self.output_names.index(name)
         except ValueError as exc:
@@ -151,7 +197,13 @@ class SLHComponent:
 
 @dataclass(frozen=True)
 class ComponentPort:
-    """A component port pairing its incoming and outgoing field connections."""
+    """A component port pairing incoming and outgoing field connections.
+
+    Parameters
+    ----------
+    input, output : FieldTerminal
+        Incoming and outgoing terminals on the same physical side.
+    """
 
     input: FieldTerminal
     output: FieldTerminal
@@ -163,6 +215,11 @@ class NetworkPort:
 
     The reference plane specifies where these fields are defined. A device's
     :class:`Port` instead specifies its coupling to the network.
+
+    Parameters
+    ----------
+    label : str
+        External reference-plane label.
     """
 
     label: str
@@ -243,6 +300,11 @@ class IncludedNetwork:
     ``component(name)`` returns a copied component. Template exposures made with
     ``expose(..., at=...)`` are available through ``side(name)``; asymmetric
     exposures use ``input(name)`` and ``output(name)``.
+
+    Parameters
+    ----------
+    prefix : str
+        Label prefix assigned to the included copy.
     """
 
     prefix: str
@@ -250,24 +312,48 @@ class IncludedNetwork:
     _interfaces: Mapping[str, tuple[TerminalKey, TerminalKey]] = field(repr=False, compare=False)
 
     def component(self, name: str) -> SLHComponent:
-        """Return the copied component that was called ``name`` in the template."""
+        """Return a copied template component.
+
+        Parameters
+        ----------
+        name : str
+            Unprefixed template component name.
+        """
         label = f"{self.prefix}/{name}"
         if label not in self._host._components:
             raise KeyError(f"No component {name!r} in block {self.prefix!r}.")
         return self._host._components[label]
 
     def input(self, name: str) -> FieldTerminal:
-        """Return the input terminal of the exported network port ``name``."""
+        """Return an exported input terminal.
+
+        Parameters
+        ----------
+        name : str
+            Template external-port name.
+        """
         key = self._interface(name)[0]
         return self._host._components[key[0]].input_terminal(key[1])
 
     def output(self, name: str) -> FieldTerminal:
-        """Return the output terminal of the exported network port ``name``."""
+        """Return an exported output terminal.
+
+        Parameters
+        ----------
+        name : str
+            Template external-port name.
+        """
         key = self._interface(name)[1]
         return self._host._components[key[0]].output_terminal(key[1])
 
     def port(self, name: str) -> ComponentPort:
-        """Return a component port exported by the network block."""
+        """Return an exported component port.
+
+        Parameters
+        ----------
+        name : str
+            Symmetric template external-port name.
+        """
         input_key, output_key = self._interface(name)
         component = self._host._components[input_key[0]]
         if input_key != output_key or input_key[1] not in component.sides:
@@ -275,7 +361,13 @@ class IncludedNetwork:
         return component.port(input_key[1])
 
     def side(self, name: str) -> ComponentPort:
-        """Deprecated alias for :meth:`port`."""
+        """Deprecated alias for :meth:`port`.
+
+        Parameters
+        ----------
+        name : str
+            Symmetric template external-port name.
+        """
         warn_renamed("block.side()", "block.port()")
         return self.port(name)
 
@@ -330,7 +422,20 @@ class _CompiledNetwork:
 
 
 class PortNetwork:
-    """Ports and an instantaneous scalar-S field-routing graph with algebraic feedback."""
+    """Compose Markovian ports with instantaneous scalar scattering.
+
+    The network acts on fields at one reference frequency. Scattering matrices
+    are dimensionless and must be unitary; loss and noise are represented by
+    explicit hidden channels or reference components. Feedback loops are
+    reduced algebraically, so this class does not model propagation retardation.
+
+    Parameters
+    ----------
+    scattering : array-like or mapping, optional
+        Authored instantaneous scattering matrix or labeled entries.
+    label : str, optional
+        Network label.
+    """
 
     _type_prefix = "port_network"
 
@@ -340,6 +445,17 @@ class PortNetwork:
         scattering: Any = None,
         label: str | None = None,
     ) -> None:
+        """Create an empty network, optionally with an authored scattering map.
+
+        Parameters
+        ----------
+        scattering : array-like or mapping, optional
+            Static scattering matrix, or ``{(output, input): amplitude}``
+            entries keyed by external labels. A callable is rejected because
+            the network is instantaneous.
+        label : str, optional
+            Network label; generated when omitted.
+        """
         self.label = label if label is not None else auto_label(self._type_prefix)
         self._token = object()
         if callable(scattering):
@@ -370,7 +486,23 @@ class PortNetwork:
         scattering: Any = None,
         label: str | None = None,
     ) -> "PortNetwork":
-        """Build an identity-exposed network around existing ports."""
+        """Build a network containing ``ports`` in declaration order.
+
+        Parameters
+        ----------
+        ports : sequence of Port
+            Quantum coupling channels to add. Each port may belong to only one
+            network; pass a copy to reuse it elsewhere.
+        scattering : array-like or mapping, optional
+            Initial external scattering specification.
+        label : str, optional
+            Network label.
+
+        Returns
+        -------
+        PortNetwork
+            Network with the supplied ports and no internal components.
+        """
         network = cls(scattering=scattering, label=label)
         for port in ports:
             network._add_port(port)
@@ -398,12 +530,24 @@ class PortNetwork:
         return self.external_ports
 
     def exposure(self, exposure: str | NetworkPort) -> NetworkPort:
-        """Deprecated alias for :meth:`external_port`."""
+        """Deprecated alias for :meth:`external_port`.
+
+        Parameters
+        ----------
+        exposure : str or NetworkPort
+            External reference plane.
+        """
         warn_renamed("network.exposure()", "network.external_port()")
         return self.external_port(exposure)
 
     def external_port(self, exposure: str | NetworkPort) -> NetworkPort:
-        """Return one external network port by object or label."""
+        """Return one external network port by object or label.
+
+        Parameters
+        ----------
+        exposure : str or NetworkPort
+            External reference plane.
+        """
         if isinstance(exposure, NetworkPort) and exposure._network_token is not self._token:
             raise ValueError(f"Network port {exposure.label!r} belongs to another PortNetwork.")
         label = resolve_label(exposure)
@@ -434,7 +578,15 @@ class PortNetwork:
         return MappingProxyType(values)
 
     def set_parameter_value(self, name: str, value: Any) -> None:
-        """Set one network-owned scalar on an isolated structural copy."""
+        """Set one network-owned scalar on an isolated structural copy.
+
+        Parameters
+        ----------
+        name : str
+            Path below ``scattering`` or ``component``.
+        value : Any
+            Replacement scalar in the component parameter's declared units.
+        """
         parts = name.split(".")
         if (
             len(parts) == 3
@@ -462,7 +614,21 @@ class PortNetwork:
         operator: Any = None,
         phase: Any = 0.0,
     ) -> Port:
-        """Create and return one quantum coupling port owned by this network."""
+        """Create and add one quantum coupling port.
+
+        Parameters
+        ----------
+        label : str
+            Unique port label.
+        target, rate, external_quality_factor, operator, phase
+            See :class:`~quchip.chip.ports.Port`.
+
+        Returns
+        -------
+        Port
+            The network-owned port, whose ``input``, ``output`` and ``side``
+            terminals can be connected immediately.
+        """
         port = Port(
             target,
             rate=rate,
@@ -481,7 +647,25 @@ class PortNetwork:
         scattering: Any,
         terminals: Sequence[str] | None = None,
     ) -> SLHComponent:
-        """Add a zero-coupling scalar scattering component."""
+        """Add a scalar scattering component with named terminals.
+
+        Parameters
+        ----------
+        label : str
+            Unique component label.
+        scattering : square array-like
+            Dimensionless scattering matrix. Rows are outputs and columns are
+            inputs; concrete matrices must be unitary.
+        terminals : sequence of str, optional
+            Names for both input and output terminals. Defaults to ``("signal",)``
+            for one channel and numeric names otherwise.
+
+        Returns
+        -------
+        SLHComponent
+            Component handle used with :meth:`connect`, :meth:`cascade`, or
+            :meth:`link`.
+        """
         return self._scattering_component(label, scattering=scattering, terminals=terminals, kind="scattering")
 
     def _scattering_component(
@@ -512,11 +696,25 @@ class PortNetwork:
         return self._add_component(component)
 
     def through(self, label: str) -> SLHComponent:
-        """Add a one-channel identity through component."""
+        """Add a one-channel identity through component.
+
+        Parameters
+        ----------
+        label : str
+            Component label.
+        """
         return self._scattering_component(label, scattering=[[1.0]], terminals=("signal",), kind="through")
 
     def phase_shift(self, label: str, *, phase: Any) -> SLHComponent:
-        """Add a one-channel phase shift."""
+        """Add a one-channel phase shift.
+
+        Parameters
+        ----------
+        label : str
+            Component label.
+        phase : float or array-like
+            Phase in radians.
+        """
         xp = select_array_module(contains_tracer(phase))
         return self._scattering_component(
             label,
@@ -533,6 +731,13 @@ class PortNetwork:
         ``t = sqrt(eta)`` and ``r = sqrt(1 - eta)``, the scattering matrix is
         ``[[t, r], [-r, t]]``. This component has no component ports; use
         ``input_terminal()``, ``output_terminal()``, or ``cascade()``.
+
+        Parameters
+        ----------
+        label : str
+            Component label.
+        eta : float or array-like, default=0.5
+            Power transmission in [0, 1].
         """
         matrix = self._transmission_matrix(eta)
         return self._scattering_component(
@@ -545,6 +750,11 @@ class PortNetwork:
         The scattering matrix is ``[[1, 1j], [1j, 1]] / sqrt(2)``. This
         component has no component ports; use ``input_terminal()``,
         ``output_terminal()``, or ``cascade()``.
+
+        Parameters
+        ----------
+        label : str
+            Unique component label.
         """
         return self._scattering_component(
             label,
@@ -554,7 +764,15 @@ class PortNetwork:
         )
 
     def permutation(self, label: str, *, order: Sequence[int]) -> SLHComponent:
-        """Add an output permutation; ``order[row]`` selects the input column."""
+        """Add an output permutation.
+
+        Parameters
+        ----------
+        label : str
+            Unique component label.
+        order : sequence of int
+            Input column selected by each output row.
+        """
         order = tuple(order)
         if sorted(order) != list(range(len(order))):
             raise ValueError("Permutation order must contain each input index exactly once.")
@@ -571,6 +789,17 @@ class PortNetwork:
         They default to vacuum. ``thermal_occupation`` gives both loads a mean
         thermal population in quanta, constant across the modeled band.
         Specify either power transmission ``eta`` or positive ``loss_db``.
+
+        Parameters
+        ----------
+        label : str
+            Unique component label.
+        eta : scalar or None, default=None
+            Power transmission in the interval [0, 1].
+        loss_db : scalar or None, default=None
+            Positive power loss in dB, mutually exclusive with ``eta``.
+        thermal_occupation : scalar or None, default=None
+            Mean occupation of each hidden load in quanta; ``None`` means vacuum.
         """
         power = {key: value for key, value in (("eta", eta), ("loss_db", loss_db)) if value is not None}
         transmission = attenuation_value(power)
@@ -602,6 +831,13 @@ class PortNetwork:
         never enters Markovian ``S``, ``L``, or ``H``. Every reference section must
         belong to an exposed run or an acyclic downstream output graph. Its duration is tracked at
         ``network.component.<label>.duration``.
+
+        Parameters
+        ----------
+        label : str
+            Component label.
+        duration : float or array-like
+            Reference-plane delay in ns.
         """
         ReferenceDelay(label, duration)
         return self._reference_component(label, kind="delay", parameters={"duration": duration})
@@ -630,6 +866,17 @@ class PortNetwork:
         A scalar transfer alone does not distinguish absorption from reflection.
         Colored thermal emission cannot feed a quantum coupling through a
         reference section; use a dynamical filter/bath model for that case.
+
+        Parameters
+        ----------
+        label : str
+            Unique component label.
+        transfer : callable
+            Passive complex amplitude transfer versus frequency in GHz.
+        thermal_occupation : scalar or None, default=None
+            Mean matched-load occupation in quanta; ``None`` means vacuum.
+        **parameters : Any
+            Named transfer-function parameters tracked by the network.
         """
         parameters.update(noise_parameters(thermal_occupation))
         return self._reference_component(label, kind="filter", parameters=dict(parameters), transfer=transfer)
@@ -654,6 +901,15 @@ class PortNetwork:
 
         ``gain_db`` may replace linear ``gain``. Added quanta are constant
         across the modeled band and exclude the input's own noise.
+
+        Parameters
+        ----------
+        label : str
+            Component label.
+        added_noise : float or array-like
+            Input-referred symmetrized added noise in quanta.
+        gain, gain_db : float or array-like, optional
+            Power gain, specified linearly or in dB; supply at most one.
         """
         parameters = {key: value for key, value in (
             ("gain", gain), ("gain_db", gain_db), ("added_noise", added_noise)) if value is not None}
@@ -683,6 +939,13 @@ class PortNetwork:
         """Add an ideal circulator routing side ``k`` to side ``k + 1``.
 
         The highest-numbered side routes back to side 1.
+
+        Parameters
+        ----------
+        label : str
+            Unique component label.
+        ports : int, default=3
+            Number of physical sides; must be at least three.
         """
         if ports < 3:
             raise ValueError(f"A circulator needs at least three sides, got {ports}.")
@@ -698,6 +961,13 @@ class PortNetwork:
         The reverse field is dumped into ``hidden.<label>.load``. Its thermal
         population travels back toward side 1. ``thermal_occupation`` is in
         quanta, constant across the modeled band; the default is vacuum.
+
+        Parameters
+        ----------
+        label : str
+            Unique component label.
+        thermal_occupation : scalar or None, default=None
+            Mean hidden-load occupation in quanta; ``None`` means vacuum.
         """
         component = self._permutation_component(
             label,
@@ -716,6 +986,13 @@ class PortNetwork:
 
         ``thermal_occupation`` is the mean thermal population in quanta,
         constant across the modeled band. The default is vacuum.
+
+        Parameters
+        ----------
+        label : str
+            Unique component label.
+        thermal_occupation : scalar or None, default=None
+            Mean load occupation in quanta; ``None`` means vacuum.
         """
         component = self._permutation_component(
             label, ("1", "load"), (1, 0), kind="termination",
@@ -754,7 +1031,13 @@ class PortNetwork:
         return self._add_component(component)
 
     def connect(self, output: FieldTerminal, input: FieldTerminal) -> None:
-        """Connect one component output to one component input."""
+        """Connect one component output to one component input.
+
+        Parameters
+        ----------
+        output, input : FieldTerminal
+            Unused directional terminals from this network.
+        """
         self._validate_terminal(output, "output")
         self._validate_terminal(input, "input")
         self._reject_hidden_terminal(output)
@@ -774,6 +1057,11 @@ class PortNetwork:
         When a two-sided component is passed directly, the chain enters side 1
         and leaves side 2. Pass ``component.port(k)`` to select a side
         explicitly.
+
+        Parameters
+        ----------
+        *items : Port, SLHComponent, or ComponentPort
+            At least two two-sided endpoints.
         """
         for first, second in self._pairs("link", items):
             left = self._side_of(first, leaving=True)
@@ -782,7 +1070,13 @@ class PortNetwork:
             self.connect(right.output, left.input)
 
     def cascade(self, *items: Port | SLHComponent | FieldTerminal) -> None:
-        """Connect each item's output to the next item's input in sequence."""
+        """Connect each item's output to the next item's input in sequence.
+
+        Parameters
+        ----------
+        *items : Port, SLHComponent, or FieldTerminal
+            At least two compatible endpoints.
+        """
         for first, second in self._pairs("cascade", items):
             self.connect(self._endpoint_of(first, "output"), self._endpoint_of(second, "input"))
 
@@ -805,6 +1099,15 @@ class PortNetwork:
         Pass ``at=`` to expose one component port. Use ``input=`` and
         ``output=`` for separate input and output connections; ports and components then select
         their sole or ``signal`` terminal unless explicit terminals are passed.
+
+        Parameters
+        ----------
+        label : str
+            Unique external reference-plane label.
+        at : Port, SLHComponent, ComponentPort, or None, default=None
+            Physical side to expose for both directions.
+        input, output : FieldTerminal, Port, SLHComponent, or None, default=None
+            Separate incoming and outgoing connection points.
         """
         if at is not None:
             if input is not None or output is not None:
@@ -830,7 +1133,13 @@ class PortNetwork:
         return exposure
 
     def validate_for(self, chip: Any) -> None:
-        """Validate every quantum port target against ``chip``."""
+        """Validate every quantum port target against a chip.
+
+        Parameters
+        ----------
+        chip : Chip
+            Chip whose device labels must contain every port target.
+        """
         for port in self._ports:
             port.resolve_targets(chip)
 
@@ -861,7 +1170,13 @@ class PortNetwork:
     def resolve(
         self, base: "ResolvedSLH", *, _compiled: _CompiledNetwork | None = None,
     ) -> "ResolvedSLH":
-        """Compose this boundary onto port channels in an input-free SLH value."""
+        """Compose this boundary onto an input-free SLH value.
+
+        Parameters
+        ----------
+        base : ResolvedSLH
+            Resolved quantum-port channels to compose with the network.
+        """
         from quchip.engine.ir import (
             CollapseTerm,
             HamiltonianProgram,
@@ -1033,7 +1348,13 @@ class PortNetwork:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "PortNetwork":
-        """Reconstruct a static network produced by :meth:`to_dict`."""
+        """Reconstruct a static network produced by :meth:`to_dict`.
+
+        Parameters
+        ----------
+        data : mapping
+            Serialized network payload.
+        """
         unknown = set(data) - {
             "label",
             "ports",
@@ -1296,6 +1617,11 @@ class PortNetwork:
         coordinates but leaves the summed Lindbladian invariant. Each
         downstream/upstream coupling pair generated by SLH series composition
         contributes the union of its two quantum-port supports.
+
+        Parameters
+        ----------
+        chip : Chip
+            Chip used to resolve port target supports.
         """
         supports = {
             port.label: port.resolve_targets(chip)
@@ -1318,6 +1644,13 @@ class PortNetwork:
         Each coefficient combines the scattering entry from the exposure to a
         channel with that port's weight in the channel. A coherent input ``β``
         therefore reaches the port coupling as ``c = coefficient · β``.
+
+        Parameters
+        ----------
+        chip : Chip
+            Chip used to resolve the network boundary.
+        exposure : str
+            External input reference-plane label.
         """
         compiled = self._compile() if _compiled is None else _compiled
         labels = [item.exposure.label for item in compiled.channels]

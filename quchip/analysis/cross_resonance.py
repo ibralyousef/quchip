@@ -310,6 +310,23 @@ class CRHamiltonianResult:
     ``params_ctrl0`` / ``params_ctrl1`` hold the raw per-control-state fit
     output ``[px, py, pz, td, bx, by, bz]`` and are diagnostics only: they are
     in the fit's internal units (px/py/pz in Hz, td in seconds), not converted.
+
+    Attributes
+    ----------
+    IX, IY, IZ, ZX, ZY, ZZ : float
+        Fitted ordinary-frequency coefficients in GHz.
+    IX_err, IY_err, IZ_err, ZX_err, ZY_err, ZZ_err : float or None
+        Local residual-scaled uncertainty estimates in GHz.
+    params_ctrl0, params_ctrl1 : ndarray or None
+        Raw fit parameters for the two control states.
+    cov_ctrl0, cov_ctrl1 : ndarray or None
+        Raw local covariance matrices.
+    cost_ctrl0, cost_ctrl1 : float or None
+        Least-squares costs.
+    converged : bool or None
+        Fit convergence status.
+    message : str
+        Solver status message.
     """
 
     IX: float

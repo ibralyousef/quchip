@@ -51,6 +51,22 @@ python -m mypy quchip tests/typing/external_declarative_models.py
 
 Ruff uses a 120-character line limit. Public API docstrings use NumPy-style sections and imperative summaries ending with periods. Every test has a one-line docstring stating the invariant under test.
 
+Document every public constructor, function, and method parameter, including
+keyword-only and inherited arguments. Give accepted forms, defaults, units,
+allowed choices or ranges, and the meaning of `None` where applicable. Expand
+forwarded options or link to their precise contract. Keep descriptions short;
+put equations and derivations in `Notes`, with primary physics references.
+Describe result attributes and return values with shapes, axis order, and units.
+
+With the docs extra installed, run `python tools/check_api_docs.py` to detect
+missing descriptions and obsolete parameter names on package exports and the
+returned types listed in that tool. This checks structure; review numerical
+conventions and references against the implementation, then inspect rendered
+API pages. A successful Sphinx build alone does not establish completeness.
+The check includes the dynamiqs backend when that extra is installed. The docs
+job installs `.[docs,dynamiqs]` so both backend implementations are inspected
+and the complete reference can be built with warnings treated as errors.
+
 ## Examples and notebooks
 
 The [guides](docs/guides/index.md) and [cookbook](docs/cookbook.md) explain how to use quchip, including model construction, parameter changes, sweeps and result interpretation. Follow the same workflows in contributed examples. [Writing examples](docs/contribute/writing-examples.md) covers organization, figures and numerical checks.

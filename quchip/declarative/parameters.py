@@ -41,6 +41,19 @@ class Parameter:
     """Metadata for a declared parameter's validation and serialization.
 
     Sign constraints apply to concrete scalars; traced values pass unchecked.
+
+    Parameters
+    ----------
+    default : Any, default ``UNBOUND``
+        Constructor default; ``UNBOUND`` makes the field required.
+    positive, nonnegative : bool, default False
+        Reject concrete values outside the selected sign constraint.
+    serialize : bool, default True
+        Include the field in serialized model data.
+    unit, symbol : str or None
+        Display metadata for units and mathematical notation.
+    noise, kw_only, required : bool
+        Mark noise fields, force keyword-only construction, or require a value.
     """
 
     default: Any = UNBOUND
@@ -56,7 +69,17 @@ class Parameter:
 
 @dataclass(frozen=True)
 class Setting:
-    """Metadata for a serialized, non-traceable structural model choice."""
+    """Metadata for a serialized, non-traceable structural model choice.
+
+    Parameters
+    ----------
+    default : Any, default ``UNBOUND``
+        Structural default; ``UNBOUND`` makes the setting required.
+    serialize : bool, default True
+        Include the setting in serialized model data.
+    kw_only : bool, default True
+        Must remain true because settings are structural choices.
+    """
 
     default: Any = UNBOUND
     serialize: bool = True
@@ -121,6 +144,8 @@ def parameter(
     noise : bool, optional
         Whether :meth:`Chip.set_noise` may configure this field while its
         current value is unset.
+    kw_only : bool, optional
+        Place the declared field after the ``*`` in synthesized constructors.
 
     Examples
     --------
@@ -147,7 +172,17 @@ def parameter(
 
 
 def setting(*, default: Any = UNBOUND, serialize: bool = True, kw_only: bool = True) -> Any:
-    """Declare serialized structural configuration on a model class."""
+    """Declare serialized structural configuration on a model class.
+
+    Parameters
+    ----------
+    default : Any, default ``UNBOUND``
+        Structural default; omission makes the setting required.
+    serialize : bool, default True
+        Include the setting in serialized data.
+    kw_only : bool, default True
+        Must remain true for structural settings.
+    """
     if not kw_only:
         raise ValueError("Declarative settings are keyword-only.")
     return Setting(default=default, serialize=serialize, kw_only=kw_only)

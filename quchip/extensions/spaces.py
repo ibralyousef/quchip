@@ -34,7 +34,28 @@ def _spin_operators() -> dict[str, Any]:
 
 
 class SpinHalf(DeviceModel):
-    """Two-level spin with a user-defined local operator vocabulary."""
+    r"""Two-level spin with a user-defined local operator vocabulary.
+
+    The local Hamiltonian is :math:`H=-\omega\sigma_z/2`, with ordinary
+    frequency ``freq`` in GHz.
+
+    Parameters
+    ----------
+    freq : float
+        Transition frequency :math:`\omega` in GHz; positive.
+    basis : {None, "native", "eigen"}, keyword-only
+        Solver basis request. ``None`` uses the chip default.
+    levels : int, default 2
+        Must remain exactly 2.
+    label : str or None, default None
+        Device label.
+    T1 : float or None, default None
+        Energy-relaxation time in ns; ``None`` disables T1 relaxation.
+    T2 : float or None, default None
+        Total 0-1 coherence time in ns; if both are set, ``T2 <= 2*T1``.
+    thermal_occupation : float or None, default None
+        Dimensionless mean bath occupation; ``None`` disables absorption.
+    """
 
     _type_prefix = "spin_half"
     _default_levels = 2

@@ -117,11 +117,9 @@ class DynamiqsBackend(Backend):
 
     @property
     def array_module(self) -> Any:
-        """Return the array module for JAX-traceable numeric code (``jax.numpy``)."""
         return jnp
 
     def to_array(self, op: Operator) -> Any:
-        """Return a dense ``jax.numpy`` array for *op*."""
         if hasattr(op, "to_jax"):
             return jnp.asarray(op.to_jax(), dtype=jnp.complex128)
         if hasattr(op, "full"):
@@ -129,26 +127,26 @@ class DynamiqsBackend(Backend):
         return jnp.asarray(op, dtype=jnp.complex128)
 
     def overlap(self, a: State, b: State) -> complex:
-        """Return the complex inner product ⟨a|b⟩ for two kets, via ``dynamiqs.braket``.
-
-        ``dynamiqs.overlap`` returns the real-valued :math:`|\\langle a|b
-        \\rangle|^2` (or a density-matrix fidelity), not the protocol's
-        phase-sensitive complex inner product — ``dq.braket`` is the
-        matching primitive.
-        """
         return dq.braket(a, b)
 
     def norm(self, state_or_op: State | Operator) -> Any:
-        """Return the norm of a state or operator via ``dynamiqs.norm``.
+        r"""Return the native dynamiqs norm with its default PSD assumption.
 
-        Returns the backend-native (possibly traced) scalar rather than a
-        concrete ``float`` — the protocol allows a 0-d array here so a
-        traced amplitude stays traceable under ``jax.jit``/``grad``.
+        Parameters
+        ----------
+        state_or_op : QArray
+            Ket or bra for the Euclidean norm, or a positive-semidefinite matrix
+            for its real trace. General indefinite operators are outside this hook's
+            matrix convention.
+
+        Returns
+        -------
+        jax.Array
+            Native scalar; traced inputs retain their gradients.
         """
         return dq.norm(state_or_op)
 
     def trace(self, op: Operator) -> complex:
-        """Return the scalar trace ``Tr(op)`` via ``dynamiqs.trace``."""
         return dq.trace(op)
 
     # ------------------------------------------------------------------
@@ -156,12 +154,7 @@ class DynamiqsBackend(Backend):
     # ------------------------------------------------------------------
 
     def eager_operators(self) -> Any:
-        """Use dense dynamiqs operators during JAX compile-time evaluation.
-
-        Sparse-diagonal validation cannot run inside
-        ``jax.ensure_compile_time_eval``. This context restores the previous
-        global layout on exit.
-        """
+        """Temporarily use dense Dynamiqs operators, then restore the global layout."""
         from contextlib import contextmanager
 
         from dynamiqs.qarrays.layout import get_layout, set_global_layout
@@ -178,23 +171,19 @@ class DynamiqsBackend(Backend):
         return dense_layout()
 
     def destroy(self, n: int) -> Operator:
-        """Return the annihilation operator for an *n*-level Fock space (``dynamiqs.destroy``)."""
         return dq.destroy(n)
 
     def create(self, n: int) -> Operator:
-        """Return the creation operator for an *n*-level Fock space (``dynamiqs.create``)."""
         return dq.create(n)
 
     def number(self, n: int) -> Operator:
-        """Return the number operator for an *n*-level Fock space (``dynamiqs.number``)."""
         return dq.number(n)
 
     def identity(self, n: int) -> Operator:
-        """Return the identity operator for an *n*-level space (``dynamiqs.eye``)."""
         return dq.eye(n)
 
     def diag(self, values: Any, dims: list[list[int]] | None = None) -> Operator:
-        """Build a backend-native sparse-DIA diagonal operator from main-diagonal *values*.
+        r"""Build a backend-native sparse-DIA diagonal operator from main-diagonal *values*.
 
         Overrides the protocol default to keep the operator in sparse-DIA
         layout even when *values* is a JAX tracer — the offsets ``(0,)`` are
@@ -203,6 +192,17 @@ class DynamiqsBackend(Backend):
         ``from_canonical_operator`` densifies any traced DIA payload, which
         forces a dense ``H₀`` for circuit-style devices and triggers the
         sparse→dense warning during static-Hamiltonian assembly.
+
+        Parameters
+        ----------
+        values : array_like
+            Main-diagonal entries, flattened in input order.
+        dims : list or None, default None
+            Subsystem dimensions as in from_array; None uses one subsystem.
+
+        See Also
+        --------
+        quchip.backend.protocol.Backend.diag
         """
         v = jnp.asarray(values, dtype=jnp.complex128).reshape(-1)
         n = v.shape[0]
@@ -212,7 +212,6 @@ class DynamiqsBackend(Backend):
         return SparseDIAQArray(dim_tuple, False, (0,), v[None, :])
 
     def from_array(self, data: Any, dims: list[list[int]] | None = None) -> Operator:
-        """Construct a native operator, preserving native sparse storage."""
         if isinstance(data, (DenseQArray, SparseDIAQArray)):
             dims_tuple = self._coerce_dims(dims, data.shape)
             if dims_tuple is None or dims_tuple == data.dims:
@@ -231,7 +230,6 @@ class DynamiqsBackend(Backend):
         return dq.asqarray(array, dims=dims_tuple)
 
     def to_canonical_operator(self, op: Operator) -> Any:
-        """Serialize a ``QArray`` into the backend-agnostic canonical IR."""
         from quchip.engine.ir import CanonicalOperator
 
         # getattr's default must stay lazy: to_array densifies a SparseDIA
@@ -258,7 +256,6 @@ class DynamiqsBackend(Backend):
         )
 
     def from_canonical_operator(self, canonical: Any) -> Operator:
-        """Reconstruct a ``QArray`` from the canonical IR payload (dense/DIA/COO)."""
         dims = tuple(canonical.dims)
         if canonical.layout == "dense":
             return dq.asqarray(jnp.asarray(canonical.values, dtype=jnp.complex128), dims=dims)
@@ -283,19 +280,15 @@ class DynamiqsBackend(Backend):
         return self._sparse_qarray_from_coo(rows, cols, values, dims)
 
     def coerce_operator(self, op: Operator) -> Operator:
-        """Pass *op* through unchanged (trace-safe): native operators are (JAX) arrays already."""
         return self.to_array(op)
 
     def dag(self, op: Operator) -> Operator:
-        """Return the Hermitian conjugate ``op†`` via ``dynamiqs.dag``."""
         return dq.dag(op)
 
     def eigenenergies(self, op: Operator) -> Any:
-        """Return the ascending eigenvalues of a Hermitian operator (``jax.numpy.linalg.eigvalsh``)."""
         return jnp.linalg.eigvalsh(self.to_array(op))
 
     def eigensystem_data(self, op: Operator) -> EigensystemData:
-        """Return ascending eigenvalues, eigenvector matrix, and lazily built eigenstate kets."""
         dense = self.to_array(op)
         evals, evecs = jnp.linalg.eigh(dense)
         dims = getattr(op, "dims", (dense.shape[0],))
@@ -314,11 +307,9 @@ class DynamiqsBackend(Backend):
         )
 
     def expect(self, op: Operator, state: State) -> complex:
-        """Return the expectation value ⟨op⟩ for a ket or density matrix via ``dynamiqs.expect``."""
         return dq.expect(op, state)
 
     def ptrace(self, state: State, keep: int | list[int], dims: list[int]) -> State:
-        """Reduce onto subsystem(s) *keep* via ``dynamiqs.ptrace`` (partial trace)."""
         keep_arg = tuple(keep) if isinstance(keep, list) else keep
         return dq.ptrace(state, keep_arg, dims=tuple(dims))
 
@@ -333,13 +324,11 @@ class DynamiqsBackend(Backend):
     # a single jnp pytree (strictly more traceable than a list of tracers).
 
     def stack_states(self, states: Any) -> Any:
-        """Pass the native stacked ``QArray`` through; restack a list if needed."""
         if hasattr(states, "shape") and not isinstance(states, (list, tuple)):
             return states
         return self._stack_qarray_batch(list(states))
 
     def expect_over_time(self, op: Operator, stacked_states: Any) -> Any:
-        """Return ⟨op⟩(t) at every save point via a single batched ``dynamiqs.expect`` call."""
         # Native dq.expect fast path; the generic protocol overlap/populations
         # extractors are already array-namespace-parameterized (jnp here), so
         # they need no dynamiqs override — and overlap stays the complex
@@ -347,13 +336,11 @@ class DynamiqsBackend(Backend):
         return jnp.asarray(dq.expect(op, stacked_states))
 
     def ptrace_over_time(self, stacked_states: Any, keep: int | list[int], dims: list[int]) -> Any:
-        """Reduce onto subsystem(s) *keep* at every save point (partial trace, batched ``dynamiqs.ptrace``)."""
         keep_arg = tuple(keep) if isinstance(keep, list) else keep
         reduced = dq.ptrace(stacked_states, keep_arg, dims=tuple(dims))
         return jnp.asarray(reduced.to_jax(), dtype=jnp.complex128)
 
     def tensor(self, *operators: Operator) -> Operator:
-        """Return the tensor product of operators via ``dynamiqs.tensor`` (pass-through for one factor)."""
         if len(operators) == 1:
             return operators[0]
         return dq.tensor(*operators)
@@ -369,11 +356,6 @@ class DynamiqsBackend(Backend):
         index_b: int,
         dims: Sequence[int],
     ) -> Operator:
-        """Embed a two-body operator on devices *index_a* ⊗ *index_b* into the full space.
-
-        Keeps a sparse operator sparse; a dense operator is reordered, padded
-        with identities, and permuted back to the original subsystem order.
-        """
         canonical = self.to_canonical_operator(op_ab)
         if canonical.is_sparse:
             return self._embed_two_body_sparse(canonical, index_a, index_b, dims)
@@ -398,33 +380,27 @@ class DynamiqsBackend(Backend):
         return dq.asqarray(restored, dims=tuple(dims))
 
     def basis(self, n: int, k: int) -> State:
-        """Return the Fock basis ket |k⟩ in an *n*-level space (``dynamiqs.basis``)."""
         return dq.basis(n, k)
 
     def tensor_states(self, *states: State) -> State:
-        """Return the tensor product of states via ``dynamiqs.tensor`` (pass-through for one state)."""
         if len(states) == 1:
             return states[0]
         return dq.tensor(*states)
 
     def coherent(self, n: int, alpha: complex) -> State:
-        """Return the coherent state |α⟩ truncated to *n* Fock levels (``dynamiqs.coherent``)."""
         return dq.coherent(n, alpha)
 
     def state_to_dm(self, state: State) -> State:
-        """Return a density matrix; pass through if *state* is already one."""
         if not self.is_ket(state):
             return state
         column = self.coerce_state(state)
         return column @ dq.dag(column)
 
     def is_ket(self, state: State) -> bool:
-        """Return whether *state* is a ket (flat or column vector) rather than a density matrix."""
         shape = tuple(state.shape)
         return len(shape) == 1 or (len(shape) == 2 and shape[1] == 1)
 
     def is_native_state(self, state: Any) -> bool:
-        """Return whether *state* is a Dynamiqs quantum array."""
         return isinstance(state, dq.QArray)
 
     # ------------------------------------------------------------------
@@ -438,20 +414,28 @@ class DynamiqsBackend(Backend):
         metadata: dict[str, Any],
         tlist: Any,
     ) -> dict[str, Any]:
-        """Normalize quchip aliases and fill in a ``max_steps`` budget.
+        r"""Validate dynamiqs integration options and fill the default step budget.
 
-        The quchip option aliases (``progress_bar`` → ``progress_meter``,
-        ``nsteps`` → ``max_steps``) are mapped onto dynamiqs' canonical names
-        by :meth:`_normalize_dq_options`. When ``max_steps`` is still unset,
-        it is derived by :func:`~quchip.backend._dims.default_solver_steps`
-        (see that function's docstring for the heuristic) — the same
-        heuristic the QuTiP backend uses.
+        Parameters
+        ----------
+        options : dict
+            Supported keys: ``method`` (native deterministic dynamiqs method),
+            ``gradient`` (native gradient configuration), ``max_steps`` (integer
+            ceiling), ``progress_meter``, ``store_states``, and ``store_final_state``.
+            ``nsteps`` aliases ``max_steps``; ``progress_bar`` aliases
+            ``progress_meter``. Do not supply an alias and its canonical key together.
+            Set tolerances on the native ``method`` object. With an explicit method,
+            set its step limit there instead of also passing ``max_steps`` here.
+            Monte Carlo methods and unrecognized keys are rejected.
+        metadata : dict
+            Lowering hints, including ordinary-GHz spectral/carrier bounds.
+        tlist : array_like
+            Save-time grid in ns used to estimate integration budgets.
 
-        ``max_steps`` limits the total internal step count. Pulse edges are
-        supplied separately through the native Hamiltonian's discontinuities,
-        so adaptive integration visits short pulses even inside long idles.
-        The deterministic adaptive methods expose no ``max_step`` option;
-        their tolerances and supported native method choices remain explicit.
+        Returns
+        -------
+        dict
+            Copied options with missing integration defaults filled.
         """
         resolved = self._normalize_dq_options(options)
         if "max_steps" not in resolved and resolved.get("method") is None:
@@ -496,13 +480,6 @@ class DynamiqsBackend(Backend):
         return resolved
 
     def coerce_state(self, state: State, dims: tuple[int, ...] | None = None) -> State:
-        """Convert a QuTiP ``Qobj`` state into a dimensioned dynamiqs qarray.
-
-        Used when a per-call ``backend="dynamiqs"`` override consumes initial
-        states built under the QuTiP backend (``chip.state(...)`` before the
-        call). Composite subsystem dimensions must survive the conversion:
-        dynamiqs checks them when multiplying the Hamiltonian by the state.
-        """
         if hasattr(state, "full"):  # qutip.Qobj duck-type; no qutip import needed
             return dq.asqarray(state, dims=dims)
         if len(tuple(state.shape)) == 1:  # flat native ket: dynamiqs solvers need a column
@@ -522,7 +499,6 @@ class DynamiqsBackend(Backend):
         e_ops: list[Operator] | None = None,
         options: dict[str, Any] | None = None,
     ) -> SolverResult:
-        """Solve the Schrödinger equation via ``dynamiqs.sesolve`` (JAX-traced)."""
         result = dq.sesolve(
             H, psi0, jnp.asarray(tlist, dtype=float),
             **self._solve_kwargs(e_ops, options),
@@ -538,7 +514,6 @@ class DynamiqsBackend(Backend):
         e_ops: list[Operator] | None = None,
         options: dict[str, Any] | None = None,
     ) -> SolverResult:
-        """Solve the Lindblad master equation via ``dynamiqs.mesolve`` (JAX-traced)."""
         result = dq.mesolve(
             H, [] if c_ops is None else c_ops, rho0, jnp.asarray(tlist, dtype=float),
             **self._solve_kwargs(e_ops, options),
@@ -554,7 +529,30 @@ class DynamiqsBackend(Backend):
         return self.to_array(dq.slindbladian(hamiltonian, collapse_ops))
 
     def steadystate(self, problem: Any, *, prepared: PreparedStationary | None = None) -> SteadyStateSolverResult:
-        """Solve a static Lindblad generator by a trace-constrained JAX solve."""
+        r"""Solve a static Lindblad generator by a trace-constrained JAX solve.
+
+        Parameters
+        ----------
+        problem : SteadyStateProblem
+            Captured static model, observables, and stationary solver options.
+        prepared : PreparedStationary or None, default None
+            Matching prepared generator; ``None`` builds it.
+
+        Returns
+        -------
+        SteadyStateSolverResult
+            Stationary density matrix and convergence diagnostics.
+
+        See Also
+        --------
+        quchip.backend.protocol.Backend.steadystate
+
+        Notes
+        -----
+        ``problem.options`` accepts only ``method="direct"`` and
+        ``rank_tolerance`` (singular-value cutoff, default automatic). A nonunique
+        stationary kernel produces a NaN state; inspect the returned nullity.
+        """
         options = dict(problem.options)
         method = options.pop("method", "direct")
         if method != "direct":
@@ -609,7 +607,6 @@ class DynamiqsBackend(Backend):
         return stationary_condition_number(liouvillian, math.prod(engine_result.dims), xp=jnp)
 
     def linear_response(self, problem: Any) -> LinearResponseSolverResult:
-        """Solve passive-linear scattering with batched JAX mode matrices."""
         return linear_response(problem, xp=jnp)
 
     def stationary_resolvent(
@@ -621,7 +618,6 @@ class DynamiqsBackend(Backend):
         *,
         prepared: PreparedStationary | None = None,
     ) -> dict[tuple[str, str], Any]:
-        """Evaluate stationary resolvents with Dynamiqs' JAX Liouvillian."""
         liouvillian = self.prepare_stationary(engine_result, prepared=prepared).liouvillian
         dimension = math.prod(engine_result.dims)
         targets = jnp.stack(
@@ -663,7 +659,6 @@ class DynamiqsBackend(Backend):
         *,
         prepared: PreparedStationary | None = None,
     ) -> dict[str, Any]:
-        """Propagate regression operators with Dynamiqs' JAX Liouvillian."""
         liouvillian = self.prepare_stationary(engine_result, prepared=prepared).liouvillian
         dimension = math.prod(engine_result.dims)
         initial_vector = jnp.asarray(initial.to_dense(), dtype=jnp.complex128).T.reshape(-1)
@@ -721,13 +716,6 @@ class DynamiqsBackend(Backend):
         return cache
 
     def solve_problem(self, problem: Any) -> SolverResult:
-        """Lower and solve a single :class:`SolveProblem` via a cached jitted solve.
-
-        Falls back to the protocol default (one-shot ``prepare_hamiltonian`` +
-        ``sesolve``/``mesolve``) whenever the engine result contains a dynamic
-        term that is not a :class:`ScalarModulation` (the cached path can only
-        rebuild ``ScalarModulation`` signals).
-        """
         engine_result = problem.engine_result
         if not self._engine_result_is_cacheable(engine_result):
             return super().solve_problem(problem)
@@ -907,13 +895,29 @@ class DynamiqsBackend(Backend):
         engine_result: Any,
         tlist: Any | None = None,
     ) -> PreparedHamiltonian:
-        """Convert a :class:`EngineResult` into a dynamiqs native RHS.
+        r"""Convert a :class:`EngineResult` into a dynamiqs native RHS.
 
         Static terms are summed as qarrays; dynamic terms with
         ``ScalarModulation`` time-dependence are wrapped via
         ``dynamiqs.modulated`` with a JAX-traceable :class:`_SignalCallable`.
         ``tlist`` is passed through in metadata but not used for sampling —
         dynamiqs evaluates callables on the integrator's adaptive grid.
+
+        Parameters
+        ----------
+        engine_result : EngineResult
+            Captured engine Hamiltonian and channels in solver units.
+        tlist : array_like
+            Requested save times in ns, used by native time-dependent lowering.
+
+        Returns
+        -------
+        PreparedHamiltonian
+            Native right-hand side and numerical integration hints.
+
+        See Also
+        --------
+        quchip.backend.protocol.Backend.prepare_hamiltonian
         """
         static_ops = [
             self.from_canonical_operator(term.operator)
@@ -958,7 +962,7 @@ class DynamiqsBackend(Backend):
         return rhs
 
     def prepare_batch(self, batch: Any) -> DeferredBatch:
-        """Lower compatible problems into stable leaves for one vmapped solve.
+        r"""Lower compatible problems into stable leaves for one vmapped solve.
 
         Shared operators (static + per-slot dynamic) are converted exactly
         once via an id-keyed cache. For each dynamic slot, the per-element
@@ -973,6 +977,20 @@ class DynamiqsBackend(Backend):
         ValueError
             If a slot contains heterogeneous pytree structures (cannot be
             stacked) or a non-``ScalarModulation`` time dependence.
+
+        Parameters
+        ----------
+        batch : SolveBatch
+            Batch of captured problems with compatible save grids.
+
+        Returns
+        -------
+        PreparedBatch
+            Eager, native-vectorized, or deferred representation selected by this backend.
+
+        See Also
+        --------
+        quchip.backend.protocol.Backend.prepare_batch
         """
         engine_results = tuple(problem.engine_result for problem in batch.problems)
         cached_native = self._make_op_cache()
@@ -1036,11 +1054,27 @@ class DynamiqsBackend(Backend):
         )
 
     def solve_batch(self, batch: Any, *, progress: bool = True) -> list[SolverResult]:
-        """Solve a :class:`SolveBatch` via a single native dynamiqs vmap.
+        r"""Solve a :class:`SolveBatch` via a single native dynamiqs vmap.
 
         Raises :class:`RuntimeError` when the batch is not structurally
         homogeneous — no silent fallback. Callers with heterogeneous inputs
         should regroup through :func:`quchip.engine.solve_many`.
+
+        Parameters
+        ----------
+        batch : SolveBatch
+            Captured problems and batch parameter values.
+        progress : bool, default True
+            Request a batch progress display.
+
+        Returns
+        -------
+        list of SolverResult
+            Results in batch order.
+
+        See Also
+        --------
+        quchip.backend.protocol.Backend.solve_batch
         """
         if batch.batch_size == 0:
             return []
