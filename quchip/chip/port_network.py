@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 
 from quchip.chip.ports import Port
-from quchip.engine.field_noise import amplifier_values, attenuation_value, noise_parameters, occupation_value
+from quchip.engine.field_noise import amplifier_values, attenuation_value, noise_parameters, thermal_occupation_value
 from quchip.engine.reference import (
     FieldChannel,
     ReferenceAmplifier,
@@ -562,15 +562,14 @@ class PortNetwork:
         return self._permutation_component(label, names, order, kind="permutation", sided=False)
 
     def attenuator(
-        self, label: str, *, eta: Any = None, loss_db: Any = None, occupation: Any = None,
-        temperature: Any = None, noise_frequency: Any = None,
+        self, label: str, *, eta: Any = None, loss_db: Any = None, thermal_occupation: Any = None,
     ) -> SLHComponent:
         """Add a reciprocal two-sided attenuator with power transmission ``eta``.
 
         Each direction has amplitude transmission ``sqrt(eta)`` and couples to
         one of two hidden loss channels with amplitude ``sqrt(1-eta)``.
-        They default to vacuum. Declare occupation, or temperature in mK with
-        noise_frequency in GHz, to give both loads a thermal state.
+        They default to vacuum. ``thermal_occupation`` gives both loads a mean
+        thermal population in quanta, constant across the modeled band.
         Specify either power transmission ``eta`` or positive ``loss_db``.
         """
         power = {key: value for key, value in (("eta", eta), ("loss_db", loss_db)) if value is not None}
@@ -588,8 +587,7 @@ class PortNetwork:
             ),
             _row_inputs=((1, 3), (0, 2), (0, 2), (1, 3)),
             _kind="attenuator",
-            _parameters={**power, **noise_parameters(
-                occupation=occupation, temperature=temperature, noise_frequency=noise_frequency)},
+            _parameters={**power, **noise_parameters(thermal_occupation)},
         )
         return self._add_component(component)
 
@@ -609,8 +607,8 @@ class PortNetwork:
         return self._reference_component(label, kind="delay", parameters={"duration": duration})
 
     def filter(
-        self, label: str, *, transfer: Callable[..., Any], loss_occupation: Any = None,
-        loss_temperature: Any = None, noise_frequency: Any = None, **parameters: Any,
+        self, label: str, *, transfer: Callable[..., Any], thermal_occupation: Any = None,
+        **parameters: Any,
     ) -> SLHComponent:
         """Add a two-sided passive filter reference section.
 
@@ -627,21 +625,17 @@ class PortNetwork:
         serialized with :meth:`to_dict`; ``Chip.clone()`` and ``Chip.with_params()``
         preserve the callable.
 
-        Declare loss_occupation, or loss_temperature in mK with noise_frequency
-        in GHz, for a matched absorptive realization emitting (1-|H|²)n.
+        Declare ``thermal_occupation`` in quanta, constant across the modeled
+        band, for a matched absorptive realization emitting (1-|H|²)n.
         A scalar transfer alone does not distinguish absorption from reflection.
         Colored thermal emission cannot feed a quantum coupling through a
         reference section; use a dynamical filter/bath model for that case.
         """
-        noise = noise_parameters(occupation=loss_occupation, temperature=loss_temperature,
-                                 noise_frequency=noise_frequency)
-        parameters.update({f"loss_{name}" if name != "noise_frequency" else name: value
-                           for name, value in noise.items()})
+        parameters.update(noise_parameters(thermal_occupation))
         return self._reference_component(label, kind="filter", parameters=dict(parameters), transfer=transfer)
 
     def amplifier(
-        self, label: str, *, gain: Any = None, gain_db: Any = None, added_noise: Any = None,
-        noise_temperature: Any = None, noise_figure_db: Any = None, noise_frequency: Any = None,
+        self, label: str, *, added_noise: Any, gain: Any = None, gain_db: Any = None,
     ) -> SLHComponent:
         """Add a phase-preserving amplifier reference section to an output line.
 
@@ -658,17 +652,11 @@ class PortNetwork:
         noise. The section remains outside Markovian ``S``, ``L``, and
         ``H`` and serializes normally.
 
-        Alternatively specify ``gain_db`` and either ``noise_temperature``
-        (equivalent input noise temperature in mK) or ``noise_figure_db``
-        (290 K reference). Both require ``noise_frequency`` in GHz to convert
-        to added quanta. Equivalent temperature uses kT/hf, not the Planck
-        occupation of a physical thermal load. Authored conventions remain
-        parameter paths for rebinding and serialization.
+        ``gain_db`` may replace linear ``gain``. Added quanta are constant
+        across the modeled band and exclude the input's own noise.
         """
         parameters = {key: value for key, value in (
-            ("gain", gain), ("gain_db", gain_db), ("added_noise", added_noise),
-            ("noise_temperature", noise_temperature), ("noise_figure_db", noise_figure_db),
-            ("noise_frequency", noise_frequency)) if value is not None}
+            ("gain", gain), ("gain_db", gain_db), ("added_noise", added_noise)) if value is not None}
         ReferenceAmplifier(label, *amplifier_values(parameters))
         return self._reference_component(
             label, kind="amplifier", parameters=parameters,
@@ -703,13 +691,13 @@ class PortNetwork:
         return self._permutation_component(label, names, sources, kind="circulator")
 
     def isolator(
-        self, label: str, *, occupation: Any = None,
-        temperature: Any = None, noise_frequency: Any = None,
+        self, label: str, *, thermal_occupation: Any = None,
     ) -> SLHComponent:
         """Add an ideal isolator routing side 1 to side 2.
 
-        The reverse field is dumped into ``hidden.<label>.load``, whose vacuum
-        travels back toward side 1.
+        The reverse field is dumped into ``hidden.<label>.load``. Its thermal
+        population travels back toward side 1. ``thermal_occupation`` is in
+        quanta, constant across the modeled band; the default is vacuum.
         """
         component = self._permutation_component(
             label,
@@ -718,25 +706,22 @@ class PortNetwork:
             kind="isolator",
             hidden_pairs=(("load", "load", f"hidden.{label}.load"),),
         )
-        component._parameters.update(noise_parameters(
-            occupation=occupation, temperature=temperature, noise_frequency=noise_frequency))
+        component._parameters.update(noise_parameters(thermal_occupation))
         return component
 
     def termination(
-        self, label: str, *, occupation: Any = None,
-        temperature: Any = None, noise_frequency: Any = None,
+        self, label: str, *, thermal_occupation: Any = None,
     ) -> SLHComponent:
         """Add a matched one-sided load with an optional thermal input state.
 
-        Specify occupation directly, or temperature in mK and the positive
-        physical noise_frequency in GHz defining the Markov occupation.
+        ``thermal_occupation`` is the mean thermal population in quanta,
+        constant across the modeled band. The default is vacuum.
         """
         component = self._permutation_component(
             label, ("1", "load"), (1, 0), kind="termination",
             hidden_pairs=(("load", "load", f"hidden.{label}.load"),),
         )
-        component._parameters.update(noise_parameters(
-            occupation=occupation, temperature=temperature, noise_frequency=noise_frequency))
+        component._parameters.update(noise_parameters(thermal_occupation))
         return component
 
     def _permutation_component(
@@ -972,7 +957,7 @@ class PortNetwork:
         fields = []
         for index, entry in enumerate(compiled.channels):
             exposure = entry.exposure
-            occupation = (occupation_value(self._components[exposure._input_key[0]]._parameters)
+            occupation = (thermal_occupation_value(self._components[exposure._input_key[0]]._parameters)
                           if exposure._hidden else None)
             inbound = entry.reference.inbound
             if has_colored_noise(inbound):
@@ -1524,13 +1509,11 @@ class PortNetwork:
         if kind in {"attenuator", "isolator"}:
             assert output_side is not None
             eta = attenuation_value(parameters) if kind == "attenuator" else float(output_side == "2")
-            return ReferenceLoss(label, eta, occupation_value(parameters))
+            return ReferenceLoss(label, eta, thermal_occupation_value(parameters))
         assert component._transfer is not None
-        noise = occupation_value({name: parameters[key] for name, key in
-                                  (("occupation", "loss_occupation"), ("temperature", "loss_temperature"),
-                                   ("noise_frequency", "noise_frequency")) if key in parameters})
+        noise = thermal_occupation_value(parameters)
         transfer_parameters = {name: value for name, value in parameters.items()
-                               if name not in {"loss_occupation", "loss_temperature", "noise_frequency"}}
+                               if name != "thermal_occupation"}
         return ReferenceFilter(label, component._transfer, MappingProxyType(transfer_parameters),
                                noise)
 

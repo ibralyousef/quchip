@@ -160,7 +160,7 @@ def wired_result(*, backend="qutip", gain=100., noise=1., loss=.25):
     port = net.port("p", target=r, rate=.04)
     circ = net.circulator("circ")
     amp = net.amplifier("hemt", gain=gain, added_noise=noise)
-    attenuator = net.attenuator("cable", eta=loss, occupation=.2)
+    attenuator = net.attenuator("cable", eta=loss, thermal_occupation=.2)
     net.link(port, circ.port(2))
     net.link(circ.port(3), amp, attenuator)
     drive = net.expose("drive", at=circ.port(1))
@@ -297,7 +297,7 @@ def test_bandpass_noise_and_partitioned_wiring_forwarding():
     p = net.port("p", target=r, rate=.04)
     circ = net.circulator("circ")
     filt = net.filter("bandpass", transfer=lambda f: np.where((f >= 4) & (f <= 8), 1., 0.),
-                      loss_occupation=.2)
+                      thermal_occupation=.2)
     amp = net.amplifier("hemt", gain=100., added_noise=1.)
     net.link(p, circ.port(2))
     net.link(circ.port(3), filt, amp)
