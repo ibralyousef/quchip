@@ -14,7 +14,39 @@ from quchip.devices.kerr_cavity import KerrCavity
 
 
 class FrequencyModulatedMode(FockDevice):
-    """Harmonic mode with a prescribed sinusoidal frequency variation."""
+    r"""Harmonic mode with a prescribed sinusoidal frequency variation.
+
+    The authored Hamiltonian is :math:`H_0=\omega_0 n` and the time term is
+    :math:`\delta\omega\cos(2\pi\nu_m t+\phi_m)n`; frequencies are ordinary
+    GHz and ``t`` is in ns.
+
+    Parameters
+    ----------
+    frequency : float
+        Bare mode frequency :math:`\omega_0` in GHz; positive.
+    modulation_amplitude : float
+        Frequency excursion :math:`\delta\omega` in GHz; may be signed.
+    modulation_frequency : float
+        Modulation frequency :math:`\nu_m` in GHz; positive.
+    modulation_phase : float, default 0.0
+        Phase :math:`\phi_m` in radians.
+    levels : int, default 10
+        Fock truncation dimension.
+    label : str or None, default None
+        Device label; ``None`` selects an automatic label.
+    T1 : float or None, default None
+        Energy-relaxation time in ns; ``None`` disables T1 relaxation.
+    T2 : float or None, default None
+        Total 0-1 coherence time in ns; if both are set, ``T2 <= 2*T1``.
+    thermal_occupation : float or None, default None
+        Dimensionless mean bath occupation; ``None`` disables absorption.
+
+    References
+    ----------
+    See Didier et al., *Phys. Rev. A* 97, 022330 (2018),
+    https://doi.org/10.1103/PhysRevA.97.022330, for parametrically modulated
+    transmon models.
+    """
 
     _type_prefix = "frequency_modulated_mode"
     _default_levels = 10
@@ -39,9 +71,27 @@ class FrequencyModulatedMode(FockDevice):
         return self.frequency
 
     def local_hamiltonian(self, op: LocalOps, p: Any) -> PhysicsExpr:
+        """Return the static harmonic Hamiltonian.
+
+        Parameters
+        ----------
+        op : LocalOps
+            Local operator namespace.
+        p : ParameterNamespace
+            Bound symbolic parameters.
+        """
         return p.frequency * op.n
 
     def time_terms(self, op: LocalOps, p: Any) -> tuple[TimeDependentTerm, ...]:
+        """Return the sinusoidal frequency-modulation term.
+
+        Parameters
+        ----------
+        op : LocalOps
+            Local operator namespace.
+        p : ParameterNamespace
+            Bound symbolic parameters.
+        """
         return (
             TimeDependentTerm(
                 operator=op.n,
@@ -55,7 +105,15 @@ class FrequencyModulatedMode(FockDevice):
 
 
 class LossyKerrCavity(KerrCavity):
-    """Kerr cavity with an intrinsic two-photon-loss channel."""
+    r"""Kerr cavity with an intrinsic two-photon-loss channel.
+
+    Parameters
+    ----------
+    two_photon_loss_rate : float
+        Non-negative two-photon Lindblad rate :math:`\kappa_2` in 1/ns.
+    freq, kerr, levels, label, T1, T2, thermal_occupation
+        Inherited :class:`~quchip.devices.kerr_cavity.KerrCavity` parameters.
+    """
 
     _type_prefix = "lossy_kerr_cavity"
 
@@ -69,6 +127,15 @@ class LossyKerrCavity(KerrCavity):
     )
 
     def dissipation(self, op: Any, p: Any) -> tuple[CollapseChannel, ...]:
+        """Return inherited channels plus two-photon loss at ``kappa_2``.
+
+        Parameters
+        ----------
+        op : LocalOps
+            Local operator namespace.
+        p : ParameterNamespace
+            Bound symbolic parameters.
+        """
         return super().dissipation(op, p) + (
             CollapseChannel(op.a @ op.a, p.two_photon_loss_rate, "two_photon_loss"),
         )

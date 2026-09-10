@@ -74,9 +74,12 @@ class KerrCavity(FockDevice):
     label : str | None
         Human-readable label.  ``None`` → auto-generated
         ``kerr_cavity_0``, ``kerr_cavity_1``, …
-    **noise_kwargs
-        Forwarded to :class:`~quchip.devices.base.BaseDevice`:
-        ``T1``, ``T2``, ``thermal_occupation``, etc.
+    T1 : float or None, default None
+        Energy-relaxation time in ns; ``None`` disables T1 relaxation.
+    T2 : float or None, default None
+        Total 0-1 coherence time in ns; if both are set, ``T2 <= 2*T1``.
+    thermal_occupation : float or None, default None
+        Dimensionless mean bath occupation; ``None`` disables absorption.
 
     Notes
     -----
@@ -131,7 +134,14 @@ class KerrCavity(FockDevice):
         PhysicsExpr
             Declarative expression for the Hermitian operator
             ``H = omega*n - K*n*(n-1)`` (GHz), diagonal in the Fock basis.
+        Parameters
+        ----------
+        op : LocalOps
+            Fock operator namespace.
+        p : ParameterNamespace
+            Symbolic ``freq`` and ``kerr`` values.
         """
+
         n = op.n
         return p.freq * n - p.kerr * (n @ (n - op.I))
 

@@ -10,7 +10,26 @@ from quchip.utils.labeling import resolve_label
 
 @dataclass(frozen=True)
 class OutputField:
-    r"""Request ``<b_out>`` and ``<b_out dagger b_out>`` at one exposure."""
+    r"""Request the mean field and photon flux at an exposed output.
+
+    Usually obtained as ``network.expose(...).output`` and supplied to
+    ``e_ops`` when building a simulation.
+
+    Parameters
+    ----------
+    exposure : str or NetworkPort
+        Exposed network port or its label. The calculation must contain it.
+
+    Attributes
+    ----------
+    exposure : str
+        Stored exposure label.
+
+    See Also
+    --------
+    quchip.results.results.OutputFieldTrace : Output moments, units, and conventions.
+    quchip.chip.port_network.PortNetwork : Input-output model and physics references.
+    """
 
     exposure: str
 

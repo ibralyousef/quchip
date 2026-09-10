@@ -44,6 +44,13 @@ class CoherentInput:
     The scheduled analytic signal is interpreted directly as
     ``beta(t) = A(t) exp(i theta) exp(-i 2*pi*f*t)`` in ``1/sqrt(ns)``.
     Consequently ``abs(beta)**2`` is photon flux in photons/ns.
+
+    Parameters
+    ----------
+    exposure : str or object
+        External network exposure label.
+    label : str, optional
+        Endpoint label; generated when omitted.
     """
 
     exposure: str
@@ -64,6 +71,14 @@ class CoherentInput:
         return self.exposure
 
     def signal(self, pulse: Any, target: Any = None) -> AnalyticSignal:
-        """Build beta from the existing envelope, phase, carrier, and timing grammar."""
+        """Build beta from the pulse's envelope, phase, carrier, and timing.
+
+        Parameters
+        ----------
+        pulse : object
+            Scheduled pulse record.
+        target : object, optional
+            Ignored; accepted to satisfy the control-endpoint protocol.
+        """
         _ = target
         return AnalyticSignal.from_pulse(pulse)

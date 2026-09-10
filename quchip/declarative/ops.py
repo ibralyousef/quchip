@@ -31,6 +31,15 @@ class LocalOps:
     >>> H = 5.0 * op.n + 0.5 * (op.adag @ op.adag @ op.a @ op.a)
     >>> H.kind
     'add'
+
+    Parameters
+    ----------
+    label : str
+        Endpoint label.
+    space : LocalSpace
+        Authored local Hilbert space.
+    device : device or None, default None
+        Owning device, required for derived energy-level operators.
     """
 
     label: str

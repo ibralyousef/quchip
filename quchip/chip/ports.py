@@ -23,6 +23,24 @@ class Port:
     between solves; each remains constant within a solve. Model shaped
     emission with an explicit buffer or coupler device holding a static ``Port``
     and a modulated Hamiltonian coupling.
+
+    Parameters
+    ----------
+    target : object or sequence of object
+        Device target(s), or labels resolved when attached to a chip. Multiple
+        targets require an explicit joint ``operator``.
+    rate : float or array-like or None, default=None
+        External coupling rate in 1/ns. Mutually exclusive with
+        ``external_quality_factor``.
+    external_quality_factor : float or array-like or None, default=None
+        Dimensionless external quality factor for one target, giving the rate
+        ``2*pi*freq/Q`` in 1/ns.
+    operator : object or str or None, default=None
+        Dimensionless coupling operator; ``None`` uses the target's lowering operator.
+    phase : float or array-like, default=0.0
+        Reference-plane phase in radians.
+    label : str or None, default=None
+        Stable channel label; generated when omitted.
     """
 
     _type_prefix = "port"
@@ -107,7 +125,13 @@ class Port:
         super().__setattr__(name, value)
 
     def resolve_targets(self, chip: "Chip") -> tuple[str, ...]:
-        """Return target labels after checking that they belong to *chip*."""
+        """Return target labels after checking that they belong to a chip.
+
+        Parameters
+        ----------
+        chip : Chip
+            Chip against which labels are resolved.
+        """
         labels = tuple(resolve_label(target) for target in self._targets)
         unknown = [label for label in labels if label not in chip.device_map]
         if unknown:
@@ -117,7 +141,13 @@ class Port:
         return labels
 
     def rate_value(self, chip: "Chip") -> Any:
-        """Return the external coupling rate in ``1/ns``."""
+        """Return the external coupling rate in 1/ns.
+
+        Parameters
+        ----------
+        chip : Chip
+            Chip providing the target frequency for a quality-factor rate.
+        """
         if self.rate is not None:
             return self.rate
         label = self.resolve_targets(chip)[0]
@@ -167,7 +197,15 @@ class Port:
         }
 
     def set_parameter_value(self, name: str, value: Any) -> None:
-        """Set one port parameter on an isolated chip copy."""
+        """Set one port parameter on an isolated chip copy.
+
+        Parameters
+        ----------
+        name : {"rate", "external_quality_factor", "phase"}
+            Local parameter name.
+        value : Any
+            Replacement value in 1/ns, dimensionless units, or radians.
+        """
         if name not in self._parameter_names:
             raise KeyError(name)
         setattr(self, name, value)
@@ -221,7 +259,13 @@ class Port:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Port":
-        """Reconstruct a port from label-based serialized data."""
+        """Reconstruct a port from label-based serialized data.
+
+        Parameters
+        ----------
+        data : dict[str, Any]
+            Payload produced by :meth:`to_dict`.
+        """
         targets = data["targets"]
         target: Any = targets[0] if len(targets) == 1 else targets
         operator = data.get("operator")

@@ -434,7 +434,19 @@ class QuantumSequence:
         freq: float | None = None,
         phase: float = 0.0,
     ) -> PulseHandle:
-        """Schedule a :class:`ChargeDrive` pulse; *freq* defaults to ``chip.freq(device)``."""
+        """Schedule a charge-drive pulse.
+
+        Parameters
+        ----------
+        target : str or BaseDevice
+            Driven device.
+        envelope : Envelope
+            Pulse envelope; time parameters are in ns and amplitudes in GHz.
+        freq : float or None, default=None
+            Carrier frequency in GHz; ``None`` uses ``chip.freq(target)``.
+        phase : float, default=0.0
+            Carrier phase in radians.
+        """
         label = resolve_label(target)
         self._validate_target(label)
         drive = self._find_drive_by_type(label, ChargeDrive)
@@ -450,7 +462,19 @@ class QuantumSequence:
         freq: float,
         phase: float = 0.0,
     ) -> PulseHandle:
-        """Schedule a :class:`PhaseDrive` pulse; *freq* is required."""
+        """Schedule a phase-drive pulse.
+
+        Parameters
+        ----------
+        target : str or BaseDevice
+            Driven device.
+        envelope : Envelope
+            Pulse envelope; time parameters are in ns and amplitudes in GHz.
+        freq : float
+            Carrier frequency in GHz.
+        phase : float, default=0.0
+            Carrier phase in radians.
+        """
         label = resolve_label(target)
         self._validate_target(label)
         drive = self._find_drive_by_type(label, PhaseDrive)
@@ -462,7 +486,15 @@ class QuantumSequence:
         *,
         envelope: Envelope,
     ) -> PulseHandle:
-        """Schedule a :class:`FluxDrive` pulse (no carrier frequency)."""
+        """Schedule a baseband flux-drive pulse.
+
+        Parameters
+        ----------
+        target : str or BaseDevice
+            Driven flux-tunable device.
+        envelope : Envelope
+            Baseband pulse envelope in GHz versus time in ns.
+        """
         label = resolve_label(target)
         self._validate_target(label)
         drive = self._find_drive_by_type(label, FluxDrive)
@@ -477,7 +509,21 @@ class QuantumSequence:
         start_time: float | None = None,
         phase: float = 0.0,
     ) -> PulseHandle:
-        """Schedule an edge pump: baseband δ(t)=A(t) when ``freq`` is None, else A(t)·cos(2πft-φ)."""
+        """Schedule an edge pump.
+
+        Parameters
+        ----------
+        coupling : str or BaseCoupling
+            Modulable coupling to pump.
+        envelope : Envelope
+            Pump-amplitude envelope in GHz versus time in ns.
+        freq : float or None, default=None
+            Carrier frequency in GHz; ``None`` applies the envelope at baseband.
+        start_time : float or None, default=None
+            Absolute start time in ns; ``None`` uses the channel cursor.
+        phase : float, default=0.0
+            Carrier phase in radians.
+        """
         label = resolve_label(coupling)
         drive = self._find_coupling_drive(label)
         return self._schedule_on_drive(drive, envelope=envelope, freq=freq, start_time=start_time, phase=phase)
@@ -534,13 +580,28 @@ class QuantumSequence:
         ``phase_offset``. This is the standard software-Z trick for
         transmons (McKay et al., PRA 96, 022330 (2017)). Baseband flux
         pulses are unaffected.
+
+        Parameters
+        ----------
+        target : str or BaseDevice
+            Device receiving the virtual frame shift.
+        angle : float
+            Z-frame shift in radians.
         """
         label = resolve_label(target)
         self._validate_target(label)
         self._entries.append(_FrameShiftEntry(device_label=label, angle=angle))
 
     def delay(self, scope: str | BaseDevice, duration: float) -> DelayHandle:
-        """Insert an idle delay on all drive channels of *scope*."""
+        """Insert an idle delay on all drive channels of a target.
+
+        Parameters
+        ----------
+        scope : str or BaseDevice
+            Device label or object whose channels advance.
+        duration : float
+            Delay in ns.
+        """
         target = resolve_label(scope)
         self._validate_target(target)
         _require_positive_duration(duration)
@@ -555,6 +616,11 @@ class QuantumSequence:
         device targets, only those devices' cursors are aligned. Use
         this to guarantee that pulses scheduled after the barrier
         start no earlier than any pulse scheduled before it.
+
+        Parameters
+        ----------
+        *labels : str or BaseDevice
+            Devices to synchronize; omitted means all device-drive cursors.
         """
         if not labels:
             self._entries.append(_BarrierEntry(device_labels=()))
@@ -798,10 +864,14 @@ class QuantumSequence:
             A ket, density matrix, or mapping for
             :meth:`~quchip.chip.chip.Chip.state`. Defaults to the chip's
             default initial state when omitted.
+        approximation : Approximation, optional
+            Engine approximation override. ``None`` uses the chip default.
         frame : FrameSpec, optional
             Integration-frame override. Defaults to the chip's declared frame.
             ``"auto"`` derives constraints from delivered scheduled signals and
             weights them over ``tlist[-1] - tlist[0]``.
+        dissipation : bool, default=True
+            Include authored collapse channels when true.
 
         Returns
         -------
@@ -833,7 +903,15 @@ class QuantumSequence:
         frame: FrameSpec | None = None,
         approximation: Approximation | None = None,
     ) -> EngineResult:
-        """Resolve the backend-neutral Hamiltonian and noise description."""
+        """Resolve the backend-neutral Hamiltonian and noise description.
+
+        Parameters
+        ----------
+        frame : FrameSpec or None, default=None
+            Resolution frame, or ``None`` to use the chip default.
+        approximation : Approximation or None, default=None
+            Engine approximation, or ``None`` to use the chip default.
+        """
         drive_ops = self._materialize_drive_ops()
         base_result = resolve_for_operations(self._chip, drive_ops, frame=frame, approximation=approximation)
         return build_engine_result(
@@ -993,7 +1071,31 @@ class QuantumSequence:
         dissipation: bool = True,
         duration: Any | None = None,
     ) -> "SolveBatch":
-        """Build a batched solve request from explicit sweep axes."""
+        """Build a batched solve request from explicit sweep axes.
+
+        Parameters
+        ----------
+        *axes : BatchAxis or ZippedBatchAxis
+            Independent or pairwise-zipped sweep axes.
+        tlist : array-like or None, default=None
+            Solver time grid in ns.
+        solver : str or None, default=None
+            Backend solver name; ``None`` uses its default.
+        options : dict or None, default=None
+            Backend numerical options.
+        e_ops : dict or None, default=None
+            Local expectation-operator specifications.
+        initial_state : Any or None, default=None
+            Initial ket, density matrix, or state mapping.
+        approximation : Approximation or None, default=None
+            Engine approximation override.
+        states : {"all", "final", "none"}, default="all"
+            State-retention policy.
+        dissipation : bool, default=True
+            Include authored collapse channels when true.
+        duration : float or None, default=None
+            Automatically sampled interval from zero, in ns.
+        """
         self._validate_axes(axes)
         shape, expanded = _expand_axis_overrides(axes)
         params_store = np.empty(shape if shape else (), dtype=object)
@@ -1162,32 +1264,64 @@ class QuantumSequence:
         dissipation: bool = True,
         duration: Any | None = None,
     ) -> "SimulationResult":
-        """Build and solve a single simulation, routed through :func:`~quchip.engine.simulate`.
+        """Build and solve one scheduled simulation.
 
-        ``backend`` — name (``"qutip"``/``"dynamiqs"``) or instance — scopes
-        this one call, outranking the chip's and the process default (so a
-        gradient solve can run on dynamiqs while everything around it stays
-        on QuTiP). Foreign-native initial states are coerced at the solve
-        boundary. Caveat: Python evaluates arguments *before* the scope
-        opens, so an ``initial_state=chip.state(...)`` expression inline in
-        the call is built under the surrounding backend — fine for concrete
-        chips (the state is coerced), but a chip carrying JAX tracers needs
-        a JAX-capable surrounding backend (chip-level or process default)
-        for that construction itself.
+        Parameters
+        ----------
+        tlist : array-like, optional
+            Sample times in ns. Mutually exclusive with ``duration``. If
+            omitted, quchip builds an automatic grid through the schedule end.
+        solver : str, optional
+            Backend solver name, such as ``"mesolve"`` or ``"sesolve"``.
+        options : dict, optional
+            Backend-specific solver options.
+        e_ops : dict, optional
+            Named observables to evaluate.
+        initial_state : object or mapping, optional
+            Initial state in the chip basis. ``None`` uses the joint ground state;
+            mappings may supply one state per partitioned component.
+        backend : object or {"qutip", "dynamiqs"}, optional
+            Per-call backend override.
+        check_truncation : bool, default=True
+            Check retained-level populations against ``truncation_threshold``.
+        truncation_threshold : float, default=1e-3
+            Maximum allowed omitted-level population for the check.
+        partition : bool, default=True
+            Solve independent chip components separately when the initial state
+            permits it.
+        approximation : Approximation, optional
+            Override the chip's approximation for this solve.
+        states : {"all", "final", "none"}, default="all"
+            State storage policy for the returned result.
+        dissipation : bool, default=True
+            Include declared collapse channels when ``True``.
+        duration : float, optional
+            Positive simulation end time in ns when ``tlist`` is omitted.
 
-        Inherits the Hilbert-truncation safety net from :func:`~quchip.engine.solve_problem`;
-        pass ``check_truncation=False`` to opt out or retune
-        ``truncation_threshold``.
+        Returns
+        -------
+        SimulationResult
+            Time samples, requested observables, and states according to
+            ``states``.
 
-        ``partition``, default ``True``, forwards to
-        :func:`~quchip.engine.simulate`: when the chip splits into
-        independent sub-chips (:meth:`Chip.partition`), each component is
-        dispatched separately and combined into a
+        Raises
+        ------
+        ValueError
+            If ``tlist`` and ``duration`` are both supplied, timing is invalid,
+            or automatic sampling needs concrete timing.
+
+        Notes
+        -----
+        A per-call ``backend`` outranks the chip and process defaults, and
+        foreign-native initial states are coerced at the solve boundary.
+        Python evaluates an inline ``initial_state=chip.state(...)`` before
+        this scope opens, so constructing a traced state still requires a
+        JAX-capable surrounding backend.
+
+        Partitioning returns a
         :class:`~quchip.results.partitioned.PartitionedSimulationResult`.
-        This only engages when ``initial_state`` is ``None`` or a
-        ``Mapping``. String shorthand and concrete states always take the
-        joint path. Pass ``partition=False`` to force the joint solve
-        unconditionally.
+        It requires ``initial_state`` to be ``None`` or a mapping; string
+        shorthand and concrete states take the joint path.
         """
         from quchip.engine import simulate as _engine_simulate
 
@@ -1222,13 +1356,42 @@ class QuantumSequence:
         dissipation: bool = True,
         duration: Any | None = None,
     ) -> "SimulationBatchResult":
-        """Build and solve a batched sweep. Equivalent to ``chip.solve_many(seq.build_batch(...))``.
+        """Build and solve a batched sweep over pulse or sequence parameters.
 
-        ``backend`` scopes this one call exactly as in :meth:`simulate`.
+        Parameters
+        ----------
+        *axes : BatchAxis or ZippedBatchAxis
+            Cartesian sweep axes. A :class:`ZippedBatchAxis` pairs member axes
+            pointwise and therefore contributes one batch dimension.
+        tlist, solver, options, e_ops, initial_state, backend
+            As for :meth:`simulate`; one initial state is reused for every
+            batch point unless it is a supported mapping.
+        progress : bool, default=True
+            Show backend batch progress when supported.
+        check_truncation : bool, default=True
+            Check retained-level populations at every batch point.
+        truncation_threshold : float, default=1e-3
+            Maximum allowed omitted-level population.
+        approximation : Approximation, optional
+            Per-batch approximation override.
+        states : {"all", "final", "none"}, default="all"
+            State storage policy for each batch result.
+        dissipation : bool, default=True
+            Include declared collapse channels.
+        duration : float, optional
+            Positive end time in ns when ``tlist`` is omitted.
 
-        The shared batch dispatcher samples and checks each component's truncation
-        boundary (default on). Pass ``check_truncation=False`` to opt out or retune
-        ``truncation_threshold``.
+        Returns
+        -------
+        SimulationBatchResult
+            Results indexed by the Cartesian or zipped axis shape.
+
+        Raises
+        ------
+        ValueError
+            If an axis is invalid, timing is inconsistent, or a sweep changes
+            a structural quantity that cannot vary within one batch.
+
         """
         with self._scoped_backend(backend):
             problem_batch = self.build_batch(
@@ -1254,6 +1417,13 @@ class QuantumSequence:
         Convenience for :func:`quchip.chip.transformations.active_patch`;
         see it for the activity rule, elimination order, and validity
         reporting.
+
+        Parameters
+        ----------
+        hops : int, default=1
+            Coupling-graph expansion beyond scheduled targets.
+        method : {"sw", "exact"}, default="sw"
+            Reduction method forwarded to each elimination.
         """
         from quchip.chip.transformations import active_patch as _active_patch
 
@@ -1322,7 +1492,13 @@ class QuantumSequence:
         )
 
     def with_params(self, bindings: Mapping[str, Any]) -> "QuantumSequence":
-        """Return a cloned sequence with Chip or ``pulse.<index>`` values rebound."""
+        """Return a cloned sequence with values rebound.
+
+        Parameters
+        ----------
+        bindings : mapping[str, Any]
+            Chip parameter paths or ``pulse.<index>`` fields and new values.
+        """
         available = self.parameters
         unknown = set(bindings) - set(available)
         if unknown:

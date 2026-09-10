@@ -132,6 +132,11 @@ class SignalNode:
 
         Non-child fields are preserved; nodes without children pass
         through untouched.
+
+        Parameters
+        ----------
+        transform : callable
+            Function applied to every direct signal child.
         """
         if not self._signal_child_fields:
             return self
@@ -147,7 +152,15 @@ class SignalNode:
         return replace(self, **updates)  # type: ignore[type-var]
 
     def evaluate(self, t: Any, *, xp: Any) -> Any:
-        """Evaluate the node at time(s) *t* (ns) in array namespace *xp*."""
+        """Evaluate the node in a selected array namespace.
+
+        Parameters
+        ----------
+        t : scalar or array_like
+            Evaluation times in ns.
+        xp : module
+            NumPy-like array namespace.
+        """
         raise NotImplementedError(
             f"{type(self).__name__} must implement evaluate(t, xp=...)."
         )
@@ -438,13 +451,28 @@ class Carrier(SignalNode):
     band on a ``+Δ`` detuning rotates as ``exp(−iΔt)``. Both fields are
     registered as pytree children (``freq`` may be traced; ``sign`` is
     semantically a static ``±1`` — do not map over it).
+
+    Attributes
+    ----------
+    freq : scalar
+        Angular carrier frequency in rad/ns.
+    sign : {-1, 1}
+        Sign in the complex exponential.
     """
 
     freq: float
     sign: Literal[-1, 1] = -1
 
     def evaluate(self, t: Any, *, xp: Any) -> Any:
-        """Return ``exp(sign · i · freq · t)`` at time(s) *t* (ns)."""
+        """Return ``exp(sign · i · freq · t)``.
+
+        Parameters
+        ----------
+        t : scalar or array_like
+            Evaluation times in ns.
+        xp : module
+            NumPy-like array namespace.
+        """
         t_arr = xp.asarray(t, dtype=float)
         return xp.exp(1j * self.sign * self.freq * t_arr)
 
@@ -465,7 +493,13 @@ def _contains_carrier(node: SignalNode) -> bool:
 
 @dataclass(frozen=True)
 class ScalarModulation:
-    """Typed wrapper marking a :data:`SignalProgram` as a scalar modulation on a :class:`DynamicTerm`."""
+    """Mark a :data:`SignalProgram` as a scalar modulation.
+
+    Attributes
+    ----------
+    signal : SignalProgram
+        Backend-neutral scalar time dependence.
+    """
 
     signal: SignalProgram
 
@@ -688,6 +722,25 @@ class CanonicalOperator:
     it is a 2D ``(n_diags, n_cols)`` array paired with ``offsets``.
     ``dims`` must multiply to ``shape[0]`` and ``subsystem_labels`` names
     each subsystem.
+
+    Attributes
+    ----------
+    layout : {"dense", "csr", "dia"}
+        Storage layout of ``values``.
+    values : array_like
+        Matrix or sparse payload.
+    shape : tuple of int
+        Square operator shape.
+    dims : tuple of int
+        Subsystem dimensions.
+    basis : str
+        Basis convention for the payload.
+    subsystem_labels : tuple of str
+        Labels matching ``dims``.
+    indices, indptr, offsets : array_like or None
+        Sparse CSR/DIA metadata.
+    tag : str or None
+        Optional diagnostic label.
     """
 
     layout: CanonicalLayout
@@ -770,6 +823,21 @@ class CanonicalOperator:
         subsystem_labels: tuple[str, ...],
         tag: str | None = None,
     ) -> "CanonicalOperator":
+        """Build a dense canonical operator.
+
+        Parameters
+        ----------
+        values : array_like
+            Square dense matrix.
+        dims : tuple of int
+            Subsystem dimensions.
+        basis : str
+            Basis convention for ``values``.
+        subsystem_labels : tuple of str
+            Labels matching ``dims``.
+        tag : str or None, optional
+            Diagnostic label.
+        """
         shape = tuple(values.shape)
         return cls(
             layout="dense",
@@ -794,6 +862,23 @@ class CanonicalOperator:
         subsystem_labels: tuple[str, ...],
         tag: str | None = None,
     ) -> "CanonicalOperator":
+        """Build a CSR canonical operator.
+
+        Parameters
+        ----------
+        values, indices, indptr : array_like
+            CSR payload arrays.
+        shape : tuple of int
+            Square matrix shape.
+        dims : tuple of int
+            Subsystem dimensions.
+        basis : str
+            Basis convention for the payload.
+        subsystem_labels : tuple of str
+            Labels matching ``dims``.
+        tag : str or None, optional
+            Diagnostic label.
+        """
         return cls(
             layout="csr",
             values=values,
@@ -818,6 +903,23 @@ class CanonicalOperator:
         subsystem_labels: tuple[str, ...],
         tag: str | None = None,
     ) -> "CanonicalOperator":
+        """Build a DIA canonical operator.
+
+        Parameters
+        ----------
+        values, offsets : array_like
+            Diagonal payload and integer offsets.
+        shape : tuple of int
+            Square matrix shape.
+        dims : tuple of int
+            Subsystem dimensions.
+        basis : str
+            Basis convention for the payload.
+        subsystem_labels : tuple of str
+            Labels matching ``dims``.
+        tag : str or None, optional
+            Diagnostic label.
+        """
         return cls(
             layout="dia",
             values=values,
@@ -837,7 +939,19 @@ class CanonicalOperator:
         subsystem_labels: tuple[str, ...] | None = None,
         tag: str | None = None,
     ) -> "CanonicalOperator":
-        """Return a metadata-adjusted copy (payload unchanged)."""
+        """Return a metadata-adjusted copy with unchanged payload.
+
+        Parameters
+        ----------
+        dims : tuple of int or None, optional
+            Replacement subsystem dimensions.
+        basis : str or None, optional
+            Replacement basis convention.
+        subsystem_labels : tuple of str or None, optional
+            Replacement subsystem labels.
+        tag : str or None, optional
+            Replacement diagnostic label.
+        """
         return replace(
             self,
             dims=self.dims if dims is None else dims,
@@ -847,7 +961,15 @@ class CanonicalOperator:
         )
 
     def scaled(self, factor: Any, *, tag: str | None = None) -> "CanonicalOperator":
-        """Return a scalar multiple without changing the operator layout."""
+        """Return a scalar multiple without changing the operator layout.
+
+        Parameters
+        ----------
+        factor : scalar
+            Multiplier applied to the payload.
+        tag : str or None, optional
+            Replacement diagnostic label.
+        """
         return replace(
             self,
             values=self.values * factor,
@@ -1001,6 +1123,17 @@ class StaticTerm:
     multiplies ``operator`` and may be a concrete scalar or a JAX
     tracer (sweeps over static couplings, detunings, etc.). ``origin``
     is purely advisory metadata.
+
+    Attributes
+    ----------
+    operator : CanonicalOperator
+        Angular-frequency operator payload.
+    coefficient : scalar
+        Scalar multiplier, default one.
+    origin : str
+        Component category that authored the term.
+    metadata : dict
+        Advisory term metadata.
     """
 
     operator: CanonicalOperator
@@ -1018,6 +1151,17 @@ class DynamicTerm:
     dynamiqs sampled array, etc.). The ``operator`` is 2π-scaled already
     (see module docstring). ``tag`` is an optional human label; it does
     not participate in physics.
+
+    Attributes
+    ----------
+    operator : CanonicalOperator
+        Angular-frequency operator payload.
+    time_dependence : ScalarModulation
+        Scalar coefficient evaluated in time.
+    origin : str
+        Component category that authored the term.
+    tag : str or None
+        Optional diagnostic label.
     """
 
     operator: CanonicalOperator
@@ -1028,7 +1172,23 @@ class DynamicTerm:
 
 @dataclass(frozen=True)
 class CollapseTerm:
-    """Backend-neutral Lindblad channel, optionally exposed as a port."""
+    """Backend-neutral Lindblad channel, optionally exposed as a port.
+
+    Attributes
+    ----------
+    operator : CanonicalOperator
+        Dimensionless local jump operator before rate scaling.
+    rate : scalar
+        Lindblad rate in ``1/ns``.
+    source, channel : str
+        Owning component and local channel labels.
+    parameter_paths : tuple of str
+        Parameter paths controlling the channel.
+    phase : scalar or None
+        Coupling phase in radians.
+    frame_frequency : scalar or None
+        Accessible-channel carrier in GHz; ``None`` marks a hidden channel.
+    """
 
     operator: CanonicalOperator
     rate: Any
@@ -1071,7 +1231,15 @@ ChannelAccess: TypeAlias = Literal["exposed", "hidden"]
 
 @dataclass(frozen=True)
 class HamiltonianProgram:
-    """Resolved static and time-dependent Hamiltonian contributions."""
+    """Resolved static and time-dependent Hamiltonian contributions.
+
+    Attributes
+    ----------
+    static_terms : tuple of StaticTerm
+        Time-independent contributions.
+    dynamic_terms : tuple of DynamicTerm
+        Time-dependent contributions.
+    """
 
     static_terms: tuple[StaticTerm, ...] = ()
     dynamic_terms: tuple[DynamicTerm, ...] = ()
@@ -1079,7 +1247,23 @@ class HamiltonianProgram:
 
 @dataclass(frozen=True)
 class SLHChannel:
-    """One resolved Markov channel and its boundary accessibility."""
+    """One resolved Markov channel and its boundary accessibility.
+
+    Attributes
+    ----------
+    key : str
+        Unique resolved channel key.
+    accessibility : {"exposed", "hidden"}
+        Whether the channel reaches the modeled experiment boundary.
+    collapse : CollapseTerm
+        Component-authored channel record.
+    coupling_operator : CanonicalOperator or None
+        Resolved physical coupling operator, when already composed.
+    reference : ReferencePlane
+        External reference-plane transfer.
+    input_occupation : scalar or None
+        Markov input occupation for a thermal field.
+    """
 
     key: str
     accessibility: ChannelAccess
@@ -1126,7 +1310,25 @@ class SLHChannel:
 
 @dataclass(frozen=True)
 class ResolvedSLH:
-    """Immutable, input-free normal form for resolved Markovian physics."""
+    """Immutable, input-free normal form for resolved Markovian physics.
+
+    Attributes
+    ----------
+    scattering : array_like
+        Unitary scalar channel matrix ``S``.
+    hamiltonian : HamiltonianProgram
+        Resolved Hamiltonian ``H``.
+    channels : tuple of SLHChannel
+        Coupling channels ``L`` in scattering order.
+    support : array_like or None
+        Boolean structural reachability matrix.
+    output_network : object or None
+        Captured external output processing.
+
+    Notes
+    -----
+    See :doc:`/physics` for the SLH composition and channel conventions.
+    """
 
     scattering: Any
     hamiltonian: HamiltonianProgram
@@ -1190,7 +1392,17 @@ class ResolvedSLH:
         dynamic_terms: tuple[DynamicTerm, ...],
         collapse_terms: tuple[CollapseTerm, ...],
     ) -> "ResolvedSLH":
-        """Build the current identity-scattering model from engine terms."""
+        """Build an identity-scattering model from engine terms.
+
+        Parameters
+        ----------
+        static_terms : tuple of StaticTerm
+            Static Hamiltonian contributions.
+        dynamic_terms : tuple of DynamicTerm
+            Dynamic Hamiltonian contributions.
+        collapse_terms : tuple of CollapseTerm
+            Component-authored Lindblad channels.
+        """
         exposed: list[SLHChannel] = []
         hidden: list[SLHChannel] = []
         key_counts: dict[str, int] = {}
@@ -1225,7 +1437,13 @@ class ResolvedSLH:
         return self.scattering
 
     def feeds(self, output_index: int, input_index: int) -> bool:
-        """Return whether input channel ``input_index`` structurally reaches output ``output_index``."""
+        """Return whether one input structurally reaches one output.
+
+        Parameters
+        ----------
+        output_index, input_index : int
+            Output row and input column in channel order.
+        """
         return bool(self.support[output_index, input_index])
 
     @property
@@ -1276,22 +1494,10 @@ class ResolvedSLH:
 class DroppedTerm:
     """Advisory record for a Hamiltonian term elided by an approximation.
 
-    Emitted by physics components (couplings, drives, …) whose local
-    Hamiltonian routines discard terms under an approximation such as
-    the rotating-wave approximation. Assembly aggregates these records
-    into :attr:`EngineResult.dropped_terms` so callers can
-    audit what was silently removed — in particular, compare each dropped band's amplitude
-    against its oscillation frequency, the smallness ratio that governs
-    RWA validity (leading correction ∼ amplitude²/frequency, the
-    Bloch–Siegert scale).
-
-    The string fields are static and value-free. ``amplitude`` and
-    ``frequency`` hold *raw* numeric values in GHz ordinary frequency —
-    possibly JAX-traced; they are never formatted or branched on during
-    assembly. ``band_weights`` is static
-    structure (excitation-change weights, one per mode the operator
-    acts on) that assembly uses to resolve ``frequency`` from the frame
-    without the owner knowing frame references.
+    Compare a dropped band's amplitude with its oscillation frequency to
+    assess RWA validity; the leading Bloch-Siegert correction scales as
+    amplitude²/frequency. Numeric fields use ordinary GHz and may be traced.
+    Static ``band_weights`` let assembly derive the frequency from the frame.
 
     Parameters
     ----------
@@ -1368,19 +1574,38 @@ class EngineResult:
         H(t) \\;=\\; \\sum_s c_s \\, O_s
                    \\;+\\; \\sum_d O_d \\, f_d(t)
 
-    The immutable ``slh`` value is the input-free Markov model. Scheduled
-    controls and solve-bound coherent-source Hamiltonians live in
-    ``applied_hamiltonian``; the term properties combine both programs for
-    existing backend consumers. Each static / dynamic operator already carries 2π and each
-    ``f_d(t)`` is a :class:`ScalarModulation` over a
-    :class:`SignalProgram` AST. ``metadata`` carries advisory solver
-    hints (e.g. ``max_carrier_freq_ghz``, ``max_step_ns``); a backend may
-    consult them or apply an equivalent numerical strategy of its own,
-    but remains responsible for resolving finite-support dynamics — a
-    finite-width pulse must not be silently skipped by an adaptive
-    integrator that never samples it. ``dropped_terms`` records any
-    terms that owning components elided under an approximation (RWA,
-    etc.) — advisory metadata for auditing, never consumed by backends.
+    ``slh`` is the input-free Markov model; ``applied_hamiltonian`` holds
+    scheduled controls and solve-bound coherent drives. Operators already
+    include the 2π conversion. Backends may use ``metadata`` integration
+    hints but remain responsible for resolving finite-support dynamics.
+    ``dropped_terms`` is advisory approximation metadata.
+
+    Attributes
+    ----------
+    slh : ResolvedSLH
+        Input-free resolved scattering, Hamiltonian, and channel description.
+    applied_hamiltonian : HamiltonianProgram
+        Solve-bound static and dynamic terms added after the input-free model.
+    coherent_inputs : tuple
+        Captured coherent source bindings used to assemble those terms.
+    dims : tuple of int
+        Solver Hilbert-space dimensions in chip device order.
+    metadata : dict
+        Advisory solver hints, with frequencies in GHz and time scales in ns.
+    dropped_terms : tuple of DroppedTerm
+        Terms removed by the selected approximation, retained for diagnostics.
+    bases : mapping
+        Per-device authored-to-solver basis records.
+    authored : object or None
+        Captured authored physics description.
+    resolved_frame : ResolvedFrame
+        Frame frequencies and demodulation convention used by assembly.
+    approximation : Approximation or None
+        Approximation captured by this resolved snapshot.
+    dynamical_supports : tuple of tuple of str
+        Device groups coupled by retained dynamical terms.
+    dissipation : bool
+        Whether :attr:`collapse_terms` exposes the resolved dissipators.
     """
 
     slh: ResolvedSLH
@@ -1431,6 +1656,15 @@ class EngineResult:
         the selected frame and approximation stored in this snapshot. A
         snapshot carrying dynamic Hamiltonian terms requires ``at_time``;
         the result is an instantaneous eigensystem, not a Floquet analysis.
+
+        Parameters
+        ----------
+        at_time : scalar or None, optional
+            Instant in ns for dynamic snapshots.
+        overlap_threshold : float, default=0.5
+            Minimum bare-state overlap accepted for labeling.
+        labeling : str, default="DE"
+            Bare-to-dressed assignment strategy.
         """
         from quchip.chip.analysis import dress_engine_result
 
@@ -1447,7 +1681,15 @@ class EngineResult:
         static_terms: tuple[StaticTerm, ...] | None = None,
         dynamic_terms: tuple[DynamicTerm, ...] | None = None,
     ) -> "EngineResult":
-        """Return a copy with solve-bound Hamiltonian terms replaced."""
+        """Return a copy with solve-bound Hamiltonian terms replaced.
+
+        Parameters
+        ----------
+        static_terms : tuple of StaticTerm or None, optional
+            Replacement static terms; ``None`` preserves them.
+        dynamic_terms : tuple of DynamicTerm or None, optional
+            Replacement dynamic terms; ``None`` preserves them.
+        """
         applied = replace(
             self.applied_hamiltonian,
             static_terms=(
@@ -1760,13 +2002,38 @@ StateStorage: TypeAlias = Literal["all", "final", "none"]
 class SolveProblem:
     """Immutable simulation request handed from the chip pipeline to a backend.
 
-    Bundles the :class:`EngineResult` (Hamiltonian and collapse terms), an
-    ``initial_state``, solver time grid, decomposed
-    ``e_ops`` + their :class:`BandMeta`, the :class:`ResolvedFrame`, and
-    solver options. Backend selection is captured at construction, so ``options`` must
-    not contain a ``"backend"`` key (enforced in ``__post_init__``).
-    ``e_ops_meta`` is the metadata observable reconstruction uses to recombine flattened
-    band expectations back into dict-keyed observables.
+    Backend selection is captured separately from ``options``.
+    ``e_ops_meta`` reconstructs flattened band expectations into public
+    dict-keyed observables.
+
+    Attributes
+    ----------
+    chip : Chip
+        Source chip captured by the request.
+    engine_result : EngineResult
+        Frozen resolved physics.
+    initial_state : state_like
+        Initial ket or density matrix in solver coordinates.
+    tlist : array_like
+        Solver times in ns.
+    e_ops : sequence or None
+        Backend-ready expectation operators.
+    e_ops_meta : object or None
+        Metadata used to reconstruct public observables.
+    resolved_frame : ResolvedFrame
+        Captured integration and demodulation frame.
+    solver : {"sesolve", "mesolve"} or None
+        Explicit solver selection.
+    options : dict
+        Backend solver options; a ``"backend"`` key is rejected.
+    truncation : object or None
+        Captured boundary-population plan.
+    states : {"all", "final", "none"}
+        State-retention policy.
+    backend : Backend
+        Captured backend owner.
+    device_info : tuple
+        Device labels and computational flags in subsystem order.
     """
 
     chip: Any  # Chip (typed as Any to avoid runtime import cycles)
@@ -1794,6 +2061,11 @@ class SolveProblem:
         An explicit ``solver`` takes precedence, but ``sesolve`` is rejected for a
         density matrix. Otherwise select ``sesolve`` only for a ket with no collapse
         terms; select ``mesolve`` for a density matrix or any problem with collapse terms.
+
+        Parameters
+        ----------
+        backend : Backend
+            Backend used to classify the initial state.
         """
         is_ket = backend.is_ket(self.initial_state)
         if self.solver is not None:
@@ -1853,6 +2125,25 @@ class LinearResponseProblem:
     columns. ``inbound_transfer`` and ``outbound_transfer`` contain the
     per-frequency reference factors for each external channel. Backends return
     the undecorated Markov response; the engine applies both factors.
+
+    Attributes
+    ----------
+    frequencies : array_like
+        Probe frequencies in GHz.
+    mode_labels : tuple of str
+        Linear Fock modes in matrix order.
+    hamiltonian : array_like
+        Number-conserving mode matrix in rad/ns.
+    couplings : array_like
+        Channel-to-mode coupling matrix in ``1/sqrt(ns)``.
+    scattering : array_like
+        Instantaneous SLH scattering matrix.
+    plane_indices : tuple of int
+        External channel indices used for result rows and columns.
+    inbound_transfer, outbound_transfer : array_like
+        Frequency-dependent external reference factors.
+    field_channels : tuple of FieldChannel
+        Captured input field states.
     """
 
     frequencies: Any
@@ -1868,7 +2159,27 @@ class LinearResponseProblem:
 
 @dataclass(frozen=True)
 class SteadyStateProblem:
-    """Immutable static Lindblad request handed from a chip to its backend."""
+    """Immutable static Lindblad request handed from a chip to its backend.
+
+    Attributes
+    ----------
+    chip : Chip
+        Source chip captured by the request.
+    engine_result : EngineResult
+        Frozen static resolved physics.
+    e_ops : sequence or None
+        Backend-ready expectation operators.
+    e_ops_meta : object or None
+        Metadata used to reconstruct public observables.
+    resolved_frame : ResolvedFrame
+        Captured stationary frame.
+    options : dict
+        Backend solver options.
+    backend : Backend
+        Captured backend owner.
+    device_info : tuple
+        Device labels and computational flags in subsystem order.
+    """
 
     chip: Any
     engine_result: EngineResult
@@ -1896,7 +2207,21 @@ class SteadyStateProblem:
 
 @dataclass(frozen=True)
 class SolveBatch:
-    """Explicit solve problems sharing one dispatch owner and sweep shape."""
+    """Explicit solve problems sharing one dispatch owner and sweep shape.
+
+    Attributes
+    ----------
+    chip : Chip
+        Source chip for the batch.
+    problems : tuple of SolveProblem
+        Compatible frozen requests in flat sweep order.
+    params : array_like or None
+        Bound parameter mappings on the sweep grid.
+    shape : tuple of int
+        Sweep-grid shape.
+    axes : tuple
+        Named sweep-axis metadata.
+    """
 
     chip: Any
     problems: tuple[SolveProblem, ...]
@@ -1954,7 +2279,13 @@ class SolveBatch:
         return self.problems[0].tlist
 
     def signals_for(self, slot: int) -> tuple[ScalarModulation, ...]:
-        """Return one dynamic slot across all batch points."""
+        """Return one dynamic slot across all batch points.
+
+        Parameters
+        ----------
+        slot : int
+            Dynamic-term index.
+        """
         return tuple(
             problem.engine_result.dynamic_terms[slot].time_dependence
             for problem in self.problems
@@ -1973,7 +2304,13 @@ class SolveBatch:
         return self.element(item)
 
     def params_at(self, point: int | tuple[int, ...]) -> dict[str, Any]:
-        """Return sweep values at one grid coordinate."""
+        """Return sweep values at one grid coordinate.
+
+        Parameters
+        ----------
+        point : int or tuple of int
+            Flat index or multidimensional sweep coordinate.
+        """
         if self.params is None:
             return {}
         if self.shape == ():
@@ -1984,6 +2321,13 @@ class SolveBatch:
         return dict(self.params[coordinate].items())
 
     def element(self, index: int) -> SolveProblem:
+        """Return one solve request by flat batch index.
+
+        Parameters
+        ----------
+        index : int
+            Flat batch index.
+        """
         return self.problems[index]
 
 

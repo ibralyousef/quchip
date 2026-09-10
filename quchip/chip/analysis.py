@@ -264,6 +264,13 @@ class KerrMatrix:
     ``labels`` follows chip device order. ``values`` is a real symmetric
     square array: diagonal entries are dressed anharmonicities and
     off-diagonal entries are full-pull cross-Kerr shifts.
+
+    Parameters
+    ----------
+    labels : tuple[str, ...]
+        Device labels in chip order.
+    values : array-like
+        Real symmetric Kerr matrix in GHz.
     """
 
     labels: tuple[str, ...]
@@ -356,6 +363,11 @@ class ChipAnalysis:
     covering backend identity and the ``state_version`` of every device
     and coupling. Any mutation that bumps a version
     invalidates the cache on next access.
+
+    Parameters
+    ----------
+    chip : Chip
+        Chip whose exact static lab-frame Hamiltonian is analyzed.
     """
 
     def __init__(self, chip: "Chip") -> None:
@@ -740,6 +752,13 @@ class ChipAnalysis:
         this is safe inside ``jax.jit``/``grad``/``vmap`` — gradients
         flow through ``eigenvalues[labeling.indices[bare_idx]]`` to any
         traced chip parameters.
+
+        Parameters
+        ----------
+        device_states : mapping or None, default=None
+            Bare product-state levels; unspecified devices use level zero.
+        **device_state_kwargs : int
+            Per-device energy levels keyed by label.
         """
         resolved = normalize_device_state_mapping(self._chip, device_states, device_state_kwargs)
         label_t = self._label_from_plain_mapping(resolved)
@@ -814,12 +833,26 @@ class ChipAnalysis:
         /,
         **device_state_kwargs: int,
     ) -> int | None:
-        """Dressed-state index assigned to a bare label, or ``None`` if unassigned."""
+        """Return the dressed index assigned to a bare label.
+
+        Parameters
+        ----------
+        device_states : mapping or None, default=None
+            Bare product-state levels; unspecified devices use level zero.
+        **device_state_kwargs : int
+            Per-device energy levels keyed by label.
+        """
         label = self._state_label_from_mapping(device_states, **device_state_kwargs)
         return self._ensure_dressed().state_map.get(label)
 
     def bare_label(self, dressed_index: int) -> tuple[int, ...]:
-        """Bare-state label assigned to a dressed-state index."""
+        """Return the bare label assigned to a dressed index.
+
+        Parameters
+        ----------
+        dressed_index : int
+            Index in ascending dressed-energy order.
+        """
         if isinstance(dressed_index, bool) or not isinstance(dressed_index, int):
             raise TypeError(f"dressed_index must be an integer, got {type(dressed_index).__name__}")
         try:
@@ -1048,6 +1081,15 @@ class ChipAnalysis:
 
         ``state`` may be an ``int`` (direct dressed index) or a mapping
         of ``{device: Fock}`` (dressed index resolved via label matching).
+
+        Parameters
+        ----------
+        state : int, mapping, or None, default=None
+            Dressed index or bare label; ``None`` uses keyword levels.
+        n_components : int, default=5
+            Maximum number of components returned.
+        **device_state_kwargs : int
+            Per-device energy levels keyed by label.
         """
         if n_components <= 0:
             raise ValueError(f"n_components must be positive, got {n_components}")
@@ -1181,7 +1223,13 @@ class ChipAnalysis:
         return 0.5 * (effective + effective.conj().T)
 
     def dressed_anharmonicity(self, device: str | BaseDevice) -> float:
-        """Dressed anharmonicity (GHz): ``E_2 − 2·E_1 + E_0``, others grounded."""
+        """Return dressed anharmonicity in GHz.
+
+        Parameters
+        ----------
+        device : str or BaseDevice
+            Device label or object; all other devices are grounded.
+        """
         index, _ = self._chip._resolve_device_index(device)
         eigenvalues, _, _, kernel_labeling = self._compute_array_labeled()
         return kerr_entry(
@@ -1203,6 +1251,15 @@ class ChipAnalysis:
 
         Unspecified spectators are grounded. The target cannot appear in
         ``when``. Traceable under ``jit``/``grad``/``vmap``.
+
+        Parameters
+        ----------
+        target : str or BaseDevice
+            Device whose transition is measured.
+        lower, upper : int
+            Lower and upper local energy levels.
+        when : dict or None, default=None
+            Conditioning levels for spectator devices.
         """
         idx_target, target_device = self._chip._resolve_device_index(target)
         _validate_level_pair(lower, upper, self._semantic_dims()[idx_target])
@@ -1307,6 +1364,13 @@ class ChipAnalysis:
         Safe inside ``jax.jit``/``grad``/``vmap``: under tracing the
         eigenvector column is selected through the array kernel, so a
         dressed initial state is differentiable end-to-end.
+
+        Parameters
+        ----------
+        device_states : mapping, str, or None, default=None
+            Bare product-state label used for dressed assignment.
+        **device_state_kwargs : int
+            Per-device energy levels keyed by label.
         """
         resolved = normalize_device_state_mapping(self._chip, device_states, device_state_kwargs)
         self._label_from_resolved(resolved)

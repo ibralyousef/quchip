@@ -117,6 +117,9 @@ class BaseDrive(Registrable, registry_root=True, metaclass=KeywordOnlyDeclarativ
         be connected later or resolved by label through :class:`Chip`.
     label : str | None
         Optional explicit label; otherwise auto-generated.
+    **params : Any
+        Numerical parameters declared by the concrete drive class.
+
     Examples
     --------
     >>> from quchip import DuffingTransmon, ChargeDrive
@@ -170,6 +173,11 @@ class BaseDrive(Registrable, registry_root=True, metaclass=KeywordOnlyDeclarativ
         If previously attached, the drive is removed from the old device's
         ``_connected_drives`` list. :class:`CouplingDrive` overrides this
         handshake because couplings do not own connected-drive lists.
+
+        Parameters
+        ----------
+        target : BaseDevice
+            Device attached to this control line.
         """
         old_target = self._target
         if old_target is not None and not isinstance(old_target, str) and old_target is not target:
@@ -182,7 +190,15 @@ class BaseDrive(Registrable, registry_root=True, metaclass=KeywordOnlyDeclarativ
         return {name: getattr(self, name) for name in type(self).__quchip_param_fields__}
 
     def set_parameter_value(self, name: str, value: Any) -> None:
-        """Apply one drive-owned value on an isolated drive copy."""
+        """Apply one drive-owned value on an isolated drive copy.
+
+        Parameters
+        ----------
+        name : str
+            Declared drive parameter name.
+        value : Any
+            Replacement value in the parameter's declared units.
+        """
         spec = type(self).__quchip_param_fields__.get(name)
         if spec is None:
             raise KeyError(name)
@@ -212,7 +228,17 @@ class BaseDrive(Registrable, registry_root=True, metaclass=KeywordOnlyDeclarativ
         op: LocalOps,
         p: ParameterNamespace,
     ) -> tuple[CollapseChannel, ...]:
-        """Return target-local Lindblad channels contributed by this line."""
+        """Return target-local Lindblad channels contributed by this line.
+
+        Parameters
+        ----------
+        target : BaseDevice
+            Connected target device.
+        op : LocalOps
+            Target-local authored operators.
+        p : ParameterNamespace
+            Bound drive parameters.
+        """
         _ = (target, op, p)
         return ()
 
@@ -239,12 +265,28 @@ class BaseDrive(Registrable, registry_root=True, metaclass=KeywordOnlyDeclarativ
         )
 
     def signal(self, pulse: Any, target: Any) -> AnalyticSignal:
-        """Build the complete scheduled analytic signal for one pulse."""
+        """Build the complete scheduled analytic signal for one pulse.
+
+        Parameters
+        ----------
+        pulse : object
+            Scheduled pulse record.
+        target : object
+            Connected drive target.
+        """
         _ = target
         return AnalyticSignal.from_pulse(pulse)
 
     def hamiltonian(self, target: Any, signal: AnalyticSignal) -> Any:
-        """Map a delivered classical signal to target-local quantum physics."""
+        """Map a delivered signal to target-local quantum physics.
+
+        Parameters
+        ----------
+        target : object
+            Connected device or coupling.
+        signal : AnalyticSignal
+            Complete delivered classical signal.
+        """
         raise NotImplementedError(
             f"{type(self).__name__} must implement hamiltonian(target, signal)"
         )
@@ -259,7 +301,13 @@ class BaseDrive(Registrable, registry_root=True, metaclass=KeywordOnlyDeclarativ
         return [f"Target: '{target}'"]
 
     def copy(self, *, target: BaseDevice | None = None) -> "BaseDrive":
-        """Return a shallow copy, optionally rebound to a new target."""
+        """Return a shallow copy, optionally rebound to a new target.
+
+        Parameters
+        ----------
+        target : BaseDevice or None, default=None
+            Replacement target; ``None`` leaves the copy unconnected.
+        """
         cloned = copy.copy(self)
         cloned._target = None
         if target is not None:
@@ -329,7 +377,18 @@ class BaseDrive(Registrable, registry_root=True, metaclass=KeywordOnlyDeclarativ
 
 
 class DeviceDrive(BaseDrive):
-    """Drive authoring base for a device-local Hamiltonian."""
+    """Drive base for a device-local Hamiltonian contribution.
+
+    Subclasses must implement :meth:`hamiltonian` and accept a compatible
+    device capability such as charge, phase, or flux coupling.
+
+    Parameters
+    ----------
+    target : BaseDevice or str, optional
+        Device object or label; labels resolve when connected to a chip.
+    label : str, optional
+        Drive label.
+    """
 
 
 class CouplingDrive(BaseDrive):
@@ -337,6 +396,13 @@ class CouplingDrive(BaseDrive):
 
     Subclasses implement :meth:`hamiltonian` for the coupling physics they
     accept. The base class imposes no parametric-interaction requirement.
+
+    Parameters
+    ----------
+    target : BaseCoupling or str, optional
+        Coupling object or label.
+    label : str, optional
+        Drive label.
     """
 
     @property
@@ -353,7 +419,13 @@ class CouplingDrive(BaseDrive):
         return target if isinstance(target, str) else target.label
 
     def connect(self, target: Any) -> None:
-        """Attach this line to a coupling without a device-side handshake."""
+        """Attach this line to a coupling without a device-side handshake.
+
+        Parameters
+        ----------
+        target : BaseCoupling
+            Coupling attached to this control line.
+        """
         self._target = target
 
 
@@ -378,11 +450,27 @@ class ChargeDrive(DeviceDrive):
     >>> drive = ChargeDrive(target=q)
     >>> drive.target_label == q.label
     True
+
+    Parameters
+    ----------
+    target : BaseDevice or str, optional
+        Charge-coupled device or label.
+    label : str, optional
+        Drive label.
     """
 
     _type_prefix: ClassVar[str] = "charge"
 
     def hamiltonian(self, device: Any, signal: AnalyticSignal) -> Any:
+        """Return the charge-coupling Hamiltonian in the device-local basis.
+
+        Parameters
+        ----------
+        device : BaseDevice
+            Connected charge-coupled device.
+        signal : AnalyticSignal
+            Delivered classical signal.
+        """
         if not isinstance(device, ChargeCoupled):
             raise TypeError(
                 f"ChargeDrive requires {type(device).__name__} to define "
@@ -395,6 +483,7 @@ class ChargeDrive(DeviceDrive):
         )
 
     def physics_notes(self) -> list[str]:
+        """Describe the charge operator and delivered I-quadrature convention."""
         return super().physics_notes() + [
             "Drive coupling: delivered in-phase signal times the device charge operator"
         ]
@@ -408,10 +497,26 @@ class PhaseDrive(DeviceDrive):
     phase-noise channels or drives whose physical coupling is already
     referenced to the field quadrature. See Krantz et al. 2019, Sec.
     IV.A for the two conventions.
+
+    Parameters
+    ----------
+    target : BaseDevice or str, optional
+        Phase-coupled device or label.
+    label : str, optional
+        Drive label.
     """
 
     _type_prefix: ClassVar[str] = "phase"
     def hamiltonian(self, device: Any, signal: AnalyticSignal) -> Any:
+        """Return the phase-coupling Hamiltonian in the device-local basis.
+
+        Parameters
+        ----------
+        device : BaseDevice
+            Connected phase-coupled device.
+        signal : AnalyticSignal
+            Delivered classical signal.
+        """
         if not isinstance(device, PhaseCoupled):
             raise TypeError(
                 f"PhaseDrive requires {type(device).__name__} to define "
@@ -424,6 +529,7 @@ class PhaseDrive(DeviceDrive):
         )
 
     def physics_notes(self) -> list[str]:
+        """Describe the phase operator and delivered I-quadrature convention."""
         return super().physics_notes() + [
             "Drive coupling: delivered in-phase signal times the device phase operator"
         ]
@@ -444,11 +550,27 @@ class FluxDrive(DeviceDrive):
     >>> flux = FluxDrive(target=q)
     >>> flux.target_label == q.label
     True
+
+    Parameters
+    ----------
+    target : BaseDevice or str, optional
+        Flux-coupled device or label.
+    label : str, optional
+        Drive label.
     """
 
     _type_prefix: ClassVar[str] = "flux"
 
     def hamiltonian(self, device: Any, signal: AnalyticSignal) -> Any:
+        """Return the flux-coupling Hamiltonian in the device-local basis.
+
+        Parameters
+        ----------
+        device : BaseDevice
+            Connected flux-tunable device.
+        signal : AnalyticSignal
+            Delivered baseband flux signal.
+        """
         if not isinstance(device, FluxCoupled):
             raise TypeError(
                 f"FluxDrive requires {type(device).__name__} to define "
@@ -461,6 +583,7 @@ class FluxDrive(DeviceDrive):
         )
 
     def physics_notes(self) -> list[str]:
+        """Describe the flux operator and delivered I-quadrature convention."""
         return super().physics_notes() + [
             "Drive coupling: delivered in-phase signal times the device flux operator"
         ]
@@ -482,7 +605,7 @@ class ParametricDrive(CouplingDrive):
 
     Parameters
     ----------
-    coupling : BaseCoupling | str
+    target : BaseCoupling | str
         Modulable coupling to pump, given as the coupling object or its
         label. A string label late-binds to the coupling instance via
         :meth:`Chip.connect`.
@@ -505,11 +628,26 @@ class ParametricDrive(CouplingDrive):
         return f"{type(self).__name__}(label='{self.label}', coupling='{self.target_label}')"
 
     def connect(self, coupling: Any) -> None:
-        """Attach this line after confirming that the coupling is modulable."""
+        """Attach this line after confirming that the coupling is modulable.
+
+        Parameters
+        ----------
+        coupling : BaseCoupling
+            Coupling implementing ``parametric_interaction``.
+        """
         _probe_modulable(coupling)
         self._target = coupling
 
     def hamiltonian(self, coupling: Any, signal: AnalyticSignal) -> Any:
+        """Return the delivered pump times the coupling's parametric term.
+
+        Parameters
+        ----------
+        coupling : BaseCoupling
+            Connected modulable coupling.
+        signal : AnalyticSignal
+            Delivered pump signal.
+        """
         operator = coupling._bind_parametric_interaction()
         if operator is None:
             raise TypeError(
@@ -519,6 +657,7 @@ class ParametricDrive(CouplingDrive):
         return signal.i * operator
 
     def physics_notes(self) -> list[str]:
+        """Describe the edge-pump convention recorded for this drive."""
         return super().physics_notes() + [
             "Edge pump: delivered in-phase signal multiplies the coupling's parametric structure"
         ]

@@ -40,12 +40,41 @@ def _operator_from_json(value: list[list[list[float]]] | None) -> np.ndarray | N
 
 
 class EigenbasisDevice(BaseDevice):
-    """Device backed by frozen energies and optional energy-basis operators.
+    """Represent a frozen source spectrum and its energy-basis operators.
 
-    This is the narrow import path for a third-party model that quchip cannot
-    reconstruct from symbolic circuit parameters. Its authored local space is
-    already the source model's energy basis, so normal engine materialization
-    applies without a device-owned diagonalization or projection path.
+    Source circuit parameters cannot be differentiated through this snapshot.
+
+    Parameters
+    ----------
+    energies : array_like, shape (n,)
+        Energy-ordered levels in GHz, with ``n >= 2``. The first energy
+        is subtracted from every level.
+    charge_operator, phase_operator : array_like, shape (n, n), or None
+        Operators in the same source eigenbasis. ``None`` leaves that drive
+        channel unavailable; supplied matrix elements retain source conventions.
+    levels : int or None, default None
+        Number of retained energy levels. ``None`` retains all supplied levels.
+    label : str or None, default None
+        Device label; omission generates ``eigenbasis_<index>``.
+    source_type : str or None, default None
+        Provenance label, such as ``"scqubits.ZeroPi"``.
+    collapse_model : {"fermi_golden", "ladder"}, default "fermi_golden"
+        Relaxation from transition matrix elements or an ideal ladder operator.
+    coupling_channel : {"charge", "flux"} or None, default None
+        Operator for matrix-element relaxation; ``"flux"`` uses
+        ``phase_operator``. Required when ``T1`` is set with ``"fermi_golden"``.
+    collapse_rate_threshold : float, default 1e-8
+        Nonnegative cutoff on normalized downward-transition strengths.
+    **noise : scalar or None
+        ``T1`` and ``T2`` in ns, and dimensionless ``thermal_occupation``.
+        ``None`` leaves the corresponding channel absent. See
+        :class:`~quchip.devices.base.BaseDevice` for noise constraints.
+
+    References
+    ----------
+    Blais et al., Rev. Mod. Phys. 93, 025005 (2021),
+    https://doi.org/10.1103/RevModPhys.93.025005, for energy-basis
+    operators and coupling to dissipative environments.
     """
 
     _type_prefix = "eigenbasis"
@@ -103,6 +132,24 @@ class EigenbasisDevice(BaseDevice):
         super().__init__(levels=dimension, label=label, **noise)
 
     def dissipation(self, op: Any, p: Any) -> tuple[CollapseChannel, ...]:
+        """Return relaxation and dephasing channels for the stored spectrum.
+
+        Parameters
+        ----------
+        op : LocalOps
+            Local operator namespace; unused because stored matrices define the basis.
+        p : parameter namespace
+            Bound noise parameters for this calculation.
+
+        Returns
+        -------
+        tuple of CollapseChannel
+            Channels selected by ``collapse_model`` and the active noise parameters.
+
+        See Also
+        --------
+        EigenbasisDevice : Dissipation choices and physics reference.
+        """
         del op
         return tuple(
             _matrix_element_emission_channel(self, p)
@@ -167,6 +214,19 @@ class EigenbasisDevice(BaseDevice):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EigenbasisDevice":
+        """Restore a frozen device declaration.
+
+        Parameters
+        ----------
+        data : dict
+            Output of :meth:`to_dict`, including energies and optional operator
+            matrices encoded as separate real and imaginary nested lists.
+
+        Returns
+        -------
+        EigenbasisDevice
+            Restored device with noise and reference-frequency metadata.
+        """
         return cls(
             data["energies"],
             charge_operator=_operator_from_json(data.get("charge_operator")),

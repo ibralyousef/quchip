@@ -38,6 +38,9 @@ autodoc_default_options = {
 }
 autodoc_member_order = "bysource"
 autodoc_typehints = "description"
+# Add types to authored entries without inventing empty parameter tables for
+# result records whose public fields are documented as attributes.
+autodoc_typehints_description_target = "documented"
 
 napoleon_google_docstring = False
 napoleon_numpy_docstring = True

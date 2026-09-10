@@ -135,6 +135,21 @@ class EffectiveTerms:
     its authored terms; it does not recompute this captured correction.
     ``projection`` carries the source coordinates of surviving operators;
     channels already stored here are in retained coordinates and bypass it.
+
+    Parameters
+    ----------
+    labels : tuple[str, ...]
+        Device labels defining the retained tensor-product order.
+    dims : tuple[int, ...]
+        Authored dimensions aligned with ``labels``.
+    hamiltonian : array-like
+        Hermitian retained Hamiltonian in GHz.
+    channels : tuple[CollapseChannel, ...], default=()
+        Retained jump operators and Lindblad rates in 1/ns.
+    label : str, default="effective"
+        Name used for diagnostics and the generated expression.
+    projection : OperatorProjection or None, default=None
+        Captured source-to-retained operator coordinates.
     """
 
     labels: tuple[str, ...]
@@ -188,12 +203,25 @@ class EffectiveTerms:
         object.__setattr__(self, "channels", channels)
 
     def expression(self, matrix: Any = None) -> PhysicsExpr:
-        """Return a captured matrix through the ordinary authored-expression path."""
+        """Return a captured matrix through the authored-expression path.
+
+        Parameters
+        ----------
+        matrix : array-like or None, default=None
+            Matrix in GHz. ``None`` uses :attr:`hamiltonian`.
+        """
         return PhysicsExpr.from_matrix(
             self.hamiltonian if matrix is None else matrix, labels=self.labels, dims=self.dims, name=self.label
         )
 
     def validate_for(self, chip: Any) -> None:
+        """Validate retained labels and dimensions against a chip.
+
+        Parameters
+        ----------
+        chip : Chip
+            Chip that will receive these terms.
+        """
         unknown = set(self.labels) - chip.device_map.keys()
         if unknown:
             raise ValueError(f"Effective terms {self.label!r} target unknown devices {sorted(unknown)}.")
@@ -231,7 +259,13 @@ class EffectiveTerms:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EffectiveTerms:
-        """Recreate validated retained terms from their numerical payload."""
+        """Recreate validated retained terms from their numerical payload.
+
+        Parameters
+        ----------
+        data : dict[str, Any]
+            Payload produced by :meth:`to_dict`.
+        """
         if set(data) != {"label", "labels", "dims", "hamiltonian", "channels", "projection"}:
             raise ValueError("Invalid serialized EffectiveTerms fields.")
 

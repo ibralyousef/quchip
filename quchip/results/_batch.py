@@ -143,7 +143,15 @@ class BatchResult(Generic[ResultT]):
         shape: tuple[int, ...],
         axes: tuple[tuple[str, Any], ...],
     ) -> Self:
-        """Return an equivalent batch annotated with sweep-axis metadata."""
+        """Return an equivalent batch annotated with sweep-axis metadata.
+
+        Parameters
+        ----------
+        shape : tuple of int
+            New sweep-grid shape.
+        axes : tuple
+            Named sweep-axis coordinates matching ``shape``.
+        """
         return type(self)(list(self._results), shape=shape, axes=axes)
 
     def __repr__(self) -> str:

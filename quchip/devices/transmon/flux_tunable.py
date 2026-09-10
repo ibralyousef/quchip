@@ -152,9 +152,12 @@ class FluxTunableTransmon(FockDevice):
         Fock-space truncation.
     label : str | None, default None
         Auto-generated as ``fluxtunable_{idx}`` when omitted.
-    **noise_kwargs
-        Forwarded to :class:`~quchip.devices.base.BaseDevice` — ``T1``,
-        ``T2``, ``thermal_occupation``.
+    T1 : float or None, default None
+        Energy-relaxation time in ns; ``None`` disables T1 relaxation.
+    T2 : float or None, default None
+        Total 0-1 coherence time in ns; if both are set, ``T2 <= 2*T1``.
+    thermal_occupation : float or None, default None
+        Dimensionless mean bath occupation; ``None`` disables absorption.
     """
 
     _type_prefix: ClassVar[str] = "fluxtunable"
@@ -209,7 +212,13 @@ class FluxTunableTransmon(FockDevice):
         super().__setattr__(name, value)
 
     def set_parameter_values(self, values: Mapping[str, Any]) -> None:
-        """Apply flux and calibration overrides without mapping-order effects."""
+        """Apply flux and calibration overrides without mapping-order effects.
+
+        Parameters
+        ----------
+        values : mapping[str, Any]
+            Parameter updates; flux-only updates retune ``freq``.
+        """
         updates = dict(values)
         if "flux_bias" in updates and "freq" not in updates:
             calibration = self.copy()
@@ -218,13 +227,28 @@ class FluxTunableTransmon(FockDevice):
         super().set_parameter_values(updates)
 
     def tunable_param_bounds(self, name: str, value: float) -> tuple[float, float]:
-        """Use one SQUID period as the default bound for explicit flux fitting."""
+        """Use one SQUID period as the default bound for explicit flux fitting.
+
+        Parameters
+        ----------
+        name : str
+            Tunable parameter name.
+        value : float
+            Concrete optimizer seed.
+        """
         if name == "flux_bias":
             return (-0.5, 0.5)
         return super().tunable_param_bounds(name, value)
 
     def local_hamiltonian(self, op: LocalOps, p: Any) -> PhysicsExpr:
         """Return the Duffing Hamiltonian built from the calibrated freq and anharmonicity.
+
+        Parameters
+        ----------
+        op : LocalOps
+            Fock operator namespace.
+        p : ParameterNamespace
+            Symbolic calibrated and flux parameters.
 
         ``H = ω n + (α/2) n(n − I)``. Rebinding ``flux_bias`` first updates
         the stored ``freq`` through the anchored SQUID dispersion.
@@ -268,6 +292,13 @@ class FluxTunableTransmon(FockDevice):
     def flux_for_frequency(self, target_freq: Any) -> Any:
         """Inverse SQUID dispersion on the monotonic lobe Φ/Φ₀ ∈ [0, 0.5).
 
+        Parameters
+        ----------
+        target_freq : float or array-like
+            Desired transition frequency in GHz.
+
+        Notes
+        -----
         Derivation:
             ω(Φ) = sqrt(8 E_C E_J_max sqrt(cos²(πΦ) + d²sin²(πΦ))) − E_C
             → let S = (ω + E_C)² / (8 E_C E_J_max)
