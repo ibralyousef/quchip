@@ -21,15 +21,15 @@ Optional dissipation
 --------------------
 Passing ``internal_quality_factor = Q`` adds a single unobserved photon-loss collapse
 operator ``sqrt(kappa) a`` with :math:`\\kappa = 2\\pi\\,f/Q`
-(angular decay rate, rad/ns).
+(energy-decay rate, 1/ns).
 
 **Quality-factor convention (physics, not a unit conversion).**
 ``internal_quality_factor`` is defined against the *ordinary* frequency
 ``freq`` (GHz) carried by this class. The resulting decay rate is
-:math:`\\kappa = 2\\pi\\,f/Q` (angular, rad/ns). The :math:`2\\pi`
+:math:`\\kappa = 2\\pi\\,f/Q` (energy decay, 1/ns). The :math:`2\\pi`
 here is intrinsic to the physical definition of Q — not an
 ordinary→angular units conversion bolted on at the engine boundary.
-Concretely, Q counts cycles of the *ordinary* oscillation per
+Concretely, ``Q/(2*pi)`` is the number of ordinary-frequency cycles per
 e-folding of energy, so energy decays as
 :math:`e^{-t/\\tau} = e^{-\\kappa t}` with
 :math:`\\kappa = \\omega/Q = 2\\pi f/Q`. For this reason the
@@ -82,8 +82,8 @@ class Resonator(FockDevice):
     internal_quality_factor : float | None, optional
         Internal Q referenced to the ordinary frequency ``freq`` in GHz.
         When set, adds a photon-loss Lindblad channel
-        ``sqrt(2*pi*freq/Q) a`` with angular decay rate
-        ``kappa = 2*pi*freq/Q`` in rad/ns. Must be positive. Like every
+        ``sqrt(2*pi*freq/Q) a`` with energy-decay rate
+        ``kappa = 2*pi*freq/Q`` in 1/ns. Must be positive. Like every
         noise parameter, it may be set after construction or cleared with
         ``None``; the next simulation reflects the current value.
     levels : int, default 10
@@ -92,9 +92,17 @@ class Resonator(FockDevice):
     label : str | None, default None
         If omitted, auto-generated as ``resonator_{idx}`` via the shared
         labeling counter.
-    **noise_kwargs
-        Forwarded verbatim to :class:`BaseDevice` — ``T1``, ``T2``,
-        ``thermal_occupation``.
+    T1 : float or None, default None
+        Energy-relaxation time in ns; ``None`` disables T1 relaxation.
+    T2 : float or None, default None
+        Total 0-1 coherence time in ns; if both are set, ``T2 <= 2*T1``.
+    thermal_occupation : float or None, default None
+        Dimensionless mean bath occupation; ``None`` disables absorption.
+
+    References
+    ----------
+    Blais et al., *Rev. Mod. Phys.* 93, 025005 (2021),
+    https://doi.org/10.1103/RevModPhys.93.025005.
 
     Example
     -------
@@ -116,7 +124,15 @@ class Resonator(FockDevice):
     approximation = "Linear harmonic oscillator with no Kerr or cross-Kerr self-interaction."
 
     def local_hamiltonian(self, op: LocalOps, p: Any) -> PhysicsExpr:
-        """Return the harmonic oscillator Hamiltonian ``H = freq * n``."""
+        """Return the harmonic oscillator Hamiltonian ``H = freq * n``.
+
+        Parameters
+        ----------
+        op : LocalOps
+            Fock operator namespace.
+        p : ParameterNamespace
+            Symbolic ``freq`` value.
+        """
         return p.freq * op.n
 
     def dissipation(self, op: LocalOps, p: Any) -> tuple[CollapseChannel, ...]:

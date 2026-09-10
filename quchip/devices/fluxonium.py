@@ -16,7 +16,55 @@ from quchip.devices.spaces import PhaseGridSpace
 
 
 class Fluxonium(DeviceModel):
-    """Fluxonium with its Hamiltonian authored in a finite phase-grid basis."""
+    r"""Fluxonium in a finite phase-grid basis.
+
+    The native Hamiltonian is
+    :math:`4E_C n^2 + E_L(\varphi+2\pi\varphi_{ext})^2/2
+    -E_J\cos\varphi` in ordinary GHz.
+
+    Parameters
+    ----------
+    E_C, E_J, E_L : float
+        Positive charging, Josephson, and inductive energies in GHz.
+    phi_ext : float, default 0.0
+        External reduced flux :math:`\Phi_{ext}/\Phi_0`.
+    levels : int or None, default None
+        Number of eigenstates projected into the chip. Required when
+        ``basis="eigen"``; ``None`` uses the native dimension for the native
+        basis.
+    label : str or None, default None
+        Device label.
+    num_basis : int, keyword-only, default 400
+        Odd-or-even phase-grid size; must be at least 3.
+    phi_max : float, keyword-only, default 5*pi
+        Positive half-width of the phase grid.
+    basis : {None, "native", "eigen"}, keyword-only
+        Requested solver basis. ``None`` inherits the chip policy and uses
+        native basis for standalone resolution; ``native`` keeps the phase
+        grid, while ``eigen`` projects onto ``levels`` energy states.
+    collapse_model : {"fermi_golden", "ladder"}, default "fermi_golden"
+        Relaxation construction. The Fermi-golden-rule option requires a
+        ``coupling_channel`` when ``T1`` is set.
+    coupling_channel : {None, "charge", "flux"}, default None
+        Physical operator used for matrix-element relaxation: ``"charge"``
+        selects :math:`n`, and ``"flux"`` selects :math:`\varphi`.
+    collapse_rate_threshold : float, default 1e-8
+        Non-negative dimensionless cutoff on squared matrix-element ratios
+        relative to the selected ``0 -> 1`` transition.
+    T1, T2 : float or None
+        Relaxation and dephasing times in ns; ``None`` disables each channel.
+    thermal_occupation : float or None
+        Mean thermal occupation (dimensionless); ``None`` disables thermal
+        absorption.
+    noise : keyword arguments
+        The concrete constructor also accepts these inherited noise fields as
+        keyword arguments for compatibility with the declarative device API.
+
+    References
+    ----------
+    See Manucharyan et al., *Science* 326, 113 (2009),
+    https://doi.org/10.1126/science.1175552, for the fluxonium Hamiltonian.
+    """
 
     _type_prefix = "fluxonium"
     tunable_param_names = ("E_C", "E_J", "E_L", "phi_ext")
@@ -106,7 +154,15 @@ class Fluxonium(DeviceModel):
         return PhaseGridSpace(points=self.num_basis, extent=self.phi_max)
 
     def local_hamiltonian(self, op: LocalOps, p: Any) -> PhysicsExpr:
-        """Return the native fluxonium Hamiltonian in ordinary GHz."""
+        """Return the native fluxonium Hamiltonian in ordinary GHz.
+
+        Parameters
+        ----------
+        op : LocalOps
+            Phase-grid operator namespace.
+        p : ParameterNamespace
+            Symbolic ``E_C``, ``E_J``, ``E_L`` and ``phi_ext`` values.
+        """
         shifted_phase = op.phi + (2.0 * pi) * p.phi_ext * op.I
         return (
             4.0 * p.E_C * op.n2
@@ -190,6 +246,13 @@ class Fluxonium(DeviceModel):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Fluxonium":
+        """Reconstruct from serialized constructor data.
+
+        Parameters
+        ----------
+        data : mapping
+            Record produced by :meth:`to_dict`.
+        """
         return cls(
             E_C=data["E_C"],
             E_J=data["E_J"],

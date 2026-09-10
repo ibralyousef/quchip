@@ -77,6 +77,15 @@ class AnalyticSignal:
     ``program`` includes the envelope, schedule timing and phase, and any
     carrier. Classical equipment transforms this complete value before a
     drive maps its physical quadratures into the quantum Hamiltonian.
+
+    Parameters
+    ----------
+    program : SignalProgram
+        Complete envelope, timing, phase, and carrier program.
+    carrier : Any or None, default=None
+        Carrier frequency in GHz, when uniquely defined.
+    phase_reference : Any or None, default=None
+        Reference used to track coherent phase alignment.
     """
 
     program: SignalProgram
@@ -85,7 +94,13 @@ class AnalyticSignal:
 
     @classmethod
     def from_pulse(cls, pulse: Any) -> "AnalyticSignal":
-        """Build the complete scheduled signal for one pulse record."""
+        """Build the complete scheduled signal for one pulse record.
+
+        Parameters
+        ----------
+        pulse : object
+            Scheduled pulse entry with envelope, timing, phase, and carrier.
+        """
         local = Window(
             child=EnvelopeRef(pulse.envelope),
             start=0.0,
@@ -113,11 +128,25 @@ class AnalyticSignal:
         return PhysicsExpr.from_signal(ImagPart(self.program), name="Q")
 
     def evaluate(self, t: Any, *, xp: Any | None = None) -> Any:
-        """Evaluate the complete complex signal at time *t*."""
+        """Evaluate the complete complex signal.
+
+        Parameters
+        ----------
+        t : array-like
+            Evaluation times in ns.
+        xp : array namespace or None, default=None
+            Numerical array module; inferred when omitted.
+        """
         return evaluate_signal_program(self.program, t, xp=xp)
 
     def shifted(self, delta_t: Any) -> "AnalyticSignal":
-        """Return the signal delayed by ``delta_t`` ns."""
+        """Return a delayed signal.
+
+        Parameters
+        ----------
+        delta_t : Any
+            Delay in ns.
+        """
         return type(self)(
             program=Shift(self.program, delta_t=delta_t),
             carrier=self.carrier,
@@ -125,7 +154,13 @@ class AnalyticSignal:
         )
 
     def scaled(self, factor: Any) -> "AnalyticSignal":
-        """Return the signal multiplied by a complex factor."""
+        """Return a signal multiplied by a complex factor.
+
+        Parameters
+        ----------
+        factor : Any
+            Dimensionless complex scale factor.
+        """
         return type(self)(
             program=Scale(self.program, factor=factor),
             carrier=self.carrier,
@@ -133,7 +168,15 @@ class AnalyticSignal:
         )
 
     def polar_scaled(self, amplitude: Any, theta: Any) -> "AnalyticSignal":
-        """Return the signal multiplied by ``amplitude * exp(i theta)``."""
+        """Return a signal multiplied by ``amplitude * exp(i theta)``.
+
+        Parameters
+        ----------
+        amplitude : Any
+            Dimensionless amplitude scale.
+        theta : Any
+            Phase rotation in radians.
+        """
         return type(self)(
             program=PolarScale(self.program, amplitude=amplitude, theta=theta),
             carrier=self.carrier,
@@ -192,6 +235,11 @@ class SignalTransform(Registrable, ABC, registry_root=True, metaclass=KeywordOnl
 
     Implement ``apply`` and declare ``serializable=True`` on classes whose
     fields can be saved. Import the extension before loading its instances.
+
+    Parameters
+    ----------
+    **values : Any
+        Settings and numerical parameters declared by the concrete transform.
     """
 
     _serializable = False
@@ -231,7 +279,15 @@ class SignalTransform(Registrable, ABC, registry_root=True, metaclass=KeywordOnl
         return copied
 
     def with_parameter_value(self, name: str, value: Any) -> "SignalTransform":
-        """Validate and rebind one numerical field on an independent transform."""
+        """Validate and rebind one numerical field on an independent transform.
+
+        Parameters
+        ----------
+        name : str
+            Declared numerical field name.
+        value : Any
+            Replacement value in the field's declared units.
+        """
         if name not in parameter_fields(type(self)):
             raise KeyError(name)
         rebound = self.copy()
@@ -253,19 +309,39 @@ class SignalTransform(Registrable, ABC, registry_root=True, metaclass=KeywordOnl
 
     @abstractmethod
     def apply(self, signals: SignalMap) -> SignalMap:
-        """Return the transformed signal map."""
+        """Return the transformed signal map.
+
+        Parameters
+        ----------
+        signals : SignalMap
+            Signals keyed by control line and source index.
+        """
 
     def referenced_lines(self) -> tuple[str, ...]:
         """Return control-line labels referenced by this transform."""
         return ()
 
     def without_line(self, line: str) -> "SignalTransform | None":
-        """Return this transform without *line*, or ``None`` when it must be dropped."""
+        """Return this transform without a line, or ``None`` if it must be dropped.
+
+        Parameters
+        ----------
+        line : str
+            Removed control-line label.
+        """
         return None if line in self.referenced_lines() else self
 
 
 class Delay(SignalTransform, serializable=True):
-    """Shift every signal on *line* in time by ``delta_t`` ns."""
+    """Shift every signal on one control line by ``delta_t`` ns.
+
+    Parameters
+    ----------
+    line : str or object
+        Drive label or drive object.
+    delta_t : float
+        Delay in ns; positive values shift the signal later.
+    """
 
     line: str = setting()
     delta_t: float = parameter()
@@ -276,7 +352,13 @@ class Delay(SignalTransform, serializable=True):
         object.__setattr__(self, "delta_t", delta_t)
 
     def apply(self, signals: SignalMap) -> SignalMap:
-        """Time-shift every signal on :attr:`line` by ``delta_t`` ns."""
+        """Time-shift every signal on :attr:`line` by ``delta_t`` ns.
+
+        Parameters
+        ----------
+        signals : SignalMap
+            Signals keyed by ``(line, source_index)``.
+        """
         s = dict(signals)
         for key in list(s):
             if key[0] == self.line:
@@ -284,10 +366,19 @@ class Delay(SignalTransform, serializable=True):
         return s
 
     def referenced_lines(self) -> tuple[str, ...]:
+        """Return the line label affected by this delay."""
         return (self.line,)
 
 class Gain(SignalTransform, serializable=True):
-    """Scale every signal on *line* by a complex *factor*."""
+    """Scale every signal on one control line by a complex factor.
+
+    Parameters
+    ----------
+    line : str or object
+        Drive label or drive object.
+    factor : complex
+        Dimensionless amplitude and phase multiplier.
+    """
 
     line: str = setting()
     factor: complex = parameter()
@@ -298,7 +389,13 @@ class Gain(SignalTransform, serializable=True):
         object.__setattr__(self, "factor", factor)
 
     def apply(self, signals: SignalMap) -> SignalMap:
-        """Scale every signal on :attr:`line` by the complex ``factor``."""
+        """Scale every signal on :attr:`line` by the complex ``factor``.
+
+        Parameters
+        ----------
+        signals : SignalMap
+            Signals keyed by ``(line, source_index)``.
+        """
         s = dict(signals)
         for key in list(s):
             if key[0] == self.line:
@@ -306,6 +403,7 @@ class Gain(SignalTransform, serializable=True):
         return s
 
     def referenced_lines(self) -> tuple[str, ...]:
+        """Return the line label affected by this gain."""
         return (self.line,)
 
 class Crosstalk(SignalTransform, serializable=True):
@@ -360,7 +458,13 @@ class Crosstalk(SignalTransform, serializable=True):
         object.__setattr__(self, "delay", delay)
 
     def apply(self, signals: SignalMap) -> SignalMap:
-        """Add the phase-rotated, delayed source signal onto the victim line."""
+        """Add the phase-rotated, delayed source signal onto the victim line.
+
+        Parameters
+        ----------
+        signals : SignalMap
+            Signals keyed by ``(line, source_index)``.
+        """
         output = dict(signals)
         for key, signal in signals.items():
             if key[0] != self.source:
@@ -372,4 +476,5 @@ class Crosstalk(SignalTransform, serializable=True):
         return output
 
     def referenced_lines(self) -> tuple[str, ...]:
+        """Return source and victim labels referenced by this crosstalk edge."""
         return (self.source, self.victim)

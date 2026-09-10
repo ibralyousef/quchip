@@ -57,7 +57,21 @@ class ObservableReport:
 
 @dataclass(frozen=True)
 class FitParameterReport:
-    """Starting point, bounds, result, and provenance for one bare parameter."""
+    """Record one fitted bare parameter.
+
+    Attributes
+    ----------
+    name : str
+        Path in ``chip.parameters``.
+    initial, final : float
+        Seed and fitted values in the parameter's native units.
+    lower_bound, upper_bound : float
+        Bounds used by the optimizer, in the same units.
+    seed_source : str
+        Origin of the starting value, as recorded by the fitter.
+    sign_choice : str or None
+        Coupling-sign decision, or ``None`` when no decision was needed.
+    """
 
     name: str
     initial: float
@@ -69,7 +83,7 @@ class FitParameterReport:
 
     @property
     def delta(self) -> float:
-        """Signed optimizer displacement, ``final - initial`` (GHz)."""
+        """Signed optimizer displacement, ``final - initial``, in the parameter's native units."""
         return self.final - self.initial
 
 

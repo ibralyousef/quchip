@@ -62,7 +62,17 @@ class _OperatingPoint:
 
 @dataclass(frozen=True)
 class PortTone:
-    """A fixed coherent input field entering through one declared port."""
+    """A fixed coherent input field entering through one declared port.
+
+    Attributes
+    ----------
+    port : str
+        Resolved external network-port label.
+    freq : scalar
+        Carrier frequency in GHz.
+    amplitude : scalar
+        Complex incident field amplitude in ``1/sqrt(ns)``.
+    """
 
     port: str
     freq: Any
@@ -71,7 +81,24 @@ class PortTone:
     _owner: "VNA"
 
     def vary(self, field: str, values: Any, *, name: str | None = None) -> Sweep:
-        """Create a sweep axis for this tone's ``freq`` or ``amplitude``."""
+        """Create a sweep axis for this tone's frequency or amplitude.
+
+        Parameters
+        ----------
+        field : {"freq", "amplitude"}
+            Tone attribute to vary. Frequency is in GHz and amplitude is in
+            ``1/sqrt(ns)``.
+        values : array_like
+            Values in sweep order.
+        name : str or None, optional
+            Public result-axis name; defaults to ``"<port>.<field>"``.
+
+        Returns
+        -------
+        Sweep
+            Axis for :meth:`VNA.sweep`, :meth:`VNA.finite_power`, or
+            :meth:`VNA.measure`.
+        """
         if field not in {"freq", "amplitude"}:
             raise ValueError(f"A port tone can vary only 'freq' or 'amplitude', got {field!r}.")
         return _ToneAxis(
@@ -97,6 +124,13 @@ class VNA:
     ``VNA(chip)`` selects every exposed instrument port in the chip's ``PortNetwork``.
     Pass exposed port objects or their labels as ``ports`` to select a subset;
     a bare label string is rejected.
+
+    Parameters
+    ----------
+    chip : Chip
+        Chip with a ``PortNetwork``.
+    ports : sequence of port objects or str, optional
+        Selected external ports; ``None`` selects all external ports.
     """
 
     def __init__(self, chip: Any, *, ports: Sequence[Any] | None = None) -> None:
@@ -115,14 +149,40 @@ class VNA:
         self._tones: list[PortTone] = []
 
     def pump(self, port: Any, *, freq: Any, amplitude: Any) -> PortTone:
-        """Add a fixed background tone and return its variation handle."""
+        """Add a fixed coherent pump and return its sweep handle.
+
+        Parameters
+        ----------
+        port : port object or str
+            External port receiving the pump.
+        freq : scalar
+            Pump frequency in GHz.
+        amplitude : scalar
+            Complex incident field in ``1/sqrt(ns)``.
+
+        Returns
+        -------
+        PortTone
+            Handle for varying pump frequency or amplitude.
+        """
         tone = PortTone(_resolve_exposure(self.chip, port), freq, amplitude, len(self._tones), self)
         self._tones.append(tone)
         return tone
 
     @staticmethod
     def zip(*variations: Sweep) -> ZippedSweep:
-        """Pair tone variations element by element."""
+        """Pair sweep axes element by element instead of taking a product.
+
+        Parameters
+        ----------
+        *variations : Sweep
+            Axes with equal lengths.
+
+        Returns
+        -------
+        ZippedSweep
+            Composite sweep evaluated at corresponding points.
+        """
         return Sweep.zip(*variations)
 
     def sweep(
@@ -142,6 +202,23 @@ class VNA:
         uses one multi-right-hand-side mode-space solve. The stationary route solves
         one pumped operating point, then uses one shifted-Liouvillian factorization
         for every input port.
+
+        Parameters
+        ----------
+        frequencies : scalar or array_like
+            Probe frequencies in GHz.
+        *variations : Sweep or ZippedSweep
+            Chip and pump axes; Cartesian axes combine and zipped axes vary together.
+        options : dict or None, optional
+            Stationary solver options; ``None`` permits the passive-linear path.
+        progress : bool, default=False
+            Show a progress bar for stationary solves.
+
+        Returns
+        -------
+        SParameterResult
+            Matrix with shape ``(*shape, n_ports, n_ports)`` and indexing
+            ``[..., output, input]``.
         """
         freq_values, freq_is_axis = _axis_values(frequencies)
         self._validate_variations(variations, reserved=("frequency",) if freq_is_axis else ())
@@ -220,6 +297,25 @@ class VNA:
         This method always uses the stationary Liouvillian route. It does not use the
         passive-linear mode-space shortcut or follow sweep-rate hysteresis and
         metastable branches.
+
+        Parameters
+        ----------
+        frequencies, amplitudes : scalar or array_like
+            Probe frequencies in GHz and incident fields in ``1/sqrt(ns)``.
+        *variations : Sweep or ZippedSweep
+            Chip and pump axes.
+        input : port object or str, optional
+            Probe input; required when multiple ports are selected.
+        options : dict or None, optional
+            Stationary solver options.
+        progress : bool, default=False
+            Show a progress bar.
+
+        Returns
+        -------
+        MeanFieldResponseResult
+            Complex means with shape ``(*shape, n_ports)`` and incident fields
+            with shape ``shape``.
         """
         if input is None:
             if len(self.ports) != 1:
@@ -327,6 +423,28 @@ class VNA:
         without another solve; it is not a quantum-trajectory distribution.
         Internal Fock-mode amplitudes and occupations are captured as well;
         query them with mode_amplitude(device) and photon_number(device).
+
+        Parameters
+        ----------
+        frequencies, amplitudes : scalar or array_like
+            Probe frequencies in GHz and incident fields in ``1/sqrt(ns)``.
+        *variations : Sweep or ZippedSweep
+            Chip and pump axes.
+        input : port object or str, optional
+            Probe input; required when multiple ports are selected.
+        outputs : sequence of port objects or str, optional
+            Captured outputs; ``None`` selects all selected ports.
+        noise_frequencies : array_like or None, optional
+            Symmetric increasing offset grid in GHz, including zero.
+        options : dict or None, optional
+            Stationary solver options.
+        progress : bool, default=False
+            Show a progress bar.
+
+        Returns
+        -------
+        VNAMeasurement
+            Means and physical noise spectra reusable by receiver processing.
         """
         from quchip.analysis.measurement import measure
         return measure(self, frequencies, amplitudes, variations, input=input, outputs=outputs,
@@ -344,6 +462,15 @@ class VNA:
         Frequencies are offsets in GHz from the stationary tone frame. The
         coherent carrier is reported separately because it is a delta peak,
         not a finite sampled spectral density.
+
+        Parameters
+        ----------
+        output : port object or str
+            Output plane.
+        frequencies : scalar or array_like
+            Offset frequencies in GHz.
+        options : dict or None, optional
+            Stationary solver options.
         """
         output_port = _resolve_exposure(self.chip, output)
         frequency_values, _ = _axis_values(frequencies)
@@ -396,7 +523,24 @@ class VNA:
         input: Any | None = None,
         options: dict | None = None,
     ) -> OutputCorrelationResult:
-        """Return normalized first-order output coherence."""
+        """Return normalized first-order output coherence ``g1``.
+
+        Parameters
+        ----------
+        output : port object or str
+            Delayed output plane.
+        delays : scalar or array_like
+            Non-negative delays in ns.
+        input : port object or str, optional
+            Cross-correlation input; defaults to ``output``.
+        options : dict or None, optional
+            Stationary solver options.
+
+        Returns
+        -------
+        OutputCorrelationResult
+            Normalized and raw correlations on the delay grid.
+        """
         return self._correlation(output, delays, input=input, order=1, options=options)
 
     def g2(
@@ -407,7 +551,24 @@ class VNA:
         input: Any | None = None,
         options: dict | None = None,
     ) -> OutputCorrelationResult:
-        """Return normalized second-order output intensity correlation."""
+        """Return normalized second-order output intensity correlation ``g2``.
+
+        Parameters
+        ----------
+        output : port object or str
+            Delayed output plane.
+        delays : scalar or array_like
+            Non-negative delays in ns.
+        input : port object or str, optional
+            Cross-correlation input; defaults to ``output``.
+        options : dict or None, optional
+            Stationary solver options.
+
+        Returns
+        -------
+        OutputCorrelationResult
+            Normalized and raw second-order correlations on the delay grid.
+        """
         return self._correlation(output, delays, input=input, order=2, options=options)
 
     def _correlation(

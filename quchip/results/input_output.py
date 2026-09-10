@@ -46,6 +46,22 @@ class SParameterResult:
     The stationary route computes both matrices from one shifted-Liouvillian
     factorization. The passive-linear route reports zero for ``T``.
     ``numpy.asarray(result)`` returns ``matrix``.
+
+    Attributes
+    ----------
+    frequencies : scalar or array_like
+        Probe frequencies in GHz.
+    ports : tuple of str
+        Port labels in output/input matrix order.
+    axes : tuple
+        Sweep-axis ``(name, values)`` pairs; ``shape`` is the sweep shape.
+    diagnostics : tuple of mapping
+        Per-point solver diagnostics.
+    matrix, conjugate_matrix : array_like
+        ``S`` and phase-conjugating ``T`` arrays with shape
+        ``(*shape, n_ports, n_ports)``.
+    shape : tuple of int
+        Sweep-grid shape preceding the matrix axes.
     """
 
     frequencies: Any
@@ -69,11 +85,23 @@ class SParameterResult:
         return tuple(name for name, _ in self.axes)
 
     def s(self, output: Any, input: Any) -> Any:
-        """Return ``S(output, input)`` over the sweep grid for two selected ports."""
+        """Return ``S(output, input)`` over the sweep grid.
+
+        Parameters
+        ----------
+        output, input : port object or str
+            Output row and input column.
+        """
         return self.matrix[..., self._index(output), self._index(input)]
 
     def t(self, output: Any, input: Any) -> Any:
-        """Return the phase-conjugating ``T(output, input)`` over the sweep grid."""
+        """Return phase-conjugating ``T(output, input)`` over the sweep grid.
+
+        Parameters
+        ----------
+        output, input : port object or str
+            Output row and input column.
+        """
         return self.conjugate_matrix[..., self._index(output), self._index(input)]
 
     @property
@@ -114,6 +142,25 @@ class MeanFieldResponseResult:
     plane and carrier, and is ``NaN`` where ``beta`` is zero. The result
     contains one stationary mean-field branch; it does not encode sweep-rate
     hysteresis or metastable branches.
+
+    Attributes
+    ----------
+    ports : tuple of str
+        Selected output labels in the final array axis.
+    input : str
+        Probe input label.
+    frequencies, amplitudes : scalar or array_like
+        Probe values in GHz and ``1/sqrt(ns)``.
+    axes : tuple
+        Sweep-axis ``(name, values)`` pairs; ``shape`` is their array shape.
+    diagnostics : tuple of mapping
+        Per-point stationary-solver diagnostics.
+    values : array_like
+        Complex output means with shape ``(*shape, n_ports)``.
+    incident : array_like
+        Incident amplitude broadcast over ``shape``.
+    shape : tuple of int
+        Sweep-grid shape preceding the port axis.
     """
 
     ports: tuple[str, ...]
@@ -139,7 +186,13 @@ class MeanFieldResponseResult:
         return tuple(name for name, _ in self.axes)
 
     def mean(self, plane: Any) -> Any:
-        """Return the stationary ``<b_out>`` at ``plane`` with shape ``shape``."""
+        """Return stationary ``<b_out>`` at ``plane`` with shape ``shape``.
+
+        Parameters
+        ----------
+        plane : port object or str
+            Output reference plane.
+        """
         label = resolve_label(plane)
         try:
             return self.values[..., self.ports.index(label)]
@@ -152,6 +205,11 @@ class MeanFieldResponseResult:
         The result is complex ``NaN`` where the incident ``beta`` is zero. Its
         zero-amplitude limit is the corresponding small-signal S-parameter when
         no fixed pump leaves a coherent mean at that plane and carrier.
+
+        Parameters
+        ----------
+        plane : port object or str
+            Output reference plane.
         """
         mean = self.mean(plane)
         xp = select_array_module(is_jax_array(mean))
@@ -172,6 +230,21 @@ class OutputSpectrumResult:
     ``signal_coherent_flux`` and ``signal_incoherent_flux``. Added noise is
     not included in these fluxes because converting a spectral density to
     flux requires a detection bandwidth.
+
+    Attributes
+    ----------
+    port : str
+        Output port label.
+    frequencies : array_like
+        Offset frequencies in GHz.
+    total_fluctuation_spectrum, signal_fluctuation_spectrum, added_noise_spectrum : array_like
+        Normal-ordered spectral densities in frequency order.
+    signal_photon_flux, signal_coherent_flux, signal_incoherent_flux : scalar
+        Propagated flux terms in photons/ns.
+    steady_state : SteadyStateResult
+        Captured stationary state used for the spectra.
+    fourier_convention : str
+        Definition of the reported two-sided spectrum.
     """
 
     port: str
@@ -188,7 +261,25 @@ class OutputSpectrumResult:
 
 @dataclass(frozen=True)
 class OutputCorrelationResult:
-    """Normalized stationary output-field correlation versus delay."""
+    """Normalized stationary output-field correlation versus delay.
+
+    Attributes
+    ----------
+    order : {1, 2}
+        Correlation order.
+    input_port, output_port : str
+        Correlation input and delayed output labels.
+    delays : array_like
+        Non-negative delays in ns.
+    values, unnormalized : array_like
+        Normalized and raw correlation values in delay order.
+    input_intensity, output_intensity : scalar
+        Mean photon fluxes used for normalization.
+    steady_state : SteadyStateResult
+        Captured stationary state.
+    normalization : str
+        Human-readable normalization convention.
+    """
 
     order: int
     input_port: str

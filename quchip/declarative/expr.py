@@ -24,7 +24,18 @@ def is_opaque_callable(value: Any) -> bool:
 
 @dataclass(frozen=True)
 class PhysicsExpr:
-    """Authored scalar and operator algebra, independent of numerical values."""
+    """Authored scalar and operator algebra, independent of numerical values.
+
+    Parameters
+    ----------
+    kind : str
+        Expression node kind, such as ``"op"``, ``"add"``, ``"parameter"``
+        or ``"matrix"``.
+    args : tuple, default ()
+        Node payload in the representation required by ``kind``.
+    labels : tuple[str, ...], default ()
+        Ordered endpoint labels supporting this expression.
+    """
 
     kind: str
     args: tuple[Any, ...] = ()
@@ -40,12 +51,26 @@ class PhysicsExpr:
         symbol: str | None = None,
         unit: str | None = None,
     ) -> "PhysicsExpr":
-        """Create a symbolic declared-parameter leaf."""
+        """Create a symbolic declared-parameter leaf.
+
+        Parameters
+        ----------
+        scope, name : str
+            Dotted owner scope and declared field name.
+        symbol, unit : str or None
+            Optional display symbol and unit metadata.
+        """
         return cls("parameter", (f"{scope}.{name}", symbol or name, unit))
 
     @classmethod
     def literal(cls, value: Any) -> "PhysicsExpr":
-        """Create a literal scalar leaf."""
+        """Create a literal scalar leaf.
+
+        Parameters
+        ----------
+        value : scalar
+            Numerical constant copied into the expression.
+        """
         return cls("literal", (copy_value(value, readonly=True),))
 
     @classmethod
@@ -57,7 +82,17 @@ class PhysicsExpr:
         dims: tuple[int, ...],
         name: str | None = None,
     ) -> "PhysicsExpr":
-        """Create a named backend-neutral matrix contribution."""
+        """Create a named backend-neutral matrix contribution.
+
+        Parameters
+        ----------
+        value : array-like
+            Matrix payload with one local block per ``dims`` entry.
+        labels, dims : tuple
+            Matching ordered endpoint labels and positive dimensions.
+        name : str or None
+            Optional display name.
+        """
         if len(labels) != len(dims):
             raise ValueError("Matrix labels and dimensions must have the same length.")
         return cls("matrix", (copy_value(value, readonly=True), tuple(dims), name), tuple(labels))
@@ -76,6 +111,17 @@ class PhysicsExpr:
         The function runs only during numerical materialization. Display keeps
         its declared name and arguments, such as ``X(a, b)``, without exposing
         the implementation as symbolic algebra.
+
+        Parameters
+        ----------
+        function : callable
+            Pure callable evaluated during numerical materialization.
+        *arguments : Any
+            Expression arguments passed to ``function``.
+        labels, dims : tuple
+            Matching endpoint labels and dimensions.
+        name : str or None
+            Display name; required for anonymous callables.
         """
         if len(labels) != len(dims):
             raise ValueError("Function labels and dimensions must have the same length.")
@@ -99,7 +145,17 @@ class PhysicsExpr:
         dims: tuple[int, ...],
         name: str,
     ) -> "PhysicsExpr":
-        """Create a named authored ket contribution."""
+        """Create a named authored ket contribution.
+
+        Parameters
+        ----------
+        value : array-like
+            Ket payload.
+        labels, dims : tuple
+            Matching endpoint labels and dimensions.
+        name : str
+            Display name.
+        """
         return cls("state", (copy_value(value, readonly=True), tuple(dims), name), tuple(labels))
 
     @classmethod
@@ -111,7 +167,19 @@ class PhysicsExpr:
         dims: tuple[int, ...],
         name: str,
     ) -> "PhysicsExpr":
-        """Create an opaque callable ket contribution."""
+        """Create an opaque callable ket contribution.
+
+        Parameters
+        ----------
+        function : callable
+            Callable returning a ket during materialization.
+        *arguments : Any
+            Expression arguments passed to ``function``.
+        labels, dims : tuple
+            Matching endpoint labels and dimensions.
+        name : str
+            Display name.
+        """
         if not callable(function):
             raise TypeError("function must be callable.")
         return cls(
@@ -122,11 +190,25 @@ class PhysicsExpr:
 
     @classmethod
     def from_signal(cls, signal: Any, *, name: str = "f") -> "PhysicsExpr":
-        """Create a scalar time-function leaf backed by an engine signal."""
+        """Create a scalar time-function leaf backed by an engine signal.
+
+        Parameters
+        ----------
+        signal : object
+            Engine signal object evaluated at runtime.
+        name : str, default ``"f"``
+            Display name for the signal node.
+        """
         return cls("signal", (signal, name))
 
     def embed(self, labels: tuple[str, ...], dims: tuple[int, ...]) -> "PhysicsExpr":
-        """Embed this local contribution into an ordered composite Hilbert space."""
+        """Embed this local contribution into an ordered composite Hilbert space.
+
+        Parameters
+        ----------
+        labels, dims : tuple
+            Complete ordered composite labels and matching dimensions.
+        """
         if len(labels) != len(dims):
             raise ValueError("Composite labels and dimensions must have the same length.")
         missing = set(self.labels) - set(labels)
@@ -135,7 +217,13 @@ class PhysicsExpr:
         return PhysicsExpr("embed", (self, tuple(labels), tuple(dims)), tuple(labels))
 
     def with_bindings(self, bindings: Mapping[str, Any]) -> "PhysicsExpr":
-        """Attach default values used only by direct numerical inspection."""
+        """Attach default values used only by direct numerical inspection.
+
+        Parameters
+        ----------
+        bindings : mapping[str, Any]
+            Dotted parameter paths to numerical values.
+        """
         return replace(self, _bindings=copy_value(dict(bindings), readonly=True))
 
     def parameter_paths(self) -> tuple[str, ...]:
@@ -277,7 +365,17 @@ class PhysicsExpr:
         t: Any | None = None,
         backend: Any = None,
     ) -> Any:
-        """Materialize this expression and return its dense numerical array."""
+        """Materialize this expression and return its dense numerical array.
+
+        Parameters
+        ----------
+        bindings : mapping or None, optional
+            Values for unresolved parameter paths.
+        t : scalar or None, keyword-only
+            Time for signal evaluation.
+        backend : backend or None, keyword-only
+            Backend lowering object; ``None`` selects the default.
+        """
         if backend is None:
             from quchip.backend import get_default_backend
 
@@ -341,7 +439,28 @@ def as_operator_expr(
     scope: str | None = None,
     allowed: Mapping[str, Any] | None = None,
 ) -> PhysicsExpr:
-    """Normalize symbolic, matrix, or opaque callable operator authorship."""
+    """Normalize symbolic, matrix, or opaque callable operator authorship.
+
+    Parameters
+    ----------
+    value : PhysicsExpr, callable, or matrix
+        Authored operator representation.
+    labels, dims : tuple
+        Ordered endpoint labels and matching dimensions.
+    name : str
+        Display name for opaque or matrix contributions.
+    arguments : tuple, default ()
+        Arguments for an opaque callable.
+    owner : object or None, default None
+        Object whose fields bind a callable's positional argument names.
+        Mutually exclusive with explicit ``arguments``.
+    scope : str or None, default None
+        Dotted-path prefix for owner-bound parameters, such as a device label.
+        Required with ``owner`` when the callable has arguments.
+    allowed : mapping or None, default None
+        Permitted owner-field names (mapping keys). ``None`` accepts any
+        named field present on the owner; values in this mapping are unused.
+    """
     expected = (prod(dims), prod(dims))
     if isinstance(value, PhysicsExpr):
         if not value.labels:
@@ -383,7 +502,26 @@ def as_scalar_expr(
     scope: str | None = None,
     allowed: Mapping[str, Any] | None = None,
 ) -> PhysicsExpr:
-    """Normalize symbolic, numeric, or opaque callable scalar authorship."""
+    """Normalize symbolic, numeric, or opaque callable scalar authorship.
+
+    Parameters
+    ----------
+    value : PhysicsExpr, scalar, or callable
+        Authored scalar representation.
+    name : str
+        Display name for opaque callables.
+    arguments : tuple, default ()
+        Arguments for an opaque callable.
+    owner : object or None, default None
+        Object whose fields bind a callable's positional argument names.
+        Mutually exclusive with explicit ``arguments``.
+    scope : str or None, default None
+        Dotted-path prefix for owner-bound parameters, such as a device label.
+        Required with ``owner`` when the callable has arguments.
+    allowed : mapping or None, default None
+        Permitted owner-field names (mapping keys). ``None`` accepts any
+        named field present on the owner; values in this mapping are unused.
+    """
     if isinstance(value, PhysicsExpr):
         if value.labels:
             raise TypeError("A scalar expression cannot carry subsystem labels.")
@@ -413,7 +551,28 @@ def as_state_expr(
     scope: str | None = None,
     allowed: Mapping[str, Any] | None = None,
 ) -> PhysicsExpr:
-    """Normalize an authored ket array or opaque callable without evaluating it."""
+    """Normalize an authored ket array or opaque callable without evaluating it.
+
+    Parameters
+    ----------
+    value : PhysicsExpr, callable, or array
+        Authored ket representation.
+    labels, dims : tuple
+        Ordered endpoint labels and matching dimensions.
+    name : str
+        Display name for the state contribution.
+    arguments : tuple, default ()
+        Arguments for an opaque callable.
+    owner : object or None, default None
+        Object whose fields bind a callable's positional argument names.
+        Mutually exclusive with explicit ``arguments``.
+    scope : str or None, default None
+        Dotted-path prefix for owner-bound parameters, such as a device label.
+        Required with ``owner`` when the callable has arguments.
+    allowed : mapping or None, default None
+        Permitted owner-field names (mapping keys). ``None`` accepts any
+        named field present on the owner; values in this mapping are unused.
+    """
     expected = (prod(dims), 1)
     if isinstance(value, PhysicsExpr):
         if value.labels != labels:

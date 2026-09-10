@@ -68,6 +68,17 @@ class FrameTone:
 
     ``coefficients`` pairs each device label with its excitation-number change
     ``k_d``. ``weight`` is ``|h_band|² ∫|envelope|² dt`` when available.
+
+    Attributes
+    ----------
+    coefficients : tuple of (str, int)
+        Device labels and excitation-number changes.
+    freq : scalar
+        Constraint frequency in GHz.
+    weight : float or None
+        Integrated constraint weight, when available.
+    source : str
+        Description of the originating term or tone.
     """
 
     coefficients: tuple[tuple[str, int], ...]
@@ -84,6 +95,17 @@ class FrameResidual:
     a static coupling or ``Σ_d k_d ω_d - freq`` for a tone. ``source`` and
     ``devices`` identify its origin, and ``weight`` records its
     integrated strength when available.
+
+    Attributes
+    ----------
+    source : str
+        Description of the rejected constraint.
+    devices : tuple of str
+        Devices participating in the constraint.
+    frequency : scalar
+        Residual frequency in GHz.
+    weight : float or None
+        Integrated constraint weight, when available.
     """
 
     source: str
@@ -102,6 +124,19 @@ class FramePlan:
     lists rejected constraints that remain time dependent. ``tones`` contains
     the accepted tone constraints that fixed driven clusters, including each
     tone's source, charge coefficients, frequency, and weight.
+
+    Attributes
+    ----------
+    frequencies : mapping
+        Frame frequency in GHz for each device label.
+    clusters : tuple of tuple of str
+        Device groups linked by accepted constraints.
+    pins : tuple of (str, scalar)
+        Reference frequencies in GHz used for free variables.
+    residuals : tuple of FrameResidual
+        Rejected constraints that remain time dependent.
+    tones : tuple of FrameTone
+        Accepted driven constraints.
     """
 
     frequencies: Mapping[str, Any]

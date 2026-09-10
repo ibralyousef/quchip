@@ -72,7 +72,19 @@ def _synthesize_envelope_init(cls: type["Envelope"]) -> Any:
 
 
 class Envelope(Registrable, ABC, registry_root=True, metaclass=DeclarativeMeta):
-    """Local complex pulse shape evaluated relative to its scheduled start."""
+    """Local complex pulse shape evaluated relative to its scheduled start.
+
+    Concrete subclasses declare ``duration`` and shape parameters with
+    :func:`~quchip.declarative.parameters.parameter`; constructors are
+    synthesized from those declarations. Times are in ns and values are
+    complex I/Q amplitudes.
+
+    Parameters
+    ----------
+    **params : Any
+        Declared envelope fields; concrete subclasses define their names,
+        defaults, units, and validation constraints.
+    """
 
     duration: Scalar
 
@@ -94,7 +106,6 @@ class Envelope(Registrable, ABC, registry_root=True, metaclass=DeclarativeMeta):
         jtu.register_pytree_node(cls, _flatten, _unflatten)
 
     def __init__(self, **params: Any) -> None:
-        """Initialize an envelope from its declared parameter values."""
         values = resolve_declared_params(type(self), params)
         if "duration" not in values:
             raise TypeError(
@@ -122,7 +133,14 @@ class Envelope(Registrable, ABC, registry_root=True, metaclass=DeclarativeMeta):
         return {name: getattr(self, name) for name in names}
 
     def with_params(self, bindings: Mapping[str, Any]) -> Self:
-        """Return an independent envelope validated after all values are applied."""
+        """Return an independent envelope after applying parameter bindings.
+
+        Parameters
+        ----------
+        bindings : mapping[str, Any]
+            Declared field names and replacement values; unknown names raise
+            ``ValueError``.
+        """
         from quchip.utils.values import copy_value
 
         unknown = set(bindings) - self.parameter_values().keys()
@@ -136,7 +154,13 @@ class Envelope(Registrable, ABC, registry_root=True, metaclass=DeclarativeMeta):
 
     @abstractmethod
     def value(self, local_time: Any) -> Any:
-        """Return complex I/Q shape at time relative to the pulse start."""
+        """Return complex I/Q shape at local time in ns.
+
+        Parameters
+        ----------
+        local_time : scalar or array-like
+            Time relative to the scheduled pulse start.
+        """
         ...
 
     def sampling_times(self) -> Any:
@@ -148,7 +172,15 @@ class Envelope(Registrable, ABC, registry_root=True, metaclass=DeclarativeMeta):
         return qnp.linspace(0.0, self.duration, 65)
 
     def sample(self, local_time: Any, *, real: bool = False) -> Any:
-        """Evaluate the shape on an array, optionally returning only I."""
+        """Evaluate the shape, optionally returning only its real I component.
+
+        Parameters
+        ----------
+        local_time : scalar or array-like
+            Local sample times in ns.
+        real : bool, default False
+            Return real I values instead of complex I/Q values.
+        """
         xp = _pick_namespace(local_time)
         values = xp.asarray(
             self.value(xp.asarray(local_time, dtype=float)),
@@ -249,6 +281,23 @@ class Gaussian(Envelope):
     ``0.011 * amplitude`` at the default ``sigmas=3``. The pulse turns
     on and off with that jump; the Gaussian waveform itself is
     unchanged.
+
+    Parameters
+    ----------
+    duration : float
+        Pulse duration in ns; positive.
+    sigmas : float, default 3
+        Number of standard deviations from the pulse center to each window
+        edge, so ``sigma = duration/(2*sigmas)``; positive.
+    amplitude : float, default 1.0
+        Peak in-phase envelope amplitude. Its physical unit is supplied by
+        the consuming drive (for example GHz for a Hamiltonian drive or
+        1/sqrt(ns) for an incident field).
+
+    References
+    ----------
+    Motzoi et al., *Phys. Rev. Lett.* 103, 110501 (2009),
+    https://doi.org/10.1103/PhysRevLett.103.110501.
     """
 
     duration: Scalar = parameter(positive=True, unit="ns")
@@ -259,7 +308,13 @@ class Gaussian(Envelope):
         return _gaussian_sampling_times(self.duration, self.sigmas)
 
     def value(self, t: Any) -> Any:
-        """Evaluate the centered Gaussian envelope at time points *t*."""
+        """Evaluate the centered Gaussian envelope.
+
+        Parameters
+        ----------
+        t : scalar or array-like
+            Local times in ns.
+        """
         center = self.duration / 2.0
         sigma = self.duration / (2.0 * self.sigmas)
         return qnp.asarray(
@@ -278,6 +333,23 @@ class GaussianDRAG(Envelope):
 
     ``beta`` is signed and measured in ns. Its sign therefore owns the
     quadrature convention without an additional polarity flag.
+
+    Parameters
+    ----------
+    duration : float
+        Pulse duration in ns; positive.
+    sigmas : float, default 3
+        Number of standard deviations from the pulse center to each window
+        edge, so ``sigma = duration/(2*sigmas)``; positive.
+    amplitude : float, default 1.0
+        Peak in-phase envelope amplitude; physical units come from the drive.
+    beta : float, default 0.0
+        Derivative-quadrature coefficient in ns; signed.
+
+    References
+    ----------
+    Motzoi et al., *Phys. Rev. Lett.* 103, 110501 (2009),
+    https://doi.org/10.1103/PhysRevLett.103.110501.
     """
 
     duration: Scalar = parameter(positive=True, unit="ns")
@@ -289,6 +361,13 @@ class GaussianDRAG(Envelope):
         return _gaussian_sampling_times(self.duration, self.sigmas)
 
     def value(self, t: Any) -> Any:
+        """Evaluate the DRAG envelope.
+
+        Parameters
+        ----------
+        t : scalar or array-like
+            Local times in ns.
+        """
         center = self.duration / 2.0
         sigma = self.duration / (2.0 * self.sigmas)
         in_phase = self.amplitude * qnp.exp(-((t - center) ** 2) / (2.0 * sigma**2))
@@ -344,7 +423,13 @@ class GaussianEdge(Envelope):
         return _gaussian_edge_sampling_times(self.duration, self.edge_duration, self.sigmas)
 
     def value(self, t: Any) -> Any:
-        """Evaluate the flat-top Gaussian-edge envelope at time points *t*."""
+        """Evaluate the flat-top Gaussian-edge envelope.
+
+        Parameters
+        ----------
+        t : scalar or array-like
+            Local times in ns.
+        """
         return _gaussian_flat_top(t, self.duration, self.edge_duration, self.sigmas, self.amplitude)
 
 
@@ -396,7 +481,13 @@ class SquareWithGaussianEdges(Envelope):
         return _gaussian_edge_sampling_times(self.duration, self.edge_duration, self.sigmas)
 
     def value(self, t: Any) -> Any:
-        """Evaluate the fraction-parameterized Gaussian-edge envelope."""
+        """Evaluate the fraction-parameterized Gaussian-edge envelope.
+
+        Parameters
+        ----------
+        t : scalar or array-like
+            Local times in ns.
+        """
         return _gaussian_flat_top(t, self.duration, self.edge_duration, self.sigmas, self.amplitude)
 
 
@@ -500,5 +591,11 @@ class Square(Envelope):
         return qnp.asarray([0.0, self.duration])
 
     def value(self, t: Any) -> Any:
-        """Evaluate the constant envelope at time points *t*."""
+        """Evaluate the constant envelope.
+
+        Parameters
+        ----------
+        t : scalar or array-like
+            Local times in ns.
+        """
         return qnp.ones_like(t, dtype=complex) * self.amplitude

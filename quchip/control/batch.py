@@ -23,6 +23,25 @@ class BatchAxis:
     Created by :meth:`PulseHandle.vary`, :meth:`DelayHandle.vary`, or
     :meth:`QuantumSequence.vary`, and consumed by
     :meth:`QuantumSequence.build_batch`.
+
+    Attributes
+    ----------
+    owner : QuantumSequence
+        Sequence that owns the axis.
+    field : str
+        Swept field name.
+    values : sequence
+        Values evaluated along this axis.
+    name : str
+        Display name in result metadata.
+    target_kind : {"entry", "sequence", "parameter"}
+        Kind of value the axis overrides.
+    entry_index : int or None
+        Scheduled-entry index for entry axes.
+    entry_field : str or None
+        Normalized field on the scheduled entry.
+    entry : object or None
+        Scheduled entry captured by identity.
     """
 
     owner: "QuantumSequence"
@@ -48,7 +67,13 @@ class BatchAxis:
 
 @dataclass(frozen=True)
 class ZippedBatchAxis:
-    """Multiple :class:`BatchAxis` objects swept pairwise as one dimension."""
+    """Multiple :class:`BatchAxis` objects swept pairwise as one dimension.
+
+    Attributes
+    ----------
+    axes : tuple of BatchAxis
+        Equal-length axes evaluated at matching indices.
+    """
 
     axes: tuple[BatchAxis, ...]
 
@@ -87,7 +112,17 @@ class _BaseEntryHandle:
         return self._entry
 
     def vary(self, field: str, values: Any, *, name: str | None = None) -> BatchAxis:
-        """Create a :class:`BatchAxis` that sweeps *field* over *values*."""
+        """Create a batch axis over one entry field.
+
+        Parameters
+        ----------
+        field : str
+            Pulse or delay field name.
+        values : array-like
+            Values along the axis.
+        name : str or None, default=None
+            Display name; defaults to the normalized field.
+        """
         normalized = self._normalize_field(field)
         return BatchAxis(
             owner=self._sequence,
@@ -108,6 +143,13 @@ class PulseHandle(_BaseEntryHandle):
 
     Sweepable fields: ``freq``, ``phase``, ``start_time``, and declared
     envelope parameters (e.g. ``amplitude``, ``duration``, ``sigmas``).
+
+    Parameters
+    ----------
+    sequence : QuantumSequence
+        Sequence owning the scheduled pulse.
+    entry_index : int
+        Pulse entry index in the sequence.
     """
 
     _reserved_fields = ("freq", "phase", "start_time")
@@ -128,7 +170,17 @@ class PulseHandle(_BaseEntryHandle):
 
 
 class DelayHandle(_BaseEntryHandle):
-    """Reference to a scheduled delay entry. Only ``duration`` is sweepable."""
+    """Reference to a scheduled delay entry.
+
+    Only ``duration`` is sweepable.
+
+    Parameters
+    ----------
+    sequence : QuantumSequence
+        Sequence owning the scheduled delay.
+    entry_index : int
+        Delay entry index in the sequence.
+    """
 
     def _normalize_field(self, field: str) -> str:
         self._resolve_entry()

@@ -34,7 +34,13 @@ class Approximation(ABC):
     filters_terms: bool = False
 
     def keeps_operator_band(self, weights: tuple[int, ...]) -> bool:
-        """Return whether a structural operator band survives reduction."""
+        """Return whether a structural operator band survives reduction.
+
+        Parameters
+        ----------
+        weights : tuple[int, ...]
+            Creation-minus-annihilation weight per endpoint.
+        """
         del weights
         return True
 
@@ -51,7 +57,13 @@ class Approximation(ABC):
 
     @staticmethod
     def from_dict(data: Any) -> "Approximation":
-        """Restore one explicit strategy and reject retired schemas."""
+        """Restore one explicit strategy and reject retired schemas.
+
+        Parameters
+        ----------
+        data : mapping
+            Serialized ``Exact`` or ``RWA`` record.
+        """
         if not isinstance(data, dict):
             raise TypeError(
                 "approximation must be a serialized Exact or RWA strategy, "
@@ -79,6 +91,17 @@ class RWA(Approximation):
     """First-order structural rotating-wave selection.
 
     ``keep_bands`` replaces, rather than extends, total-excitation conservation.
+
+    Parameters
+    ----------
+    keep_bands : iterable of tuple[int, ...] or None, default None
+        Operator-band weights to retain. ``None`` keeps only bands whose
+        weights sum to zero. Supplied tuples must be non-empty and integral.
+
+    References
+    ----------
+    Cohen-Tannoudji, Dupont-Roc & Grynberg, *Atom-Photon Interactions*
+    (Wiley, 1992), Ch. IV.
     """
 
     keep_bands: frozenset[tuple[int, ...]] | None
@@ -88,6 +111,13 @@ class RWA(Approximation):
         object.__setattr__(self, "keep_bands", _freeze_bands(keep_bands))
 
     def keeps_operator_band(self, weights: tuple[int, ...]) -> bool:
+        """Return whether ``weights`` is retained by this RWA policy.
+
+        Parameters
+        ----------
+        weights : tuple[int, ...]
+            Creation-minus-annihilation weight per endpoint.
+        """
         if self.keep_bands is not None:
             return weights in self.keep_bands
         return sum(weights) == 0

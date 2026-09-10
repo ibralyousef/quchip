@@ -100,21 +100,48 @@ __all__ = [
 
 
 def build_steadystate_problem(chip: Any, **kwargs: Any) -> SteadyStateProblem:
-    """Build a frozen static Lindblad steady-state request."""
+    """Build a frozen static Lindblad steady-state request.
+
+    Parameters
+    ----------
+    chip : Chip
+        Chip to resolve.
+    **kwargs
+        Forwarded steady-state options, including ``e_ops``, ``options``,
+        ``frame``, and ``approximation``.
+    """
     from quchip.engine.steady_state import build_steadystate_problem as _build
 
     return _build(chip, **kwargs)
 
 
 def steadystate(chip: Any, **kwargs: Any) -> Any:
-    """Solve a chip's unique static Lindblad steady state."""
+    """Solve a chip's unique static Lindblad steady state.
+
+    Parameters
+    ----------
+    chip : Chip
+        Chip with a static resolved Hamiltonian.
+    **kwargs
+        Forwarded to :func:`build_steadystate_problem`.
+    """
     from quchip.engine.steady_state import steadystate as _solve
 
     return _solve(chip, **kwargs)
 
 
 def steadystate_batch(chip: Any, *axes: Any, **kwargs: Any) -> Any:
-    """Solve static Lindblad steady states over parameter axes."""
+    """Solve static Lindblad steady states over parameter axes.
+
+    Parameters
+    ----------
+    chip : Chip
+        Chip to rebind at each point.
+    *axes : Sweep
+        Cartesian or zipped parameter axes.
+    **kwargs
+        Forwarded steady-state options.
+    """
     from quchip.engine.steady_state import steadystate_batch as _solve_batch
 
     return _solve_batch(chip, *axes, **kwargs)
@@ -171,6 +198,16 @@ def build_problem(
         ``result.output(plane)``.
     initial_state : optional
         Initial state; ``None`` defaults to the chip ground state.
+    approximation : Approximation or None, optional
+        Approximation strategy, such as :class:`~quchip.RWA`, used during
+        assembly. ``None`` uses the chip declaration.
+    states : {"all", "final", "none"}, default="all"
+        State history retention policy. ``"all"`` stores every state,
+        ``"final"`` stores only the final state, and ``"none"`` stores no
+        state history.
+    dissipation : bool, default=True
+        Include resolved Lindblad collapse channels. Set ``False`` for a
+        unitary solve while retaining the authored Hamiltonian.
 
     Returns
     -------
@@ -262,6 +299,10 @@ def simulate(
     Hilbert-truncation safety net is inherited from :func:`solve_problem`;
     ``check_truncation`` / ``truncation_threshold`` are threaded down.
 
+    ``approximation`` selects the captured Hamiltonian approximation,
+    ``states`` is ``"all"``, ``"final"``, or ``"none"``, and ``dissipation``
+    controls whether resolved collapse channels are included.
+
     Parameters
     ----------
     chip : Chip
@@ -286,6 +327,13 @@ def simulate(
         ``{"q0": 1}``) becomes a product state in the engine's resolved
         local bases on both the joint and partitioned paths. An authored
         full-space ket is projected into that same solver space.
+    approximation : Approximation or None, optional
+        Approximation strategy captured during assembly; ``None`` uses the
+        chip declaration.
+    states : {"all", "final", "none"}, default="all"
+        Retain all states, only the final state, or no states.
+    dissipation : bool, default=True
+        Include resolved collapse channels in the solve.
     check_truncation : bool, default True
         Screen sampled populations near the model's truncation boundaries.
     truncation_threshold : float, default 1e-3
@@ -385,6 +433,15 @@ def solve_problem(
     All single-solve paths call this function. Unless
     ``check_truncation=False``, it screens the wrapped result for
     sampled boundary populations and warns above ``truncation_threshold``.
+
+    Parameters
+    ----------
+    problem : SolveProblem
+        Frozen request produced by :func:`build_problem`.
+    check_truncation : bool, default=True
+        Evaluate sampled boundary populations after solving.
+    truncation_threshold : float, default=1e-3
+        Warning threshold for boundary population.
     """
     from quchip.results.results import wrap_solver_result
 
@@ -407,6 +464,17 @@ def solve_batch(
 
     The backend converts each shared operator exactly once and stitches
     per-element coefficient data before running the parallel solve.
+
+    Parameters
+    ----------
+    batch : SolveBatch
+        Captured batch of compatible solve requests.
+    progress : bool, default=True
+        Show backend progress.
+    check_truncation : bool, default=True
+        Check sampled truncation boundaries.
+    truncation_threshold : float, default=1e-3
+        Warning threshold for boundary population.
     """
     from quchip.results.results import SimulationBatchResult, wrap_solver_results_from_batch
 
@@ -450,6 +518,17 @@ def solve_many(
     Lists may contain independent models, grids and backends. Compatible
     requests share native execution; each result keeps its own captured context.
     Mixed native array backends remain accessible through individual results.
+
+    Parameters
+    ----------
+    batch_or_problems : SolveBatch or list of SolveProblem
+        Requests to dispatch.
+    progress : bool, default=True
+        Show backend progress.
+    check_truncation : bool, default=True
+        Check sampled truncation boundaries.
+    truncation_threshold : float, default=1e-3
+        Warning threshold for boundary population.
     """
     if isinstance(batch_or_problems, SolveBatch):
         return solve_batch(batch_or_problems, progress=progress,

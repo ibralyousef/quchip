@@ -14,7 +14,17 @@ import jax.numpy as jnp
 
 @dataclass(frozen=True)
 class TruncationBoundary:
-    """Authored basis indices near a cutoff and the corresponding convergence check."""
+    """Authored basis indices near a cutoff and the corresponding convergence check.
+
+    Parameters
+    ----------
+    indices : tuple[int, ...]
+        Distinct non-negative boundary indices.
+    description : str
+        Human-readable boundary name.
+    convergence_hint : str
+        Suggested convergence comparison.
+    """
 
     indices: tuple[int, ...]
     description: str
@@ -37,14 +47,28 @@ class LocalSpace(ABC):
 
     @abstractmethod
     def matrix(self, name: str) -> Any:
-        """Return one named operator as a JAX-compatible dense array."""
+        """Return one named operator as a JAX-compatible dense array.
+
+        Parameters
+        ----------
+        name : str
+            Operator name supported by the concrete space.
+        """
 
     def truncation_boundary(self) -> TruncationBoundary | None:
         """Describe a cutoff, or return None for an intrinsically finite space."""
         raise NotImplementedError(f"{type(self).__name__} does not declare a truncation boundary")
 
     def operator(self, name: str, backend: Any) -> Any:
-        """Lower one named local operator through ``backend``."""
+        """Lower one named local operator through ``backend``.
+
+        Parameters
+        ----------
+        name : str
+            Supported local operator name.
+        backend : backend protocol
+            Object providing native operator constructors.
+        """
         return backend.from_array(
             self.matrix(name),
             dims=[[self.dimension], [self.dimension]],
@@ -53,7 +77,14 @@ class LocalSpace(ABC):
 
 @dataclass(frozen=True)
 class FockSpace(LocalSpace):
-    """Finite Fock ladder with the standard bosonic and qubit operators."""
+    """Finite Fock ladder with standard bosonic and qubit operators.
+
+    Parameters
+    ----------
+    levels : int
+        Hilbert-space dimension; must be at least 2. The ``a`` ladder is
+        truncated at ``levels - 1``.
+    """
 
     levels: int
 
@@ -69,6 +100,13 @@ class FockSpace(LocalSpace):
         return self.levels
 
     def matrix(self, name: str) -> Any:
+        """Return a named charge-space matrix.
+
+        Parameters
+        ----------
+        name : {"n", "cos_phi", "sin_phi", "I"}
+            Operator to construct.
+        """
         annihilation = jnp.diag(jnp.sqrt(jnp.arange(1, self.levels)), 1).astype(jnp.complex128)
         if name == "a":
             return annihilation
@@ -110,7 +148,14 @@ class FockSpace(LocalSpace):
 
 @dataclass(frozen=True)
 class ChargeSpace(LocalSpace):
-    """Finite integer-charge basis centered on zero charge."""
+    """Finite integer-charge basis centered on zero charge.
+
+    Parameters
+    ----------
+    num_basis : int
+        Odd basis size, at least 3; charges run from
+        ``-(num_basis-1)//2`` to ``+(num_basis-1)//2``.
+    """
 
     num_basis: int
 
@@ -127,6 +172,13 @@ class ChargeSpace(LocalSpace):
         return self.num_basis
 
     def matrix(self, name: str) -> Any:
+        """Return a named phase-grid matrix.
+
+        Parameters
+        ----------
+        name : {"phi", "n", "n2", "cos_phi", "sin_phi", "I"}
+            Operator to construct.
+        """
         plus = jnp.eye(self.num_basis, k=1, dtype=jnp.complex128)
         minus = jnp.eye(self.num_basis, k=-1, dtype=jnp.complex128)
         if name == "n":
@@ -149,6 +201,12 @@ class PhaseGridSpace(LocalSpace):
 
     The centered-difference stencil does not wrap across the grid boundary;
     values beyond either endpoint are treated as zero.
+    Parameters
+    ----------
+    points : int
+        Number of endpoint-excluded grid points; at least 3.
+    extent : float
+        Positive half-width of the grid, in dimensionless phase radians.
     """
 
     points: int
@@ -169,6 +227,13 @@ class PhaseGridSpace(LocalSpace):
         return self.points
 
     def matrix(self, name: str) -> Any:
+        """Return one custom operator matrix.
+
+        Parameters
+        ----------
+        name : str
+            Key in :attr:`operators`.
+        """
         phase = jnp.linspace(-self.extent, self.extent, self.points, endpoint=False)
         spacing = 2.0 * self.extent / self.points
         plus = jnp.eye(self.points, k=1, dtype=jnp.complex128)
@@ -192,7 +257,16 @@ class PhaseGridSpace(LocalSpace):
 
 
 class CustomSpace(LocalSpace):
-    """Named local operators supplied as matrices or zero-argument JAX callables."""
+    """Named local operators supplied as matrices or zero-argument JAX callables.
+
+    Parameters
+    ----------
+    dimension : int
+        Positive matrix dimension.
+    operators : mapping[str, array or callable]
+        Operator providers. Each resulting matrix must have shape
+        ``(dimension, dimension)``.
+    """
 
     def __init__(self, dimension: int, operators: Mapping[str, Any]) -> None:
         if index(dimension) < 1:

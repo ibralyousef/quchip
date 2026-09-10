@@ -112,7 +112,15 @@ class Capacitive(CouplingModel):
         return super().default_dressed_target()
 
     def interaction(self, a: EndpointOps, b: EndpointOps, p: Any) -> PhysicsExpr:
-        """Return the full capacitive interaction ``g * (a + a†)(b + b†)``."""
+        """Return the full capacitive interaction ``g * (a + a†)(b + b†)``.
+
+        Parameters
+        ----------
+        a, b : EndpointOps
+            Resolved operators for the two endpoints.
+        p : ParameterNamespace
+            Bound parameters, including ``g`` in GHz.
+        """
         return _full(p.g, a, b)
 
     def physics_notes(self) -> list[str]:
@@ -132,7 +140,15 @@ class Capacitive(CouplingModel):
         device_a: BaseDevice,
         device_b: BaseDevice,
     ) -> "Capacitive":
-        """Reconstruct a capacitive coupling from serialized state."""
+        """Reconstruct a capacitive coupling from serialized state.
+
+        Parameters
+        ----------
+        d : dict[str, Any]
+            Serialized coupling fields.
+        device_a, device_b : BaseDevice
+            Resolved endpoint devices.
+        """
         return cls(
             device_a=device_a,
             device_b=device_b,
@@ -213,11 +229,27 @@ class TunableCapacitive(CouplingModel):
     g_0: Scalar = parameter(default=UNBOUND, unit="GHz", symbol="g_0")
 
     def interaction(self, a: EndpointOps, b: EndpointOps, p: Any) -> PhysicsExpr:
-        """Static contribution ``g_0 · (a + a†)(b + b†)``."""
+        """Return the static ``g_0 · (a + a†)(b + b†)`` contribution.
+
+        Parameters
+        ----------
+        a, b : EndpointOps
+            Resolved endpoint operators.
+        p : ParameterNamespace
+            Bound parameters, including ``g_0`` in GHz.
+        """
         return _full(p.g_0, a, b)
 
     def parametric_interaction(self, a: EndpointOps, b: EndpointOps, p: Any) -> PhysicsExpr:
-        """Modulable charge-charge structure a scheduled pump multiplies."""
+        """Return the charge-charge structure multiplied by a pump.
+
+        Parameters
+        ----------
+        a, b : EndpointOps
+            Resolved endpoint operators.
+        p : ParameterNamespace
+            Bound parameters; unused because the pump supplies the coefficient.
+        """
         _ = p
         return a.charge * b.charge
 
@@ -274,11 +306,27 @@ class CrossKerr(CouplingModel):
     chi: Scalar = parameter(default=UNBOUND, unit="GHz", symbol=r"\chi")
 
     def interaction(self, a: EndpointOps, b: EndpointOps, p: Any) -> PhysicsExpr:
-        """Full form ``χ · n̂_a n̂_b`` (diagonal; identical under RWA)."""
+        """Return ``χ · n̂_a n̂_b``, identical under RWA.
+
+        Parameters
+        ----------
+        a, b : EndpointOps
+            Resolved endpoint operators.
+        p : ParameterNamespace
+            Bound parameters, including ``chi`` in GHz.
+        """
         return p.chi * (a.level * b.level)
 
     def parametric_interaction(self, a: EndpointOps, b: EndpointOps, p: Any) -> PhysicsExpr:
-        """Modulable structure ``n̂_a n̂_b`` — δχ(t) pumps ride this."""
+        """Return the number-number structure multiplied by a pump.
+
+        Parameters
+        ----------
+        a, b : EndpointOps
+            Resolved endpoint operators.
+        p : ParameterNamespace
+            Bound parameters; unused because the pump supplies the coefficient.
+        """
         _ = p
         return a.level * b.level
 
@@ -323,6 +371,19 @@ class Coupling(_BaseCoupling):
 
     The selected chip approximation is applied to the complete user-supplied
     operator after authored physics is assembled.
+
+    Parameters
+    ----------
+    device_a, device_b : BaseDevice or str
+        Coupled devices or late-bound labels.
+    g : float
+        Scalar interaction strength in GHz.
+    op_a, op_b : callable or None, default=None
+        Local operator factories for product form.
+    interaction : callable or None, default=None
+        Callable receiving both devices and the active backend.
+    label : str or None, default=None
+        Coupling label; generated when omitted.
     """
 
     _type_prefix: ClassVar[str] = "coupling"
@@ -401,7 +462,15 @@ class Coupling(_BaseCoupling):
         device_a: "BaseDevice",
         device_b: "BaseDevice",
     ) -> "Coupling":
-        """Reject deserialization because callables cannot be reconstructed."""
+        """Reject deserialization because callables cannot be reconstructed.
+
+        Parameters
+        ----------
+        d : dict[str, Any]
+            Serialized fields; unsupported for callable interactions.
+        device_a, device_b : BaseDevice
+            Endpoint devices; unused because deserialization is unsupported.
+        """
         raise NotImplementedError(
             "Generic Coupling carries user-defined callables and cannot be deserialized. "
             "Use a concrete coupling subclass for persistent storage."

@@ -212,7 +212,13 @@ _REDUCTION_METHODS: dict[str, ReductionMethod] = {}
 
 
 def register_reduction_method(method: ReductionMethod) -> None:
-    """Register a reduction strategy under its :attr:`ReductionMethod.name`."""
+    """Register a reduction strategy under its name.
+
+    Parameters
+    ----------
+    method : ReductionMethod
+        Strategy added under its unique ``name``.
+    """
     _REDUCTION_METHODS[method.name] = method
 
 

@@ -378,11 +378,9 @@ class QuTiPBackend(Backend):
 
     @property
     def array_module(self) -> Any:
-        """Return the array module for backend-aware numeric code (``numpy``)."""
         return np
 
     def to_array(self, op: Operator) -> Any:
-        """Return a dense ``numpy`` array for *op*."""
         if isinstance(op, Qobj):
             return np.asarray(op.full(), dtype=complex)
         if hasattr(op, "to_jax"):
@@ -390,18 +388,27 @@ class QuTiPBackend(Backend):
         return np.asarray(op, dtype=complex)
 
     def overlap(self, a: State, b: State) -> complex:
-        """Return the scalar inner product ⟨a|b⟩ for two kets."""
         value = a.dag() @ b
         if isinstance(value, Qobj):
             return complex(value.full()[0, 0])
         return complex(value)
 
     def norm(self, state_or_op: State | Operator) -> float:
-        """Return the norm of a state or operator via ``Qobj.norm``."""
+        r"""Return the native QuTiP norm.
+
+        Parameters
+        ----------
+        state_or_op : qutip.Qobj
+            Ket or bra for the Euclidean norm; matrix for the trace norm.
+
+        Returns
+        -------
+        float
+            ``Qobj.norm()`` with its default norm selection.
+        """
         return float(state_or_op.norm())
 
     def trace(self, op: Operator) -> complex:
-        """Return the scalar trace ``Tr(op)`` via ``Qobj.tr``."""
         return complex(op.tr())
 
     # ------------------------------------------------------------------
@@ -417,23 +424,18 @@ class QuTiPBackend(Backend):
         return cached
 
     def destroy(self, n: int) -> Operator:
-        """Return the annihilation operator for an *n*-level Fock space (``qutip.destroy``, memoized)."""
         return self._cached_op("destroy", n, qutip.destroy)
 
     def create(self, n: int) -> Operator:
-        """Return the creation operator for an *n*-level Fock space (``qutip.create``, memoized)."""
         return self._cached_op("create", n, qutip.create)
 
     def number(self, n: int) -> Operator:
-        """Return the number operator for an *n*-level Fock space (``qutip.num``, memoized)."""
         return self._cached_op("number", n, qutip.num)
 
     def identity(self, n: int) -> Operator:
-        """Return the identity operator for an *n*-level space (``qutip.qeye``, memoized)."""
         return self._cached_op("identity", n, qutip.qeye)
 
     def from_array(self, data: Any, dims: list[list[int]] | None = None) -> Operator:
-        """Construct a ``Qobj`` from a dense matrix with optional row/col *dims*."""
         if isinstance(data, Qobj):
             return data if dims is None or data.dims == dims else Qobj(data.data, dims=dims)
         if hasattr(data, "to_jax"):
@@ -441,7 +443,6 @@ class QuTiPBackend(Backend):
         return Qobj(data, dims=dims)
 
     def to_canonical_operator(self, op: Operator) -> Any:
-        """Serialize a ``Qobj`` into the backend-agnostic canonical IR (CSR or dense)."""
         from quchip.engine.ir import CanonicalOperator
 
         if isinstance(op, Qobj):
@@ -464,30 +465,20 @@ class QuTiPBackend(Backend):
         )
 
     def from_canonical_operator(self, canonical: Any) -> Operator:
-        """Reconstruct a ``Qobj`` from the canonical IR payload."""
         return self._canonical_to_qobj(canonical)
 
     def coerce_operator(self, op: Operator) -> Operator:
-        """Wrap an array-like operator into a ``Qobj`` (native ``Qobj`` passthrough)."""
         if isinstance(op, Qobj):
             return op
         return self.from_array(np.asarray(op, dtype=complex))
 
     def dag(self, op: Operator) -> Operator:
-        """Return the Hermitian conjugate ``op†`` via ``Qobj.dag`` (array-likes coerced first)."""
         return self.coerce_operator(op).dag()
 
     def eigenenergies(self, op: Operator) -> Any:
-        """Return the ascending eigenvalues of a Hermitian operator (``Qobj.eigenenergies``)."""
         return op.eigenenergies()
 
     def eigensystem_data(self, op: Operator) -> EigensystemData:
-        """Return ascending eigenvalues, eigenvector matrix, and primed eigenstate kets.
-
-        A ``Qobj`` uses ``Qobj.eigenstates`` verbatim to preserve the exact
-        degenerate-subspace basis; dense inputs fall through to the protocol
-        default.
-        """
         if isinstance(op, Qobj):
             # Keep ``Qobj.eigenstates()`` verbatim: it preserves the exact
             # degenerate-subspace basis that ``operator_in_dressed_basis``
@@ -510,14 +501,9 @@ class QuTiPBackend(Backend):
         return super().eigensystem_data(op)
 
     def expect(self, op: Operator, state: State) -> complex:
-        """Return the expectation value ⟨op⟩ for a ket or density matrix via ``qutip.expect``."""
         return qutip.expect(op, state)
 
     def ptrace(self, state: State, keep: int | list[int], dims: list[int]) -> State:
-        """Reduce onto subsystem(s) *keep* via ``Qobj.ptrace`` (partial trace).
-
-        Rebuilds the composite *dims* when the incoming state carries flat dims.
-        """
         # QuTiP's Qobj.ptrace needs the correct composite dims. Rebuild when the
         # incoming state carries flat dims (as when assembled outside tensor).
         if isinstance(state, Qobj):
@@ -527,12 +513,6 @@ class QuTiPBackend(Backend):
         return state.ptrace(keep)
 
     def permute_state(self, state: State, dims: Sequence[int], order: Sequence[int]) -> State:
-        """Reorder a ``Qobj``'s subsystems via ``Qobj.permute`` (sparse-friendly, keeps dims).
-
-        Rebuilds composite ``dims`` first when the incoming state carries
-        flat dims, mirroring :meth:`ptrace`. Non-``Qobj`` inputs fall
-        through to the protocol default.
-        """
         if not isinstance(state, Qobj):
             return super().permute_state(state, dims, order)
         dims = list(dims)
@@ -542,7 +522,6 @@ class QuTiPBackend(Backend):
         return state.permute(list(order))
 
     def tensor(self, *operators: Operator) -> Operator:
-        """Return the tensor product of operators via ``qutip.tensor`` (array-likes coerced first)."""
         return qutip.tensor([self.coerce_operator(op) for op in operators])
 
     # ------------------------------------------------------------------
@@ -556,11 +535,6 @@ class QuTiPBackend(Backend):
         index_b: int,
         dims: Sequence[int],
     ) -> Operator:
-        """Embed a two-body operator on devices *index_a* ⊗ *index_b* into the full space.
-
-        Reorders subsystems (via sparse SWAP when ``index_a > index_b``) and
-        identity-pads spectators without densifying the full matrix.
-        """
         op_ordered, first_idx, second_idx = self._reorder_two_body_op(op_ab, index_a, index_b, dims)
         return self._embed_ordered_two_body(op_ordered, first_idx, second_idx, dims)
 
@@ -626,28 +600,22 @@ class QuTiPBackend(Backend):
     # ------------------------------------------------------------------
 
     def basis(self, n: int, k: int) -> State:
-        """Return the Fock basis ket |k⟩ in an *n*-level space (``qutip.basis``)."""
         return qutip.basis(n, k)
 
     def tensor_states(self, *states: State) -> State:
-        """Return the tensor product of states via ``qutip.tensor``."""
         return qutip.tensor(list(states))
 
     def coherent(self, n: int, alpha: complex) -> State:
-        """Return the coherent state |α⟩ truncated to *n* Fock levels (``qutip.coherent``)."""
         return qutip.coherent(n, alpha)
 
     def state_to_dm(self, state: State) -> State:
-        """Return a density matrix; pass through if *state* is already one."""
         state = self.coerce_state(state)
         return state if not state.isket else qutip.ket2dm(state)
 
     def is_ket(self, state: State) -> bool:
-        """Return whether *state* is a ket rather than a density matrix; foreign arrays go by shape."""
         return state.isket if isinstance(state, Qobj) else super().is_ket(state)
 
     def is_native_state(self, state: Any) -> bool:
-        """Return whether *state* is a QuTiP quantum object."""
         return isinstance(state, Qobj)
 
     # ------------------------------------------------------------------
@@ -661,30 +629,27 @@ class QuTiPBackend(Backend):
         metadata: dict[str, Any],
         tlist: Any,
     ) -> dict[str, Any]:
-        """Fill in ``nsteps`` and ``max_step`` from Hamiltonian-metadata heuristics when unset.
+        r"""Resolve QuTiP integration options without changing the input mapping.
 
-        ``nsteps`` is an abort ceiling on the integrator's total internal
-        step count, not a step-size bound — see :func:`default_solver_steps`
-        for the heuristic that derives it from the Hamiltonian's fastest
-        frequency scale.
+        Parameters
+        ----------
+        options : dict
+            Native QuTiP settings, including ``method``, ``atol``, ``rtol``,
+            ``nsteps`` (step ceiling), and ``max_step`` (ns). Unspecified step
+            controls use engine hints. Explicit settings take precedence.
+            See `QuTiP solver options
+            <https://qutip.readthedocs.io/en/stable/apidoc/solver.html>`_ for
+            method-specific keys. Use the simulation's ``states`` argument to
+            select saved-state storage.
+        metadata : dict
+            Lowering hints, including ordinary-GHz spectral/carrier bounds.
+        tlist : array_like
+            Save-time grid in ns used to estimate integration budgets.
 
-        ``max_step`` bounds the size of an individual adaptive step. Without
-        it, QuTiP's adaptive integrator can step clean over a finite-support
-        pulse that sits inside a long idle span, sampling it only at points
-        where its envelope happens to be near zero. When the user has not
-        set ``max_step`` and ``metadata["max_step_ns"]`` carries a concrete,
-        positive, finite value — half the narrowest window across the
-        Hamiltonian's dynamic terms, computed by
-        :func:`~quchip.engine.solver_hints._solver_hint_metadata` — it is
-        used as the ceiling. An explicit user ``max_step`` is always
-        authoritative, including QuTiP's own ``max_step=0`` (unbounded):
-        the key's *presence* in ``options`` decides, not its truthiness.
-
-        The automatic step-count budget also covers this step-size cap.
-        An explicit ``nsteps`` remains authoritative.
-
-        Unsupported options are left for the native solver to reject;
-        explicit numerical controls are never removed for portability.
+        Returns
+        -------
+        dict
+            Copied options with missing integration defaults filled.
         """
         resolved = dict(options)
         if "nsteps" not in resolved:
@@ -750,12 +715,6 @@ class QuTiPBackend(Backend):
     _default_nsteps = staticmethod(default_solver_steps)
 
     def coerce_state(self, state: State, dims: tuple[int, ...] | None = None) -> State:
-        """Wrap a foreign-native array state (ket or density matrix) into a ``Qobj``.
-
-        Used when a per-call ``backend="qutip"`` override consumes states
-        built under the dynamiqs backend. ``dims`` restores the tensor
-        structure QuTiP's solvers require to match the Hamiltonian's dims.
-        """
         if isinstance(state, Qobj):
             return state
         arr = np.asarray(state)
@@ -777,7 +736,6 @@ class QuTiPBackend(Backend):
         e_ops: list[Operator] | None = None,
         options: dict[str, Any] | None = None,
     ) -> SolverResult:
-        """Solve the Schrödinger equation — wraps ``qutip.solver.sesolve.SESolver``."""
         runner = SESolver(self._coerce_solver_rhs(H), options=self._runner_options(options))
         result = runner.run(psi0, tlist, e_ops=e_ops)
         return self._wrap_result(result, solver="sesolve", extra_stats=self._solver_stats(runner))
@@ -791,7 +749,6 @@ class QuTiPBackend(Backend):
         e_ops: list[Operator] | None = None,
         options: dict[str, Any] | None = None,
     ) -> SolverResult:
-        """Solve the Lindblad master equation — wraps ``qutip.solver.mesolve.MESolver``."""
         runner = MESolver(self._coerce_solver_rhs(H), c_ops, options=self._runner_options(options))
         result = runner.run(rho0, tlist, e_ops=e_ops)
         return self._wrap_result(result, solver="mesolve", extra_stats=self._solver_stats(runner))
@@ -812,7 +769,32 @@ class QuTiPBackend(Backend):
         return sparse.csr_matrix(liouvillian.data.to_array())
 
     def steadystate(self, problem: Any, *, prepared: PreparedStationary | None = None) -> SteadyStateSolverResult:
-        """Solve a static Lindblad generator with :func:`qutip.steadystate`."""
+        r"""Solve a static Lindblad generator with :func:`qutip.steadystate`.
+
+        Parameters
+        ----------
+        problem : SteadyStateProblem
+            Captured static model, observables, and stationary solver options.
+        prepared : PreparedStationary or None, default None
+            Matching prepared generator; ``None`` builds it.
+
+        Returns
+        -------
+        SteadyStateSolverResult
+            Stationary density matrix and convergence diagnostics.
+
+        See Also
+        --------
+        quchip.backend.protocol.Backend.steadystate
+
+        Notes
+        -----
+        ``problem.options`` accepts native QuTiP stationary-solver keywords,
+        including ``method`` (default ``"direct"``) and ``solver`` (default None).
+        quchip consumes ``rank_tolerance`` (singular-value cutoff, default automatic)
+        and ``diagnostic_max_dimension`` (default 16). Nullity is not computed above
+        that Hilbert dimension; ``None`` means unchecked, not a unique state.
+        """
         liouvillian = self.prepare_stationary(problem.engine_result, prepared=prepared).liouvillian
         options = dict(problem.options)
         rank_tolerance = options.pop("rank_tolerance", None)
@@ -866,7 +848,6 @@ class QuTiPBackend(Backend):
         return float(stationary_condition_number(liouvillian, math.prod(engine_result.dims), xp=np))
 
     def linear_response(self, problem: Any) -> LinearResponseSolverResult:
-        """Solve passive-linear scattering with batched NumPy mode matrices."""
         return linear_response(problem, xp=np)
 
     def stationary_resolvent(
@@ -878,7 +859,6 @@ class QuTiPBackend(Backend):
         *,
         prepared: PreparedStationary | None = None,
     ) -> dict[tuple[str, str], Any]:
-        """Evaluate stationary resolvents with QuTiP's sparse Liouvillian."""
         liouvillian = self.prepare_stationary(engine_result, prepared=prepared).liouvillian
         matrix = self._scipy_liouvillian(liouvillian)
         native_sources = [(label, self.from_canonical_operator(operator)) for label, operator in sources]
@@ -929,7 +909,6 @@ class QuTiPBackend(Backend):
         *,
         prepared: PreparedStationary | None = None,
     ) -> dict[str, Any]:
-        """Propagate regression operators with QuTiP's sparse Liouvillian."""
         liouvillian = self.prepare_stationary(engine_result, prepared=prepared).liouvillian
         matrix = self._scipy_liouvillian(liouvillian)
         initial_operator = self.from_canonical_operator(initial)
@@ -979,7 +958,25 @@ class QuTiPBackend(Backend):
         *,
         progress: bool = True,
     ) -> list[SolverResult] | None:
-        """Solve large structurally heterogeneous problem lists through loky workers."""
+        r"""Solve large structurally heterogeneous problem lists through loky workers.
+
+        Parameters
+        ----------
+        problems
+            Problems that cannot be merged into one structural batch.
+        progress
+            Display solver progress when supported.
+
+        Returns
+        -------
+        list[SolverResult] | None
+            Backend results in input order, or ``None`` to retain the engine's
+            structural-group dispatch.
+
+        See Also
+        --------
+        quchip.backend.protocol.Backend.parallel_solve_problems
+        """
         if len(problems) < self._PARALLEL_MIN_BATCH:
             return None
         return self._parallel_map(
@@ -997,7 +994,6 @@ class QuTiPBackend(Backend):
         n_jobs: int = -1,
         progress: bool = True,
     ) -> list[SolverResult]:
-        """Run sesolve in parallel via loky workers; fall back to sequential on failure."""
         return self._batched_solve(problems, solver_fn="sesolve", n_jobs=n_jobs, progress=progress)
 
     def batched_mesolve(
@@ -1007,7 +1003,6 @@ class QuTiPBackend(Backend):
         n_jobs: int = -1,
         progress: bool = True,
     ) -> list[SolverResult]:
-        """Run mesolve in parallel via loky workers; fall back to sequential on failure."""
         return self._batched_solve(problems, solver_fn="mesolve", n_jobs=n_jobs, progress=progress)
 
     def _batched_solve(
@@ -1037,7 +1032,7 @@ class QuTiPBackend(Backend):
         description: Any,
         tlist: Any | None = None,
     ) -> PreparedHamiltonian:
-        """Convert a :class:`EngineResult` into a ``Qobj`` or ``QobjEvo``.
+        r"""Convert a :class:`EngineResult` into a ``Qobj`` or ``QobjEvo``.
 
         Each dynamic coefficient is band-normalized: every carrier stays
         analytic while only its slow, carrier-free envelope is sampled
@@ -1046,6 +1041,22 @@ class QuTiPBackend(Backend):
         avoids cubic-spline error from pre-sampling the full
         ``envelope·carrier`` product, including for resonant carriers in the
         lab frame.
+
+        Parameters
+        ----------
+        description : EngineResult
+            Captured engine Hamiltonian and channels in solver units.
+        tlist : array_like
+            Requested save times in ns, used by native time-dependent lowering.
+
+        Returns
+        -------
+        PreparedHamiltonian
+            Native right-hand side and numerical integration hints.
+
+        See Also
+        --------
+        quchip.backend.protocol.Backend.prepare_hamiltonian
         """
         static_rhs = self._sum_terms(description.static_terms, self._canonical_to_qobj)
         metadata = dict(description.metadata)
@@ -1064,7 +1075,7 @@ class QuTiPBackend(Backend):
         return PreparedHamiltonian(rhs=rhs, metadata=metadata)
 
     def prepare_batch(self, batch: Any) -> DeferredBatch:
-        """Build a deferred-construction batch; per-element ``QobjEvo`` is built in workers.
+        r"""Build a deferred-construction batch; per-element ``QobjEvo`` is built in workers.
 
         Each unique :class:`CanonicalOperator` is converted exactly once
         (shared across elements) and only the slow, carrier-free envelope
@@ -1072,6 +1083,20 @@ class QuTiPBackend(Backend):
         edge (carriers stay analytic — see :func:`_band_coefficient`).
         Final ``QobjEvo`` assembly lives in :meth:`solve_batch` so larger
         concrete sweeps can build and solve each point inside loky workers.
+
+        Parameters
+        ----------
+        batch : SolveBatch
+            Batch of captured problems with compatible save grids.
+
+        Returns
+        -------
+        PreparedBatch
+            Eager, native-vectorized, or deferred representation selected by this backend.
+
+        See Also
+        --------
+        quchip.backend.protocol.Backend.prepare_batch
         """
         cached_qobj = self._make_op_cache()
         engine_results = tuple(problem.engine_result for problem in batch.problems)
@@ -1107,7 +1132,24 @@ class QuTiPBackend(Backend):
         )
 
     def solve_batch(self, batch: Any, *, progress: bool = True) -> list[SolverResult]:
-        """Solve a :class:`SolveBatch` with per-element ``QobjEvo`` built in loky workers."""
+        r"""Solve a :class:`SolveBatch` with per-element ``QobjEvo`` built in loky workers.
+
+        Parameters
+        ----------
+        batch : SolveBatch
+            Captured problems and batch parameter values.
+        progress : bool, default True
+            Request a batch progress display.
+
+        Returns
+        -------
+        list of SolverResult
+            Results in batch order.
+
+        See Also
+        --------
+        quchip.backend.protocol.Backend.solve_batch
+        """
         if batch.batch_size == 0:
             return []
 
@@ -1215,17 +1257,12 @@ class QuTiPBackend(Backend):
     # ------------------------------------------------------------------
 
     def warmup(self, n_jobs: int = -1) -> None:
-        """Pre-spawn the reusable loky worker pool out of any timed region.
+        """Start the reusable solver pool.
 
-        Entirely optional: ``solve_batch`` spins the pool up on demand, so
-        the only reason to call this is to move that one-time spin-up cost
-        out of a region you are timing (benchmarks). Ordinary scripts and
-        notebooks never need it.
-
-        Forks the workers and pays the per-worker import cost up front by
-        mapping a no-op over the worker count. A subsequent sweep then reuses
-        the live pool instead of paying cold spin-up inside the timed solve.
-        No-op (with a warning) when loky is unavailable.
+        Parameters
+        ----------
+        n_jobs : int, default -1
+            Worker count; ``-1`` selects all CPUs.
         """
         try:
             executor = self._get_executor(n_jobs)

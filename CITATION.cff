@@ -9,8 +9,8 @@ authors:
 repository-code: "https://github.com/quchip/quchip"
 url: "https://quchip.org"
 license: Apache-2.0
-version: "0.3.1"
-date-released: "2026-09-08"
+version: "0.3.2"
+date-released: "2026-09-10"
 preferred-citation:
   type: article
   title: "quchip: A Differentiable Toolkit for Modeling Quantum Devices"

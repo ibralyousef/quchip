@@ -58,6 +58,13 @@ class ReductionMap:
     first-order generator; their interpretation is perturbative, even though
     the map is isometric. Jumps follow that map; the SW Hamiltonian retains
     its separately stated second-order truncation.
+
+    Parameters
+    ----------
+    source_labels, target_labels : tuple[str, ...]
+        Device labels defining the source and retained tensor-product orders.
+    source_dims, target_dims : tuple[int, ...]
+        Hilbert-space dimensions aligned with the corresponding labels.
     """
 
     source_labels: tuple[str, ...]
@@ -73,7 +80,13 @@ class ReductionMap:
         return self._embedding()
 
     def project_operator(self, operator: Any) -> Any:
-        """Restrict a source operator to the retained subspace."""
+        """Restrict a source operator to the retained subspace.
+
+        Parameters
+        ----------
+        operator : array-like or backend operator
+            Full source-space operator.
+        """
         array = jnp.asarray(self._backend.to_array(operator))
         size = prod(self.source_dims)
         if array.shape != (size, size):
@@ -83,11 +96,23 @@ class ReductionMap:
         return self._backend.from_array(reduced, dims=[list(self.target_dims), list(self.target_dims)])
 
     def project_state(self, state: Any) -> Any:
-        """Project a source ket or density matrix without renormalizing it."""
+        """Project a source state without renormalizing it.
+
+        Parameters
+        ----------
+        state : array-like or backend state
+            Source-space ket or density matrix.
+        """
         return self._map_state(state, self.embedding.conj().T, self.source_dims, self.target_dims)
 
     def lift_state(self, state: Any) -> Any:
-        """Lift a retained ket or density matrix into the captured source space."""
+        """Lift a retained state into the captured source space.
+
+        Parameters
+        ----------
+        state : array-like or backend state
+            Retained-space ket or density matrix.
+        """
         return self._map_state(state, self.embedding, self.target_dims, self.source_dims)
 
     def _map_state(self, state: Any, transform: Any, source: tuple[int, ...], target: tuple[int, ...]) -> Any:

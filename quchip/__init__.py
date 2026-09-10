@@ -23,7 +23,7 @@ del _jax
 import os  # noqa: E402
 from importlib import import_module  # noqa: E402
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 from quchip.analysis import (  # noqa: E402
     CRHamiltonianResult,

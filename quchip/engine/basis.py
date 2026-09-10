@@ -82,7 +82,23 @@ def _lowest_eigenpairs(matrix: Any, levels: int) -> tuple[Any, Any]:
 
 @dataclass(frozen=True)
 class BasisRecord:
-    """One device's fixed authored-to-solver transformation."""
+    """One device's fixed authored-to-solver transformation.
+
+    Attributes
+    ----------
+    kind : {"native", "eigen"}
+        Selected solver-basis policy.
+    vectors : array_like
+        Solver basis vectors as authored-basis columns.
+    energies : array_like
+        Retained isolated eigenenergies in GHz.
+    energy_vectors : array_like
+        Isolated energy eigenvectors as authored-basis columns.
+    native_dim, resolved_dim : int
+        Authored and retained local dimensions.
+    authored_hamiltonian : array_like or None
+        Captured authored-basis Hamiltonian in GHz, when retained.
+    """
 
     kind: Literal["native", "eigen"]
     vectors: Any
@@ -93,7 +109,13 @@ class BasisRecord:
     authored_hamiltonian: Any = field(default=None, repr=False, compare=False)
 
     def energy_state(self, level: int) -> Any:
-        """Return one captured isolated energy ket in the solver basis."""
+        """Return one captured isolated energy ket in the solver basis.
+
+        Parameters
+        ----------
+        level : int
+            Zero-based isolated energy level.
+        """
         if self.kind == "eigen":
             return jnp.eye(self.resolved_dim, dtype=jnp.complex128)[:, level]
         return self.energy_vectors[:, level]
@@ -114,7 +136,13 @@ class BasisRecord:
         return self.vectors @ self.vectors.conj().T
 
     def transform_operator(self, operator: Any) -> Any:
-        """Apply the recorded authored-to-solver transformation to an operator."""
+        """Apply the recorded authored-to-solver transformation to an operator.
+
+        Parameters
+        ----------
+        operator : array_like
+            Square operator with shape ``(native_dim, native_dim)``.
+        """
         if getattr(operator, "shape", None) != (self.native_dim, self.native_dim):
             raise ValueError(
                 f"Operator must have native shape {(self.native_dim, self.native_dim)}, "
