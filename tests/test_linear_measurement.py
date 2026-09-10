@@ -1,4 +1,4 @@
-"""Compact acquisition preserves physical noise and datasheet conventions."""
+"""Compact acquisition preserves noise quanta and power gain conventions."""
 
 import numpy as np
 import pytest
@@ -11,9 +11,9 @@ def thermal_fridge(*, backend="qutip", filter_first=True):
     net = PortNetwork(label="fridge")
     port = net.port("p", target=r, rate=.04)
     filt = net.filter("filter", transfer=lambda f: 1/(1-1j*(f-6)/.1))
-    att = net.attenuator("att", loss_db=10., occupation=.02)
+    att = net.attenuator("att", loss_db=10., thermal_occupation=.02)
     circ = net.circulator("circ")
-    amp = net.amplifier("amp", gain_db=20., noise_temperature=2000., noise_frequency=6.)
+    amp = net.amplifier("amp", gain_db=20., added_noise=7.)
     chain = (filt, att) if filter_first else (att, filt)
     lead = net.delay("lead", duration=0.)
     net.link(lead, *chain, circ.port(1))
@@ -51,7 +51,7 @@ def test_filter_after_thermal_source_still_rejects_colored_backaction():
 
 
 def test_lossless_thermal_attenuator_before_filter_emits_no_colored_noise():
-    """A zero-loss endpoint is valid even when its physical temperature is nonzero."""
+    """A zero-loss endpoint is valid even when its load has thermal quanta."""
     chip, drive, readout = thermal_fridge(filter_first=False)
     chip = chip.with_params({"network.component.att.loss_db": 0.})
     for options in (None, {}):
@@ -66,7 +66,7 @@ def test_filtered_auxiliary_field_mixed_after_device_does_not_create_backaction(
     net = PortNetwork()
     port = net.port("p", target=r, rate=.04)
     split = net.hybrid90("split")
-    filt = net.filter("aux", transfer=lambda f: np.sqrt(.6)/(1-1j*(f-6.)/.02), loss_occupation=.2)
+    filt = net.filter("aux", transfer=lambda f: np.sqrt(.6)/(1-1j*(f-6.)/.02), thermal_occupation=.2)
     net.connect(port.output, split.input_terminal("left"))
     net.connect(filt.output_terminal("2"), split.input_terminal("right"))
     net.connect(split.output_terminal("right"), filt.input_terminal("2"))
@@ -119,23 +119,22 @@ def test_nine_mode_measurement_matches_independent_star_response_without_density
     np.testing.assert_allclose(covariance, np.broadcast_to(np.eye(2)*(85000.5/2e6), covariance.shape), atol=1e-10)
 
 
-def test_datasheet_noise_parameters_rebind_and_roundtrip():
-    """dB and temperature remain authored parameters after capture and serialization."""
+def test_noise_quanta_and_db_parameters_rebind_and_roundtrip():
+    """dB and noise quanta remain authored parameters after capture and serialization."""
     r = Resonator(freq=6., levels=4, label="r")
     net = PortNetwork()
     port = net.port("p", target=r, rate=.04)
     loss = net.attenuator("loss", loss_db=10.)
-    amp = net.amplifier("amp", gain_db=20., noise_figure_db=1., noise_frequency=6.)
+    amp = net.amplifier("amp", gain_db=20., added_noise=2.)
     net.link(port, loss, amp)
     net.expose("out", at=amp.port(2))
     chip = Chip([r], port_network=net)
     restored = Chip.from_dict(chip.to_dict())
-    changed = restored.with_params({"network.component.amp.gain_db": 30., "network.component.loss.loss_db": 20.})
+    changed = restored.with_params({"network.component.amp.gain_db": 30., "network.component.loss.loss_db": 20.,
+                                    "network.component.amp.added_noise": 3.})
     point = VNA(changed).measure(6., .001, input="out", outputs=["out"])
     assert point.parameters[0]["network.component.amp.gain_db"] == 30.
-    # Independent SI conversion: Te = 290*(10**(NF/10)-1), nadd = kTe/(hf).
-    nadd = 1.380649e-23 * 290*(10**.1-1)/(6.62607015e-34*6e9)
-    expected = (1000*nadd+(1000-1)/2+1)/2e6
+    expected = (1000*3.+(1000-1)/2+1)/2e6
     np.testing.assert_allclose(point.statistics(receiver=IQReceiver(integration_time=1e6)).covariance("out"),
                                np.eye(2)*expected, atol=1e-10)
     physical = 2e6*expected-1
@@ -146,28 +145,28 @@ def test_datasheet_noise_parameters_rebind_and_roundtrip():
 
 
 @pytest.mark.parametrize("kwargs", [dict(gain=100., gain_db=20., added_noise=1.),
-    dict(gain_db=20., noise_temperature=2000.), dict(gain_db=20., noise_temperature=2000., added_noise=1.),
-    dict(gain_db=20., noise_figure_db=-1., noise_frequency=6.)])
-def test_ambiguous_or_incomplete_amplifier_conventions_fail(kwargs):
-    """Noise conventions cannot be mixed or silently supplied a reference frequency."""
+    dict(gain_db=20., added_noise=.1), dict(gain=.5, added_noise=1.),
+    dict(gain_db=20., added_noise=np.nan), dict(gain_db=20., added_noise=np.inf)])
+def test_invalid_amplifier_declarations_fail(kwargs):
+    """Gain is unambiguous and finite added quanta satisfy the quantum floor."""
     with pytest.raises(ValueError):
         PortNetwork().amplifier("amp", **kwargs)
 
 
 @pytest.mark.optional_backend
-def test_linear_measurement_datasheet_noise_gradient():
-    """Equivalent temperature differentiates through harmonic acquisition and receiver."""
+def test_linear_measurement_added_noise_gradient():
+    """Added quanta differentiate through harmonic acquisition and receiver."""
     jax = pytest.importorskip("jax")
     pytest.importorskip("dynamiqs")
     chip, drive, readout = thermal_fridge(backend="dynamiqs")
     offsets = np.array([-.1, -.01, 0., .01, .1])
-    def variance(temperature):
-        changed = chip.with_params({"network.component.amp.noise_temperature": temperature})
+    def variance(added_noise):
+        changed = chip.with_params({"network.component.amp.added_noise": added_noise})
         result = VNA(changed).measure(6., .002, input=drive, outputs=[readout],
                                      noise_frequencies=offsets)
         return result.statistics(receiver=IQReceiver(integration_time=1e6)).covariance(readout)[0, 0]
-    gradient = jax.jit(jax.grad(variance))(2000.)
-    expected = 100*1.380649e-26/(6.62607015e-34*6e9)/(2e6)
+    gradient = jax.jit(jax.grad(variance))(7.)
+    expected = 100/(2e6)
     np.testing.assert_allclose(gradient, expected, rtol=1e-9)
 
 
@@ -206,7 +205,7 @@ def test_coupled_modes_share_thermal_noise_and_match_general_solver():
     r = Resonator(freq=6.01, levels=5, internal_quality_factor=6000, label="r")
     net = PortNetwork()
     port = net.port("p", target=bus, rate=.04)
-    att = net.attenuator("att", loss_db=10., occupation=.01)
+    att = net.attenuator("att", loss_db=10., thermal_occupation=.01)
     net.link(att, port)
     drive = net.expose("drive", at=att.port(1))
     chip = Chip([bus, r], [Capacitive(bus, r, g=.005)], port_network=net, approximation=RWA())
@@ -227,7 +226,7 @@ def test_internal_photon_number_jit_gradients_follow_drive_and_thermal_balance()
     pytest.importorskip("dynamiqs")
     chip, drive, readout = thermal_fridge(backend="dynamiqs")
     def occupation(amplitude, bath):
-        changed = chip.with_params({"network.component.att.occupation": bath})
+        changed = chip.with_params({"network.component.att.thermal_occupation": bath})
         result = VNA(changed).measure(6., amplitude, input=drive, outputs=[readout],
                                      noise_frequencies=[-.04, -.004, 0., .004, .04])
         return result.photon_number("r")

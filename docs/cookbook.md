@@ -121,6 +121,26 @@ Prepare coupled eigenstates with `chip.state()`. Use `chip.bare_state()` for
 bare product states. `result.population(q, level=1)` measures a local isolated
 energy-state population; `overlap()` tests a particular joint state.
 
+## Declare network noise
+
+```python
+from quchip import PortNetwork
+
+network = PortNetwork()
+attenuator = network.attenuator("cold", loss_db=20, thermal_occupation=0.01)
+twpa = network.amplifier("twpa", gain_db=20, added_noise=0.5)
+```
+
+`thermal_occupation` is the passive load's mean thermal population in quanta;
+omitting it gives vacuum. `added_noise` is required, input-referred symmetrized
+noise in quanta, at least `(1 - 1/G) / 2` for power gain `G`. Both are constant
+across frequency sweeps. The TWPA model describes linear phase-preserving gain.
+
+For existing network declarations, rename `occupation` or `loss_occupation`
+to `thermal_occupation`. Temperature, noise figure, and `noise_frequency`
+arguments have been removed; supply noise quanta directly, including in saved
+component parameters.
+
 ## Reuse a measurement
 
 With the model and ports from the {doc}`fridge guide <guides/steady-state-and-vna>`:

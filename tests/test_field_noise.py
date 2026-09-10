@@ -12,7 +12,7 @@ def test_warm_isolator_load_thermalizes_only_the_protected_device() -> None:
     r = Resonator(freq=6.0, levels=12, label="r")
     net = PortNetwork(label="line")
     port = net.port("port", target=r, rate=0.03)
-    iso = net.isolator("iso", occupation=0.3)
+    iso = net.isolator("iso", thermal_occupation=0.3)
     net.link(port, iso)
     net.expose("readout", at=iso.port(2))
     chip = Chip([r], port_network=net)
@@ -23,33 +23,31 @@ def test_warm_isolator_load_thermalizes_only_the_protected_device() -> None:
     np.testing.assert_allclose(diagonal, expected, atol=1e-10)
     restored = Chip.from_dict(json.loads(json.dumps(chip.to_dict())))
     np.testing.assert_allclose(restored.steadystate().state.full(), steady.state.full(), atol=1e-10)
-    cold = chip.with_params({"network.component.iso.occupation": 0.0})
+    cold = chip.with_params({"network.component.iso.thermal_occupation": 0.0})
     assert np.real(cold.steadystate().state.full()[0, 0]) == pytest.approx(1.0)
 
 
-def test_matched_thermal_loss_and_temperature_agree() -> None:
+def test_matched_thermal_loss_sets_device_population() -> None:
     """A lossy line mixes a vacuum input with its thermal load occupation."""
     r = Resonator(freq=6.0, levels=12, label="r")
     net = PortNetwork(label="line")
     port = net.port("port", target=r, rate=0.03)
-    att = net.attenuator("att", eta=0.25, temperature=300.0, noise_frequency=6.0)
+    att = net.attenuator("att", eta=0.25, thermal_occupation=0.6)
     net.link(port, att)
     net.expose("readout", at=att.port(2))
     chip = Chip([r], port_network=net)
     state = chip.steadystate().state.full()
-    # SI constants provide an independent occupation in the physical carrier frame.
-    n = 0.75 / np.expm1(6.62607015e-34 * 6e9 / (1.380649e-23 * 0.300))
+    n = (1 - 0.25) * 0.6
     expected = (n / (n + 1)) ** np.arange(12)
     expected /= expected.sum()
     np.testing.assert_allclose(np.diag(state), expected, atol=1e-10)
 
 
-def test_thermal_state_declarations_reject_ambiguous_or_invalid_values() -> None:
-    """Temperature needs a physical frequency and cannot accompany occupation."""
-    for kwargs in ({"temperature": 20}, {"temperature": 20, "noise_frequency": 6, "occupation": 1},
-                   {"occupation": -1}, {"temperature": -2, "noise_frequency": 6}):
-        with pytest.raises(ValueError):
-            PortNetwork().termination("load", **kwargs)
+@pytest.mark.parametrize("value", [-1, np.nan, np.inf, 1j, [0.2]])
+def test_thermal_state_declarations_reject_invalid_values(value) -> None:
+    """Thermal quanta must be a finite non-negative real scalar."""
+    with pytest.raises(ValueError):
+        PortNetwork().termination("load", thermal_occupation=value)
 
 
 def test_thermal_equilibrium_output_is_flat_without_double_counting() -> None:
@@ -59,7 +57,7 @@ def test_thermal_equilibrium_output_is_flat_without_double_counting() -> None:
     net = PortNetwork()
     port = net.port("p", target=r, rate=0.04)
     circ = net.circulator("circ")
-    load = net.termination("warm", occupation=0.3)
+    load = net.termination("warm", thermal_occupation=0.3)
     net.link(port, circ.port(2))
     net.link(load.port(1), circ.port(1))
     out = net.expose("out", at=circ.port(3))
@@ -80,8 +78,8 @@ def test_nonideal_unitary_component_uses_declared_thermal_loss_ports() -> None:
     device = net.component("nonideal", scattering=[[0,t,loss,0], [t,0,0,loss],
                                                     [-loss,0,0,t], [0,-loss,t,0]],
                            terminals=("in", "out", "loss1", "loss2"))
-    cold = net.termination("cold", occupation=0.0)
-    warm = net.termination("warm", occupation=0.2)
+    cold = net.termination("cold", thermal_occupation=0.0)
+    warm = net.termination("warm", thermal_occupation=0.2)
     for output, input_, name in ((port.output, port.input, "in"),
                                  (cold.output_terminal("1"), cold.input_terminal("1"), "loss1"),
                                  (warm.output_terminal("1"), warm.input_terminal("1"), "loss2")):
@@ -101,7 +99,7 @@ def test_thermal_collapse_coupling_rate_gradient() -> None:
     mode = Resonator(freq=6.0, levels=8, label="r")
     net = PortNetwork()
     port = net.port("p", target=mode, rate=0.03)
-    load = net.isolator("iso", occupation=0.3)
+    load = net.isolator("iso", thermal_occupation=0.3)
     net.link(port, load)
     net.expose("out", at=load.port(2))
     chip = Chip([mode], port_network=net, backend="dynamiqs")
@@ -119,7 +117,7 @@ def test_declared_reverse_source_is_blocked_by_an_ideal_isolator() -> None:
     port = net.port("p", target=mode, rate=0.03)
     net.port("probe", target=mode, rate=0.01)
     iso = net.isolator("iso")
-    warm = net.termination("reverse", occupation=1.0)
+    warm = net.termination("reverse", thermal_occupation=1.0)
     net.link(port, iso, warm.port(1))
     chip = Chip([mode], port_network=net)
     np.testing.assert_allclose(np.diag(chip.steadystate().state.full()), [1,0,0,0,0,0,0,0], atol=1e-10)
