@@ -5,16 +5,16 @@ import pytest
 from quchip import Chip, IQReceiver, PortNetwork, Resonator, VNA
 
 
-def line(*, occupation=None, backend="qutip", mixed=False):
+def line(*, thermal_occupation=None, backend="qutip", mixed=False):
     r = Resonator(freq=6.0, levels=8, label="r")
     net = PortNetwork(label="line")
     port = net.port("coupler", target=r, rate=0.04)
     circ = net.circulator("circ")
-    iso = net.isolator("iso", occupation=occupation)
+    iso = net.isolator("iso", thermal_occupation=thermal_occupation)
     amp = net.amplifier("hemt", gain=100.0, added_noise=1.0)
     net.link(port, circ.port(2))
     if mixed:
-        loss = net.attenuator("loss", eta=0.25, occupation=0.2)
+        loss = net.attenuator("loss", eta=0.25, thermal_occupation=0.2)
         second = net.amplifier("second", gain=10.0, added_noise=2.0)
         net.link(circ.port(3), amp, iso, loss, second)
         tail = second
@@ -168,7 +168,7 @@ def split_thermal(*, delay=0.0, backend="qutip"):
     net = PortNetwork()
     net.port("quiet", target=mode, rate=0.01)
     split = net.beam_splitter("split", eta=0.25)
-    load = net.termination("warm", occupation=2.0)
+    load = net.termination("warm", thermal_occupation=2.0)
     cable = net.delay("cable", duration=delay)
     net.connect(load.output_terminal("1"), split.input_terminal("right"))
     net.connect(split.output_terminal("right"), cable.input_terminal("1"))
@@ -248,7 +248,7 @@ def test_branched_chain_preserves_independently_peeled_reverse_leg(kind) -> None
         section = net.delay("section", duration=0.123)
         transmission = np.exp(2j*np.pi*6.0*0.123)
     elif kind == "attenuator":
-        section = net.attenuator("section", eta=0.25, occupation=0.0)
+        section = net.attenuator("section", eta=0.25, thermal_occupation=0.0)
         transmission = 0.5
     else:
         section = net.filter("section", transfer=lambda f: 0.5+np.zeros_like(f))

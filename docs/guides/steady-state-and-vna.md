@@ -65,36 +65,36 @@ def passband(frequency):
 fridge = PortNetwork(label="thermal_fridge")
 port = fridge.port("bus_coupler", target=bus, external_quality_factor=bus_qe)
 input_filter = fridge.filter("input_4_8GHz", transfer=passband)
-att_4k = fridge.attenuator("att_4K", loss_db=20, temperature=4000, noise_frequency=6.5)
-att_cp = fridge.attenuator("att_CP", loss_db=20, temperature=100, noise_frequency=6.5)
-att_mxc = fridge.attenuator("att_MXC", loss_db=20, temperature=20, noise_frequency=6.5)
+n_4k, n_cp, n_mxc = 12.329033161427, 0.046220887106121, 1.6829628323748e-07
+att_4k = fridge.attenuator("att_4K", loss_db=20, thermal_occupation=n_4k)
+att_cp = fridge.attenuator("att_CP", loss_db=20, thermal_occupation=n_cp)
+att_mxc = fridge.attenuator("att_MXC", loss_db=20, thermal_occupation=n_mxc)
 circ = fridge.circulator("circ")
-iso_1 = fridge.isolator("iso_1", temperature=20, noise_frequency=6.5)
-iso_2 = fridge.isolator("iso_2", temperature=20, noise_frequency=6.5)
-iso_loss = fridge.attenuator("iso_insertion", loss_db=1, temperature=20, noise_frequency=6.5)
+iso_1 = fridge.isolator("iso_1", thermal_occupation=n_mxc)
+iso_2 = fridge.isolator("iso_2", thermal_occupation=n_mxc)
+iso_loss = fridge.attenuator("iso_insertion", loss_db=1, thermal_occupation=n_mxc)
 output_filter = fridge.filter("output_4_8GHz", transfer=passband,
-                              loss_temperature=20, noise_frequency=6.5)
-coax = fridge.attenuator("output_coax", loss_db=2, temperature=4000, noise_frequency=6.5)
-hemt = fridge.amplifier("HEMT_4K", gain_db=40, noise_temperature=2500, noise_frequency=6.5)
-room_amp = fridge.amplifier("amp_RT", gain_db=20, noise_figure_db=3, noise_frequency=6.5)
+                              thermal_occupation=n_mxc)
+coax = fridge.attenuator("output_coax", loss_db=2, thermal_occupation=n_4k)
+hemt = fridge.amplifier("HEMT_4K", gain_db=40, added_noise=8.0140842782029)
+room_amp = fridge.amplifier("amp_RT", gain_db=20, added_noise=925.22946424527)
 ```
 
-`loss_db` is the power loss in dB. An attenuator's `temperature` sets the
-occupation of its dissipative load at `noise_frequency`. The isolator loads
-are at 20 mK; their combined insertion loss is represented by `iso_loss`.
-The circulator routes fields ideally and adds no noise of its own.
+`loss_db` is the power loss in dB. `thermal_occupation` is the mean thermal
+population of a passive load in quanta. The values above correspond to
+4 K, 100 mK, and 20 mK at 6.5 GHz and stay fixed throughout this sweep.
+The isolators use the coldest load; `iso_loss` represents their combined
+insertion loss. The ideal circulator adds no noise of its own.
 
-For the HEMT, `noise_temperature=2500` is a 2.5 K equivalent input noise
-temperature. It specifies the added noise, independently of the physical
-4 K stage. The room amplifier instead uses a 3 dB noise figure relative to
-290 K. These match the [noise-temperature](https://lownoisefactory.com/wp-content/uploads/2026/02/lnf-lnc4_8sg.pdf)
-and [noise-figure](https://helpfiles.keysight.com/csg/pxivna/Applications/Noise_Figure.htm)
-conventions used for amplifier specifications.
+Amplifier `added_noise` is input-referred symmetrized noise in quanta.
+The HEMT and room amplifier values correspond, at 6.5 GHz, to a 2.5 K
+equivalent noise temperature and a 3 dB noise figure referenced to 290 K.
+These are fixed model inputs, independent of the amplifiers' physical stages.
 
-The filters have half-power edges at 4 and 8 GHz. `loss_temperature` describes
-the noise emitted by absorbed power in the output filter. Here the input
-filter sees a vacuum source, with the thermal attenuators downstream of it.
-The resonators' intrinsic loss baths are also vacuum.
+The filters have half-power edges at 4 and 8 GHz. The output filter's
+`thermal_occupation` declares a matched absorptive load. The input filter
+sees a vacuum source, with thermal attenuators downstream. The resonators'
+intrinsic loss baths are also vacuum.
 
 Connect the input chain to circulator port 1, the bus to port 2, and the
 receiver chain to port 3. Name the external network ports `drive` for the source and `readout` for the
@@ -407,12 +407,10 @@ covariance in photons/ns. The trace is the complex field variance. The sum
 includes detector vacuum. `device.correlations` contains interference between
 the input and the device field and may be negative.
 
-Passive load temperatures give Planck occupations. Amplifier noise temperature
-uses $n_\mathrm{add}=k_B T_e/(hf)$, while noise figure uses
-$T_e=290\,\mathrm{K}\,(10^{\mathrm{NF}/10}-1)$.
-`noise_frequency` fixes these occupations over the model's Markov band.
-Linear `eta`, linear power `gain`, and input-referred symmetrized `added_noise`
-remain available as alternative declarations.
+Passive `thermal_occupation` and amplifier `added_noise` are constant quanta
+across the modeled band. Frequency sweeps still evaluate filter transmission
+and the device response at each frequency. Linear `eta` and power `gain`
+may replace `loss_db` and `gain_db`.
 
 The default offset grid spans ±0.1 GHz down to 1 Hz. Supply
 `noise_frequencies=` if a narrower spectral feature needs more points.
