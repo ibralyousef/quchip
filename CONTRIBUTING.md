@@ -31,11 +31,38 @@ The suite is also divided into lanes:
 python -m pytest -m core
 python -m pytest -m physics_sentinel
 python -m pytest -m extended
+python -m pytest -m "not (core or physics_sentinel)"
 ```
 
 - `core` covers analytical behavior and public API contracts.
 - `physics_sentinel` checks simulation-backed physics invariants.
 - `extended` contains slower and long-tail coverage.
+- `not (core or physics_sentinel)` runs the remainder, including example tests.
+
+### CI and merging
+
+| Event | Checks |
+| --- | --- |
+| PR opened or updated | Lint/types and `core or physics_sentinel` on Python 3.11 and 3.12 |
+| `ready-to-merge` added to the current PR commit | Remaining tests on Python 3.11 |
+| Push to `main` | Relevant docs build/deployment; no repeated test or benchmark run |
+| Manual pre-merge run | Full test suite |
+| Manual benchmark run | Full benchmark ladder against the selected comparison ref |
+| Weekly dependency canary | Full suite on Python 3.11 and 3.12 with fresh dependencies |
+
+The required fast and pre-merge checks together cover the full suite without
+repeating the fast tests on Python 3.11. Re-add `ready-to-merge` after updating
+a PR; a label on an older commit does not approve the new one. Documentation
+and release metadata use lightweight validation. Source, tests, executable
+examples (including Markdown), tooling, and CI policy require the test lanes.
+An unreadable change list fails classification.
+
+The `main` ruleset requires the PR branch to include current `main` before
+merging. Its configuration is recorded in
+[`.github/rulesets/main.json`](.github/rulesets/main.json); changing this file
+does not update GitHub automatically. An administrator must apply it to
+ruleset `21738854` before merging the workflow changes that remove post-merge
+test runs. Required check names are preserved for existing PRs.
 
 Tests that require dynamiqs use the `optional_backend` marker and call `pytest.importorskip("dynamiqs")`, so they skip cleanly when dynamiqs is unavailable.
 

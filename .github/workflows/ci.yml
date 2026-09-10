@@ -8,8 +8,6 @@ name: ci
 # Changes to this policy or its workflows always run the full lanes.
 
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
