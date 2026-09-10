@@ -156,10 +156,10 @@ class FluxoniumMapping(ModelMapping):
     ==================  ======================
 
     The native discretizations differ — scqubits uses a harmonic-oscillator
-    basis of size ``cutoff``, quchip a plane-wave phase grid of ``num_basis``
+    basis of size ``cutoff``, quchip a finite-difference phase grid of ``num_basis``
     points — so quchip keeps its own default grid rather than mirroring
-    ``cutoff``. The physics is identical; only the basis is not, which is why
-    the spectrum agreement is at ``atol=1e-6`` rather than machine precision.
+    ``cutoff``. Both represent the fluxonium Hamiltonian, but convergence of
+    each discretization must be checked for the chosen parameters.
     Export uses scqubits' ``cutoff=110`` default.
     """
 

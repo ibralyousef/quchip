@@ -106,9 +106,19 @@ class DuffingTransmon(FockDevice):
     label : str | None, default None
         If omitted, auto-generated as ``duffing_{idx}`` via the shared
         labeling counter.
-    **noise_kwargs
-        Forwarded to :class:`BaseDevice` — ``T1``, ``T2``,
-        ``thermal_occupation``.
+    T1 : float or None, default None
+        Energy-relaxation time in ns; ``None`` disables T1 relaxation.
+    T2 : float or None, default None
+        Total 0-1 coherence time in ns, not a pure-dephasing time. If both
+        are set, it must satisfy ``T2 <= 2*T1``; ``None`` disables T2 noise.
+    thermal_occupation : float or None, default None
+        Dimensionless mean bath occupation; ``None`` disables thermal
+        absorption.
+
+    References
+    ----------
+    Koch et al., *Phys. Rev. A* 76, 042319 (2007),
+    https://doi.org/10.1103/PhysRevA.76.042319.
 
     Example
     -------
@@ -133,7 +143,15 @@ class DuffingTransmon(FockDevice):
     anharmonicity: Scalar = parameter(default=UNBOUND, unit="GHz", symbol=r"\alpha")
 
     def local_hamiltonian(self, op: LocalOps, p: Any) -> PhysicsExpr:
-        """Return the local Duffing Hamiltonian ``H = omega n + (alpha/2) n (n - I)``."""
+        """Return the local Duffing Hamiltonian.
+
+        Parameters
+        ----------
+        op : LocalOps
+            Fock operator namespace.
+        p : ParameterNamespace
+            Symbolic ``freq`` and ``anharmonicity`` values.
+        """
         return duffing_expr(op, p.freq, p.anharmonicity)
 
     def physics_notes(self) -> list[str]:

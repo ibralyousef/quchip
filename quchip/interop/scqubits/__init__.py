@@ -27,18 +27,40 @@ def _require_scqubits() -> None:
 
 
 def from_scqubits(obj: Any, **opts: Any) -> Any:
-    """Convert a scqubits object into the matching quchip device.
+    """Import a scqubits device or composite system.
 
-    Dispatches on ``type(obj)`` through the :class:`ModelMapping` registry.
-    Keyword options (``levels``, ``label``, noise parameters) are forwarded to
-    the mapping's ``import_model``.
+    Parameters
+    ----------
+    obj : scqubits object
+        A supported circuit, oscillator, or ``HilbertSpace``. Device mappings
+        are listed in :mod:`quchip.interop.scqubits.devices`.
+    **opts
+        Device imports accept ``levels`` (default: source ``truncated_dim``),
+        ``label`` (default: source ``id_str``), and target-device noise options
+        such as ``T1``, ``T2`` and ``thermal_occupation``. Matrix-element
+        relaxation may also require ``coupling_channel``; see the target class.
+        Composite imports accept ``frame`` (default ``"lab"``) and
+        ``approximation`` (default ``Exact()``); device options are not forwarded.
+
+    Returns
+    -------
+    BaseDevice or Chip
+        Converted device, or a composite of frozen eigenbasis snapshots.
+        Snapshot source parameters are not differentiable through quchip.
 
     Raises
     ------
     ImportError
-        scqubits is not installed.
+        The optional ``quchip[scqubits]`` dependency is unavailable.
     LookupError
-        No :class:`ModelMapping` is registered for ``type(obj)``.
+        No mapping exists for the source type.
+    NotImplementedError
+        A composite contains unsupported interactions.
+
+    References
+    ----------
+    Groszkowski and Koch, *scqubits: a Python package for superconducting
+    qubits*, Quantum 5, 583 (2021), https://doi.org/10.22331/q-2021-11-17-583.
     """
     _require_scqubits()
 
@@ -53,24 +75,39 @@ def from_scqubits(obj: Any, **opts: Any) -> Any:
 
 
 def to_scqubits(device_or_chip: Any, **opts: Any) -> Any:
-    """Convert a quchip device into the matching scqubits object.
+    """Export a quchip device or chip to scqubits.
 
-    Dispatches on ``type(device_or_chip)`` through the export registry for the
-    ``"scqubits"`` library. Parameters must be concrete: a device carrying JAX
-    tracers (inside ``jit``/``grad``) raises :class:`ValueError`.
+    Parameters
+    ----------
+    device_or_chip : BaseDevice or Chip
+        Model with concrete parameters. A chip exports subsystems and supported
+        interactions; filtered couplings require ``Exact()`` before export.
+    **opts
+        Mapping-specific options. ``DuffingTransmon`` export accepts ``ncut``
+        (integer charge cutoff, default 30) for reconstructing circuit energies.
+        Other shipped device mappings currently ignore extra options.
+        Composite export accepts no keyword options.
 
-    A :class:`~quchip.chip.chip.Chip` exports to an scqubits ``HilbertSpace``
-    (devices as subsystems, couplings as interaction terms); see
-    :func:`~quchip.interop.scqubits.composite.export_chip`.
+    Returns
+    -------
+    scqubits object
+        Corresponding device or ``HilbertSpace``. Chip control equipment and
+        baths are omitted with a warning; port networks and effective terms
+        are unsupported. See :func:`~quchip.interop.scqubits.composite.export_chip`.
 
     Raises
     ------
     ImportError
-        scqubits is not installed.
+        The optional ``quchip[scqubits]`` dependency is unavailable.
     LookupError
-        No :class:`ModelMapping` exports this device type to scqubits.
+        No export mapping exists for a device type.
     ValueError
-        A device parameter is a JAX tracer rather than a concrete value.
+        Parameters are traced or approximation filtering would change the export.
+
+    References
+    ----------
+    Groszkowski and Koch, Quantum 5, 583 (2021),
+    https://doi.org/10.22331/q-2021-11-17-583.
     """
     _require_scqubits()
 

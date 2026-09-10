@@ -11,7 +11,16 @@ from quchip.utils.labeling import resolve_label
 
 
 class CableLoss(SignalTransform, serializable=True):
-    """Attenuate one control line by a power loss specified in dB."""
+    """Attenuate one control line by a power loss specified in dB.
+
+    Parameters
+    ----------
+    line : str or object with a label
+        Control-line label to transform; resolved once at construction.
+    loss_db : float
+        Positive power-loss value in dB. The complex amplitude is multiplied
+        by ``10**(-loss_db/20)``.
+    """
 
     line: str = setting()
     loss_db: Any = parameter()
@@ -21,6 +30,13 @@ class CableLoss(SignalTransform, serializable=True):
         object.__setattr__(self, "loss_db", loss_db)
 
     def apply(self, signals: SignalMap) -> SignalMap:
+        """Return signals with this line's amplitude attenuated.
+
+        Parameters
+        ----------
+        signals : SignalMap
+            Mapping keyed by ``(line, channel)`` signal identifiers.
+        """
         factor = qnp.power(10.0, -self.loss_db / 20.0)
         return {
             key: signal.scaled(factor) if key[0] == self.line else signal

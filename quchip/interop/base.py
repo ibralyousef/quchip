@@ -32,6 +32,16 @@ def source_key(tp: type) -> str:
     name, e.g. ``"scqubits.Transmon"``. Only the top-level module is used so
     that a mapping registered against a package root matches classes
     re-exported from submodules.
+
+    Parameters
+    ----------
+    tp : type
+        Third-party class to identify.
+
+    Returns
+    -------
+    str
+        Top-level module and qualified class name separated by a dot.
     """
     return f"{tp.__module__.split('.')[0]}.{tp.__qualname__}"
 
@@ -121,6 +131,18 @@ class ModelMapping:
 
         Override to support import. The base implementation raises
         :class:`NotImplementedError`.
+
+        Parameters
+        ----------
+        obj : object
+            Third-party instance to convert.
+        **opts
+            Mapping-specific keyword options; subclasses must document supported keys.
+
+        Returns
+        -------
+        object
+            Converted quchip model, as defined by the subclass.
         """
         raise NotImplementedError(f"{type(self).__qualname__} does not support import.")
 
@@ -129,6 +151,18 @@ class ModelMapping:
 
         Override to support export; overriding requires setting ``target``.
         The base implementation raises :class:`NotImplementedError`.
+
+        Parameters
+        ----------
+        device : object
+            quchip device to convert.
+        **opts
+            Mapping-specific keyword options; subclasses must document supported keys.
+
+        Returns
+        -------
+        object
+            Converted third-party model, as defined by the subclass.
         """
         raise NotImplementedError(f"{type(self).__qualname__} does not support export.")
 
@@ -145,6 +179,19 @@ def import_object(obj: Any, **opts: Any) -> Any:
         No mapping is registered for ``type(obj)`` or any of its base
         classes. The message names the missing source key and shows the
         skeleton for authoring a new :class:`ModelMapping`.
+
+    Parameters
+    ----------
+    obj : object
+        Third-party object whose type selects the registered mapping.
+    **opts
+        Keywords forwarded unchanged to the mapping's conversion method.
+        See that method for supported keys and defaults.
+
+    Returns
+    -------
+    object
+        Converted quchip model.
     """
     for klass in type(obj).__mro__:
         mapping_cls = _IMPORT_REGISTRY.get(source_key(klass))
@@ -167,6 +214,21 @@ def export_object(device: Any, library: str, **opts: Any) -> Any:
     LookupError
         No mapping is registered for ``(library, type(device))`` or any base
         class. The message lists the device types *library* can export.
+
+    Parameters
+    ----------
+    device : BaseDevice
+        Device whose type selects the registered mapping.
+    library : str
+        Registered target library, such as ``"scqubits"``.
+    **opts
+        Keywords forwarded unchanged to the mapping's conversion method.
+        See that method for supported keys and defaults.
+
+    Returns
+    -------
+    object
+        Converted third-party object.
     """
     for klass in type(device).__mro__:
         mapping_cls = _EXPORT_REGISTRY.get((library, klass))

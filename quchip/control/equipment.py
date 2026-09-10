@@ -70,7 +70,13 @@ class CrosstalkMatrix(SignalTransform, serializable=True):
                 raise ValueError(f"{name} matrix shape {getattr(matrix, 'shape', None)} does not match {shape}")
 
     def apply(self, signals: SignalMap) -> SignalMap:
-        """Apply all directed leakage edges to one shared input snapshot."""
+        """Apply all directed leakage edges to one shared input snapshot.
+
+        Parameters
+        ----------
+        signals : SignalMap
+            Signals keyed by ``(line, source_index)``.
+        """
         output = dict(signals)
         line_index = {label: index for index, label in enumerate(self.labels)}
         for key, signal in signals.items():
@@ -92,9 +98,17 @@ class CrosstalkMatrix(SignalTransform, serializable=True):
         return output
 
     def referenced_lines(self) -> tuple[str, ...]:
+        """Return drive labels referenced by this transform."""
         return self.labels
 
     def without_line(self, line: str) -> "CrosstalkMatrix | None":
+        """Return a copy with ``line`` removed, or ``None`` below two lines.
+
+        Parameters
+        ----------
+        line : str
+            Drive label to remove.
+        """
         if line not in self.labels:
             return self
         keep = [index for index, label in enumerate(self.labels) if label != line]
@@ -144,6 +158,13 @@ class ControlEquipment:
 
     The equipment pipes complete analytic signals through ``signal_chain``
     before destination drives author Hamiltonian terms.
+
+    Parameters
+    ----------
+    lines : list of BaseDrive
+        Drive lines in wiring order.
+    signal_chain : list of SignalTransform, optional
+        Sequential transforms applied after scheduling.
     """
 
     def __init__(
@@ -329,7 +350,14 @@ class ControlEquipment:
         ]
 
     def copy(self, device_map: dict[str, Any], coupling_map: dict[str, Any] | None = None) -> "ControlEquipment":
-        """Return a structural copy with drive lines rebound to *device_map* / *coupling_map*.
+        """Return a structural copy with drive lines rebound to target maps.
+
+        Parameters
+        ----------
+        device_map : dict[str, object]
+            Device labels to copied devices.
+        coupling_map : dict[str, object], optional
+            Coupling labels to copied couplings.
 
         Coupling-target lines rebind via *coupling_map*, keyed by coupling
         label; device-target lines rebind via *device_map*.
@@ -363,7 +391,16 @@ class ControlEquipment:
         dev_map: dict[str, Any],
         coupling_map: dict[str, Any] | None = None,
     ) -> "ControlEquipment":
-        """Reconstruct from :meth:`to_dict` output, rebinding drives via *dev_map* / *coupling_map*.
+        """Reconstruct from :meth:`to_dict` output and target maps.
+
+        Parameters
+        ----------
+        d : dict
+            Serialized equipment dictionary.
+        dev_map : dict[str, object]
+            Device labels to target objects.
+        coupling_map : dict[str, object], optional
+            Coupling labels to target objects.
 
         Each line's ``target_label`` is resolved against *dev_map* first,
         then *coupling_map* — device and coupling labels are disjoint by

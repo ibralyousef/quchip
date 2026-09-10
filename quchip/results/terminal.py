@@ -40,6 +40,15 @@ class IQReadout:
     distributions: do not add apparatus noise already included in calibration.
     Covariances must be positive definite. Wiring-derived readouts use fields
     in 1/sqrt(ns) and retain their integrated noise contributions.
+
+    Attributes
+    ----------
+    means : array_like
+        Complex conditional means, one per physical outcome.
+    iq_covariance : array_like
+        Covariance with shape ``(outcomes, 2, 2)``.
+    contributions : mapping or None
+        Optional named integrated noise contributions.
     """
 
     means: Any
@@ -74,6 +83,21 @@ class IQReadout:
         Use the same boundary-field units and vacuum assumptions as
         SimulationResult.iq_readout(). This captures the chip's current wiring;
         the result method instead uses the wiring retained by that simulation.
+
+        Parameters
+        ----------
+        chip : Chip
+            Chip whose current output wiring is captured.
+        output : port object or str
+            Output reference plane.
+        means : array_like
+            Conditional coherent fields in ``1/sqrt(ns)``.
+        frequency : scalar
+            Carrier frequency in GHz.
+        receiver : IQReceiver
+            Boxcar receiver and optional digital transfer.
+        noise_frequencies : array_like or None, optional
+            Two-sided offsets in GHz; ``None`` uses the standard grid.
         """
         from quchip.analysis.field_noise import ReadoutWiring
         wiring = ReadoutWiring.capture(chip.resolve().slh, chip.backend.array_module)
@@ -87,11 +111,23 @@ class IQReadout:
         return weights
 
     def mean(self, probabilities: Any) -> Any:
-        """Return the mean of the conditional IQ mixture."""
+        """Return the mean of the conditional IQ mixture.
+
+        Parameters
+        ----------
+        probabilities : array_like
+            Physical-outcome probabilities on the final axis.
+        """
         return self._weights(probabilities) @ self.means
 
     def covariance(self, probabilities: Any) -> Any:
-        """Return mixture covariance, including separation between conditional means."""
+        """Return mixture covariance, including conditional-mean separation.
+
+        Parameters
+        ----------
+        probabilities : array_like
+            Physical-outcome probabilities on the final axis.
+        """
         weights = self._weights(probabilities)
         xp = _namespace(weights, self.means)
         centers = xp.stack((xp.real(self.means), xp.imag(self.means)), axis=-1)
@@ -107,6 +143,19 @@ class StateSamples:
     physical_indices are Born draws. indices additionally includes assignment
     errors, if requested. iq is present only for a conditional IQ readout.
     Sweep axes follow the leading shot axis. No conditional state is returned.
+
+    Attributes
+    ----------
+    devices : tuple of str
+        Measured device labels.
+    outcomes : tuple of tuple of int
+        Ordered outcome tuples.
+    axes : tuple
+        Sweep-axis metadata.
+    physical_indices, indices : array_like
+        Born and recorded outcome indices.
+    iq : array_like or None
+        Conditional IQ draws, when requested.
     """
 
     devices: tuple[str, ...]
@@ -128,7 +177,19 @@ class StateSamples:
 
 @dataclass(frozen=True)
 class StateMeasurement:
-    """Born probabilities in a captured local product measurement basis."""
+    """Born probabilities in a captured local product measurement basis.
+
+    Attributes
+    ----------
+    devices : tuple of str
+        Measured device labels.
+    outcomes : tuple of tuple of int
+        Ordered product-basis outcomes.
+    probabilities : array_like
+        Normalized probabilities with outcomes on the final axis.
+    axes : tuple
+        Sweep-axis metadata.
+    """
 
     devices: tuple[str, ...]
     outcomes: tuple[tuple[int, ...], ...]
@@ -155,7 +216,13 @@ class StateMeasurement:
         return matrix
 
     def recorded_probabilities(self, assignment: Any) -> Any:
-        """Apply A[recorded, physical], with each column summing to one."""
+        """Apply ``A[recorded, physical]`` to the Born probabilities.
+
+        Parameters
+        ----------
+        assignment : array_like
+            Column-stochastic ``(recorded, physical)`` assignment matrix.
+        """
         return self.probabilities @ self._assignment(assignment).T
 
     def sample(self, count: int, *, seed: int | None = None, key: Any = None,
@@ -165,6 +232,19 @@ class StateMeasurement:
         Assignment and IQ are separate detector models. IQ samples remain
         unclassified; no threshold or assignment matrix is inferred from them.
         Discrete labels are not differentiable. Use an explicit key under JAX.
+
+        Parameters
+        ----------
+        count : int
+            Positive number of independent shots.
+        seed : int or None, optional
+            NumPy random seed.
+        key : jax.Array or None, optional
+            JAX random key; mutually exclusive with ``seed``.
+        assignment : array_like or None, optional
+            Column-stochastic ``(recorded, physical)`` assignment matrix.
+        readout : IQReadout or None, optional
+            Conditional IQ calibration for each physical outcome.
         """
         if assignment is not None and readout is not None:
             raise ValueError("Choose assignment or IQ readout; IQ samples are not automatically classified.")

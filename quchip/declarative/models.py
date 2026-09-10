@@ -287,6 +287,15 @@ class DeviceModel(BaseDevice, metaclass=DeclarativeMeta):
     >>> device = DuffingOscillator(freq=5.0, anharmonicity=-0.3, levels=4)
     >>> device.freq
     5.0
+
+    Parameters
+    ----------
+    levels : int, keyword-only, default 2
+        Native local-space dimension or truncation.
+    label : str or None, keyword-only, default None
+        Stable device label; ``None`` selects an automatic label.
+    **params : Any
+        Declared model parameters and optional noise fields.
     """
 
     levels: int = constructor_field(default=2, kw_only=True)
@@ -478,12 +487,27 @@ class DeviceModel(BaseDevice, metaclass=DeclarativeMeta):
         raise NotImplementedError
 
     def time_terms(self, op: Any, p: Any) -> tuple[TimeDependentTerm, ...]:
-        """Return local time-dependent Hamiltonian terms beyond the static model."""
+        """Return local time-dependent Hamiltonian terms beyond the static model.
+
+        Parameters
+        ----------
+        op : LocalOps
+            Local operator namespace.
+        p : ParameterNamespace
+            Symbolic declared parameters.
+        """
         _ = (op, p)
         return ()
 
     def dissipation(self, op: Any, p: Any) -> tuple[CollapseChannel, ...]:
         """Return device-local Lindblad channels.
+
+        Parameters
+        ----------
+        op : LocalOps
+            Local operator namespace.
+        p : ParameterNamespace
+            Symbolic declared parameters.
 
         The base channels implement T1, T2, and thermal occupation. Subclasses
         may append channels with ``super().dissipation(op, p)``.
@@ -538,7 +562,13 @@ class DeviceModel(BaseDevice, metaclass=DeclarativeMeta):
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "DeviceModel":
-        """Reconstruct the device from :meth:`to_dict` output."""
+        """Reconstruct the device from :meth:`to_dict` output.
+
+        Parameters
+        ----------
+        d : mapping
+            Serialized device record.
+        """
         d = cls._normalize_parameter_names(d)
         fields = cls.__quchip_param_fields__
         params = {
@@ -600,6 +630,15 @@ class CouplingModel(BaseCoupling, metaclass=DeclarativeMeta):
     >>> c = ExchangeCoupling("q0", "q1", g=0.01)
     >>> c.coupling_strength
     0.01
+
+    Parameters
+    ----------
+    device_a, device_b : device or str
+        Coupled devices or their labels.
+    label : str or None, keyword-only, default None
+        Stable coupling label.
+    **params : Any
+        Declared coupling parameters and settings.
     """
 
     device_a: BaseDevice | str = constructor_field()
@@ -688,6 +727,9 @@ class CouplingModel(BaseCoupling, metaclass=DeclarativeMeta):
             operators compose with ``@``; cross-endpoint operators combine
             with ``*`` (tensor product).
 
+        p : ParameterNamespace
+            Symbolic declared coupling parameters.
+
         Returns
         -------
         PhysicsExpr
@@ -704,6 +746,9 @@ class CouplingModel(BaseCoupling, metaclass=DeclarativeMeta):
         a, b : EndpointOps
             Operator namespaces for the two coupled endpoints.
 
+        p : ParameterNamespace
+            Symbolic declared coupling parameters.
+
         Returns
         -------
         tuple of TimeDependentTerm
@@ -716,6 +761,15 @@ class CouplingModel(BaseCoupling, metaclass=DeclarativeMeta):
     def parametric_interaction(self, a: Any, b: Any, p: Any) -> Any:
         """Return the parametric interaction structure, or ``None`` when this coupling is not modulable.
 
+        Parameters
+        ----------
+        a, b : EndpointOps
+            Ordered endpoint operator namespaces.
+        p : ParameterNamespace
+            Symbolic declared coupling parameters.
+
+        Notes
+        -----
         The coupling-side mirror of the device drive-dispatch protocols: a
         :class:`~quchip.control.drive.ParametricDrive` accepts any coupling
         whose hook returns a :class:`~quchip.declarative.expr.PhysicsExpr`.
@@ -724,7 +778,15 @@ class CouplingModel(BaseCoupling, metaclass=DeclarativeMeta):
         return None
 
     def dissipation(self, a: Any, b: Any, p: Any) -> tuple[CollapseChannel, ...]:
-        """Return authored two-endpoint Lindblad channels."""
+        """Return authored two-endpoint Lindblad channels.
+
+        Parameters
+        ----------
+        a, b : EndpointOps
+            Ordered endpoint operator namespaces.
+        p : ParameterNamespace
+            Symbolic declared coupling parameters.
+        """
         _ = (a, b, p)
         return ()
 
@@ -852,6 +914,13 @@ class CouplingModel(BaseCoupling, metaclass=DeclarativeMeta):
     @classmethod
     def from_dict(cls, d: dict[str, Any], device_a: Any, device_b: Any) -> "CouplingModel":
         """Reconstruct a coupling from :meth:`to_dict` output.
+
+        Parameters
+        ----------
+        d : mapping
+            Serialized coupling record.
+        device_a, device_b : device or str
+            Endpoints supplied by the containing chip.
 
         Default implementation: forward declared parameters straight into
         ``__init__``. Subclasses with bespoke serialization (e.g. envelope

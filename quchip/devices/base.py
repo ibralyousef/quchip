@@ -403,6 +403,15 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
     def set_tunable_param(self, name: str, value: Any) -> None:
         """Update a bare parameter named in :meth:`tunable_params`.
 
+        Parameters
+        ----------
+        name : str
+            Tunable field name.
+        value : Any
+            Replacement numerical value.
+
+        Notes
+        -----
         Default implementation uses :func:`setattr` so any direct
         attribute (``freq``, ``anharmonicity``, ``E_C``, …) works
         without ceremony. Subclasses with derived properties that need
@@ -418,6 +427,15 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
     def tunable_param_bounds(self, name: str, value: float) -> tuple[float, float]:
         """Return ``(lower, upper)`` bounds for a tunable parameter at a seed value.
 
+        Parameters
+        ----------
+        name : str
+            Tunable parameter name.
+        value : float
+            Concrete seed used to construct bounds.
+
+        Notes
+        -----
         These bounds are consumed by the inverse-design optimizer to keep
         searches physical. The default uses well-named conventions that
         cover the common circuit-QED parameters:
@@ -479,7 +497,15 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         return values
 
     def set_parameter_value(self, name: str, value: Any) -> None:
-        """Apply one validated local parameter value on an isolated device copy."""
+        """Apply one validated local parameter value on an isolated device copy.
+
+        Parameters
+        ----------
+        name : str
+            Declared or tunable parameter name.
+        value : Any
+            Replacement value.
+        """
         if name == "thermal_population":
             warn_renamed(name, "thermal_occupation")
             name = "thermal_occupation"
@@ -495,7 +521,13 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         raise KeyError(name)
 
     def set_parameter_values(self, values: Mapping[str, Any]) -> None:
-        """Validate a complete candidate before applying a local parameter group."""
+        """Validate a complete candidate before applying a local parameter group.
+
+        Parameters
+        ----------
+        values : mapping[str, Any]
+            Parameter names and replacement values, applied atomically.
+        """
         values = self._normalize_parameter_names(values)
         if not values:
             return
@@ -623,6 +655,11 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
     def resolve(self, *, frame: FrameSpec | None = None) -> EngineResult:
         """Resolve isolated device physics with its own basis and explicit frame.
 
+        Parameters
+        ----------
+        frame : FrameSpec or None, keyword-only
+            Explicit rotating-frame specification; ``None`` uses the lab frame.
+
         The default frame is the lab frame. Chip membership does not affect
         this local calculation; use the chip for coupled-system queries.
         """
@@ -690,7 +727,13 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         self,
         chip_basis: Literal["native", "eigen"] = "native",
     ) -> Literal["native", "eigen"]:
-        """Return the device override or inherited chip basis policy."""
+        """Return the device override or inherited chip basis policy.
+
+        Parameters
+        ----------
+        chip_basis : {"native", "eigen"}, default "native"
+            Fallback policy when the device has no explicit basis setting.
+        """
         policy = self.basis if self.basis is not None else chip_basis
         if policy not in ("native", "eigen"):
             raise ValueError(f"basis must be 'native', 'eigen', or None, got {policy!r}.")
@@ -720,7 +763,13 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         self,
         chip_basis: Literal["native", "eigen"] = "native",
     ) -> int:
-        """Return the local dimension delivered to the solver."""
+        """Return the local dimension delivered to the solver.
+
+        Parameters
+        ----------
+        chip_basis : {"native", "eigen"}, default "native"
+            Fallback basis policy.
+        """
         policy = self.resolved_basis(chip_basis)
         if policy == "native":
             return self.local_space().dimension
@@ -769,6 +818,14 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
     def local_operator(self, name: str) -> Operator:
         """Map an operator-name string to this device's own local operator.
 
+        Parameters
+        ----------
+        name : str
+            Operator vocabulary name such as ``"X"``, ``"n"``, ``"a"``,
+            ``"charge"`` or ``"I"``.
+
+        Notes
+        -----
         Recognized names: ``"X"`` / ``"Y"`` / ``"Z"`` (Pauli projections on
         the computational ``|0>, |1>`` subspace), ``"n"`` (number), ``"a"``
         (lowering), ``"a_dag"`` (raising), ``"I"`` (identity). The device owns
@@ -810,20 +867,50 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         )
 
     def basis_state(self, n: int) -> State:
-        """Fock basis state ``|n>`` on the truncated Hilbert space."""
+        """Return Fock basis state ``|n>``.
+
+        Parameters
+        ----------
+        n : int
+            Non-negative basis index below ``levels``.
+        """
         return get_default_backend().basis(self.levels, n)
 
     def coherent_state(self, alpha: complex) -> State:
-        """Coherent state ``|alpha>`` on the truncated Fock basis."""
+        """Return coherent state ``|alpha>`` on the truncated Fock basis.
+
+        Parameters
+        ----------
+        alpha : complex
+            Dimensionless coherent-state amplitude.
+        """
         return get_default_backend().coherent(self.levels, alpha)
 
     def plot_energy_levels(self, *, ax: Any = None, **kwargs: Any) -> Any:
-        """Plot the device's bare energy-level ladder (delegates to :mod:`quchip.viz`)."""
+        """Plot the device's bare energy-level ladder.
+
+        Parameters
+        ----------
+        ax : matplotlib Axes or None, keyword-only
+            Existing axes, or ``None`` to create one.
+        **kwargs : Any
+            Plot styling forwarded to the visualization helper.
+        """
         from quchip.viz.device import plot_energy_levels
         return plot_energy_levels(self, ax=ax, **kwargs)
 
     def plot_wavefunction(self, n: int, *, ax: Any = None, **kwargs: Any) -> Any:
-        """Plot the ``n``-th eigenstate wavefunction (delegates to :mod:`quchip.viz`)."""
+        """Plot an eigenstate wavefunction.
+
+        Parameters
+        ----------
+        n : int
+            Eigenstate index.
+        ax : matplotlib Axes or None, keyword-only
+            Existing axes, or ``None`` to create one.
+        **kwargs : Any
+            Plot styling forwarded to the visualization helper.
+        """
         from quchip.viz.device import plot_wavefunction
         return plot_wavefunction(self, n, ax=ax, **kwargs)
 
@@ -884,6 +971,11 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
     def projector(self, i: int, j: int) -> Operator:
         """``|i><j|`` on the authored local basis.
 
+        Parameters
+        ----------
+        i, j : int
+            Ket and bra indices in the authored local basis.
+
         Use ``projector(i, i)`` for the population projector
         ``|i><i|`` and ``projector(i, j)`` for ``|i><j|``. No subspace
         approximation: the operator acts on the full authored local space.
@@ -895,6 +987,11 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
 
     def transition(self, lower: int, upper: int) -> Operator:
         """Hermitian transition between isolated energy states.
+
+        Parameters
+        ----------
+        lower, upper : int
+            Isolated energy-level indices with ``lower < upper``.
 
         The operator ``|lower><upper| + |upper><lower|`` is returned in the
         authored local basis.
@@ -916,7 +1013,13 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         )
 
     def transition_frequency(self, lower: int, upper: int) -> Any:
-        """Return the isolated ``E_upper - E_lower`` transition in GHz."""
+        """Return the isolated ``E_upper - E_lower`` transition in GHz.
+
+        Parameters
+        ----------
+        lower, upper : int
+            Isolated energy-level indices with ``lower < upper``.
+        """
         from quchip.engine.basis import resolve_device_basis
 
         _validate_level_pair(
@@ -1027,7 +1130,14 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
         self,
         basis: "BasisRecord | None" = None,
     ) -> tuple[CollapseChannel, ...]:
-        """Return normalized local collapse channels."""
+        """Return normalized local collapse channels.
+
+        Parameters
+        ----------
+        basis : BasisRecord or None, optional
+            Resolved basis for matrix-element channels; ``None`` resolves the
+            device's current basis policy.
+        """
         return tuple(channel for channel, _paths in self._collapse_channels_with_paths(basis))
 
     @classmethod
@@ -1147,6 +1257,11 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
 
     def connect(self, drive: "BaseDrive") -> None:
         """Register a drive as connected: idempotent on identity, replace-on-relabel.
+
+        Parameters
+        ----------
+        drive : BaseDrive
+            Drive object to attach.
 
         A drive's label is its stable identity as a control line
         (``chip.wire`` already rejects duplicate labels within one

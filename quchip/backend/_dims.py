@@ -17,7 +17,15 @@ import numpy as np
 
 
 def validate_two_body_indices(index_a: int, index_b: int, dims: Sequence[int]) -> None:
-    """Raise ``ValueError`` when two-body device indices are equal or out of range."""
+    r"""Raise ``ValueError`` when two-body device indices are equal or out of range.
+
+    Parameters
+    ----------
+    index_a, index_b : int
+        Distinct zero-based subsystem positions.
+    dims : sequence of int
+        Subsystem dimensions; indices must be smaller than len(dims).
+    """
     n_devices = len(dims)
     if index_a == index_b:
         raise ValueError("index_a and index_b must be different")

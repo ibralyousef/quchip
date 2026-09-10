@@ -58,6 +58,17 @@ class OutputFieldTrace:
     is the normally ordered ``<b_out dagger b_out>`` in photons/ns.
     ``raw_*`` retain the same moments at the Markov boundary, before propagation
     through the outbound reference run.
+
+    Attributes
+    ----------
+    exposure : str
+        External network-port label.
+    times : array_like
+        Saved times in ns.
+    amplitude, raw_amplitude : array_like
+        Propagated and Markov-boundary complex means in ``1/sqrt(ns)``.
+    photon_flux, raw_photon_flux : array_like
+        Propagated and Markov-boundary normally ordered fluxes in photons/ns.
     """
 
     exposure: str
@@ -68,7 +79,13 @@ class OutputFieldTrace:
     raw_photon_flux: Any
 
     def quadrature(self, phase: Any = 0.0) -> Any:
-        r"""Return ``Re[exp(-i phase) <b_out>]`` without another solve."""
+        r"""Return ``Re[exp(-i phase) <b_out>]`` without another solve.
+
+        Parameters
+        ----------
+        phase : scalar, default=0.0
+            Quadrature angle in radians.
+        """
         from quchip.utils.jax_utils import array_namespace
 
         xp = array_namespace(self.amplitude)
@@ -91,21 +108,24 @@ _NO_STATES_MSG = 'Full state history is unavailable; run with states="all" to re
 class SimulationResult:
     """Backend-agnostic container for the output of one solve.
 
-    A :class:`SimulationResult` bundles everything a user needs after a
-    solve finishes:
+    Stored states follow the requested storage policy; ``times`` uses ns and
+    ``dims`` follows chip order. Dict-form ``e_ops`` become
+    :class:`ObservableTrace` entries in ``observable_traces``.
 
-    - ``times`` — the time grid the solver stored (ns).
-    - ``states`` — the list of stored states (kets or density matrices),
-      available when the request used ``states="all"``.
-    - ``solver`` — the name reported by the backend.
-    - ``stats`` — a plain ``dict`` of solver statistics.
-    - ``dims`` — the per-device Hilbert-space dimensions, in chip order.
-    - ``device_info`` — ``[(label, computational), …]`` for partial-trace
-      helpers to resolve device indices by label or by object.
-
-    Expectation values live in ``observable_traces`` when ``e_ops`` was
-    passed as a dict. Each entry is an :class:`ObservableTrace` or a list
-    of them (list-valued observables, one per band, etc.).
+    Parameters
+    ----------
+    solver_result : SolverResult
+        Backend output to wrap.
+    backend : Backend
+        Backend owning native states and arrays.
+    dims : sequence of int
+        Hilbert dimensions in chip order.
+    device_info, observable_traces, output_traces, channels, bases : optional
+        Captured device, observable, output, channel, and basis metadata.
+    dissipation : bool, default=True
+        Whether collapse channels were included.
+    readout_wiring : optional
+        Captured downstream readout wiring.
     """
 
     def __init__(
@@ -179,7 +199,15 @@ class SimulationResult:
         return trace
 
     def expect(self, key: Any, index: int | None = None) -> Any:
-        """Return the full expectation-value array for observable *key* over ``self.times``."""
+        """Return an expectation trace over ``self.times``.
+
+        Parameters
+        ----------
+        key : object or str
+            Captured observable key.
+        index : int or None, optional
+            Entry of a list-valued observable.
+        """
         return self._resolve_trace(key, index).values
 
     def observable_at(self, t: Any, values: Any, *, method: str = "exact") -> Any:
@@ -189,13 +217,30 @@ class SimulationResult:
         axes followed by the query shape. ``nearest`` selects the earlier
         sample on a tie; ``interpolate`` is linear, including complex values.
         Out-of-interval queries raise. No solve or state interpolation occurs.
+
+        Parameters
+        ----------
+        t : scalar or array_like
+            Query times in ns.
+        values : array_like
+            Saved values with time on the final axis.
+        method : {"exact", "nearest", "interpolate"}, default="exact"
+            Time-selection rule.
         """
         from quchip.results._time import observable_at
 
         return observable_at(self.times, t, values, method, self._backend.array_module)
 
     def expect_final(self, key: Any, index: int | None = None) -> Any:
-        """Return the final expectation value for observable *key* (``self.expect(key)[-1]``)."""
+        """Return the final expectation value for an observable.
+
+        Parameters
+        ----------
+        key : object or str
+            Captured observable key.
+        index : int or None, optional
+            Entry of a list-valued observable.
+        """
         return self._resolve_trace(key, index).values[-1]
 
     # Alias: reads nicely at call sites that say "give me the values array".
@@ -211,7 +256,13 @@ class SimulationResult:
         return dict(self._output_data)
 
     def output(self, exposure: Any) -> OutputFieldTrace:
-        """Return one field trace by network port or label."""
+        """Return one field trace by network port or label.
+
+        Parameters
+        ----------
+        exposure : port object or str
+            External output reference plane.
+        """
         label = resolve_label(exposure)
         try:
             return self._output_data[label]
@@ -257,6 +308,11 @@ class SimulationResult:
         vacuum input. Dephasing and thermal-absorption channels can also have
         nonzero jump rates, so this quantity alone is not an excitation-loss
         rate.
+
+        Parameters
+        ----------
+        key : channel object or str
+            Resolved channel key, external port, or unambiguous local label.
         """
         name = self._channel_key(key)
         if name not in self._jump_rate_cache:
@@ -272,7 +328,13 @@ class SimulationResult:
         return self._jump_rate_cache[name]
 
     def collapse_flux(self, key: Any) -> Any:
-        """Deprecated alias for :meth:`jump_rate`."""
+        """Deprecated alias for :meth:`jump_rate`.
+
+        Parameters
+        ----------
+        key : channel object or str
+            Resolved channel key.
+        """
         from quchip.utils.deprecation import warn_renamed
 
         warn_renamed("collapse_flux()", "jump_rate()")
@@ -284,6 +346,11 @@ class SimulationResult:
         This is the cumulative trapezoid integral of :meth:`jump_rate` on
         the result grid. Its last entry is the expected number of jumps over
         the whole solve.
+
+        Parameters
+        ----------
+        key : channel object or str
+            Resolved channel key.
         """
         xp = self._backend.array_module
         flux = self.jump_rate(key)
@@ -344,6 +411,11 @@ class SimulationResult:
         matrices returns ``<target|rho(t)|target>``. Stays in the backend's
         array module so the result is differentiable. One batched op over the
         leading time axis — no per-point loop.
+
+        Parameters
+        ----------
+        target : state_like
+            Target ket in the captured full Hilbert space.
         """
         backend = self._backend
         target = backend.coerce_state(target, dims=tuple(self.dims))
@@ -357,6 +429,11 @@ class SimulationResult:
         Density-matrix trajectories raise :class:`TypeError` — there is no
         single phase-sensitive amplitude for a mixed state; use
         :meth:`overlap` instead. One batched op, no per-point loop.
+
+        Parameters
+        ----------
+        target : state_like
+            Target ket in the captured full Hilbert space.
         """
         backend = self._backend
         if not self._is_ket_trajectory():
@@ -379,14 +456,30 @@ class SimulationResult:
         raise ValueError(f"Device '{label}' not found in device_info. Available: {available}")
 
     def state(self, t: float | None = None, *, dm: bool = False) -> Any:
-        """Return the state at time *t* (or final state if *t* is ``None``); optionally coerced to a DM."""
+        """Return a retained state, optionally promoted to a density matrix.
+
+        Parameters
+        ----------
+        t : float or None, optional
+            Saved time in ns; ``None`` selects the final state.
+        dm : bool, default=False
+            Promote a ket to a density matrix.
+        """
         s = self.final_state if t is None else self.state_at(t)
         if dm and self._backend.is_ket(s):
             return self._backend.state_to_dm(s)
         return s
 
     def state_at(self, t: Any, *, method: str = "exact") -> Any:
-        """Return a retained state at a scalar time; states are never interpolated."""
+        """Return a retained state at a scalar time; states are never interpolated.
+
+        Parameters
+        ----------
+        t : scalar
+            Query time in ns.
+        method : {"exact", "nearest"}, default="exact"
+            Time-selection rule.
+        """
         from quchip.results._time import require_valid, time_selection
         from quchip.utils.jax_utils import contains_tracer
 
@@ -405,7 +498,15 @@ class SimulationResult:
         return self._states[int(index)]
 
     def dm_at(self, t: float, *, method: str = "exact") -> Any:
-        """Return the density matrix at a retained time, promoting kets on demand."""
+        """Return a density matrix at a retained time, promoting kets on demand.
+
+        Parameters
+        ----------
+        t : float
+            Query time in ns.
+        method : {"exact", "nearest"}, default="exact"
+            Time-selection rule.
+        """
         state = self.state_at(t, method=method)
         return self._backend.state_to_dm(state) if self._backend.is_ket(state) else state
 
@@ -429,6 +530,19 @@ class SimulationResult:
         This stationary coherent-state readout model excludes quantum-device
         correlations and occupied boundary inputs. Use calibrated IQReadout
         distributions when those effects are included in a detector calibration.
+
+        Parameters
+        ----------
+        output : port object or str
+            External output reference plane.
+        means : array_like or mapping
+            Conditional Markov-boundary means in ``1/sqrt(ns)``.
+        frequency : scalar
+            Carrier frequency in GHz.
+        receiver : IQReceiver
+            Boxcar receiver and optional digital transfer.
+        noise_frequencies : array_like or None, optional
+            Two-sided offsets in GHz; ``None`` uses the standard grid.
         """
         if self._readout_wiring is None:
             raise RuntimeError("No captured output wiring is available for this result.")
@@ -443,12 +557,29 @@ class SimulationResult:
         captured energy basis of the stored integration frame: one matrix for
         one device, or a device mapping. No phase-frame conversion is applied.
         Samples at different times represent independently terminated experiments.
+
+        Parameters
+        ----------
+        *devices : device object or str
+            Measured devices; an empty selection measures all devices.
+        t : scalar, array_like, or None, optional
+            Saved time or times in ns; ``None`` selects the final state.
+        basis : {"energy", "solver"}, array_like, or mapping, default="energy"
+            Captured local measurement basis.
         """
         from quchip.results.terminal import measure_result
         return measure_result(self, devices, t=t, basis=basis)
 
     def reduced_state(self, t: float, device: str | BaseDevice) -> Any:
-        """Partial-trace the state at time *t* down to *device*'s subspace."""
+        """Partial-trace a saved state down to one device.
+
+        Parameters
+        ----------
+        t : float
+            Saved time in ns.
+        device : device object or str
+            Device to retain.
+        """
         dev_idx, _ = self._resolve_device_idx(device)
         return self._backend.ptrace(self.state_at(t), dev_idx, self.dims)
 
@@ -476,7 +607,15 @@ class SimulationResult:
         return {label: all_diags[:, i] for i, label in enumerate(basis_labels)}
 
     def population(self, device: str | BaseDevice, level: int = 0) -> Any:
-        """Return occupation of a captured isolated energy level in native arrays."""
+        """Return occupation of a captured isolated energy level in native arrays.
+
+        Parameters
+        ----------
+        device : device object or str
+            Captured device.
+        level : int, default=0
+            Zero-based isolated energy level.
+        """
         backend = self._backend
         xp = backend.array_module
         dev_idx, label = self._resolve_device_idx(device)
@@ -515,7 +654,19 @@ class SimulationResult:
         ax: Any = None,
         **kwargs: Any,
     ) -> Any:
-        """Plot per-basis-state populations over time (delegates to :func:`quchip.viz.plot_populations`)."""
+        """Plot per-basis-state populations over time.
+
+        Parameters
+        ----------
+        trace_out : device object, str, sequence, or None, optional
+            Devices to trace out.
+        computational : bool, default=False
+            Restrict labels to computational levels.
+        ax : matplotlib.axes.Axes or None, optional
+            Destination axes.
+        **kwargs
+            Forwarded to :func:`quchip.viz.plot_populations`.
+        """
         from quchip.viz.results import plot_populations
 
         return plot_populations(self, trace_out=trace_out, computational=computational, ax=ax, **kwargs)
@@ -530,7 +681,23 @@ class SimulationResult:
         ax: Any = None,
         **kwargs: Any,
     ) -> Any:
-        """Plot one stored state as populations or a density matrix (delegates to :func:`quchip.viz.plot_state`)."""
+        """Plot one stored state as populations or a density matrix.
+
+        Parameters
+        ----------
+        index : int
+            Saved-state index.
+        trace_out : device object, str, sequence, or None, optional
+            Devices to trace out.
+        computational : bool, default=False
+            Restrict labels to computational levels.
+        mode : {"population", "density_matrix"}, default="population"
+            Plot representation.
+        ax : matplotlib.axes.Axes or None, optional
+            Destination axes.
+        **kwargs
+            Forwarded to :func:`quchip.viz.plot_state`.
+        """
         from quchip.viz.results import plot_state
 
         return plot_state(
@@ -538,7 +705,17 @@ class SimulationResult:
         )
 
     def plot_expectation(self, *, keys: list[Any] | None = None, ax: Any = None, **kwargs: Any) -> Any:
-        """Plot expectation-value traces over time (delegates to :func:`quchip.viz.plot_expectation`)."""
+        """Plot expectation-value traces over time.
+
+        Parameters
+        ----------
+        keys : list or None, optional
+            Observable keys; ``None`` plots every captured trace.
+        ax : matplotlib.axes.Axes or None, optional
+            Destination axes.
+        **kwargs
+            Forwarded to :func:`quchip.viz.plot_expectation`.
+        """
         from quchip.viz.results import plot_expectation
 
         return plot_expectation(self, keys=keys, ax=ax, **kwargs)
@@ -551,7 +728,19 @@ class SimulationResult:
         ax: Any = None,
         **kwargs: Any,
     ) -> Any:
-        """Plot the Wigner function of one stored state (delegates to :func:`quchip.viz.plot_wigner`)."""
+        """Plot the Wigner function of one stored state.
+
+        Parameters
+        ----------
+        index : int, default=-1
+            Saved-state index.
+        trace_out : device object, str, sequence, or None, optional
+            Devices to trace out before plotting.
+        ax : matplotlib.axes.Axes or None, optional
+            Destination axes.
+        **kwargs
+            Forwarded to :func:`quchip.viz.plot_wigner`.
+        """
         from quchip.viz.results import plot_wigner
 
         return plot_wigner(self, index, trace_out=trace_out, ax=ax, **kwargs)
@@ -563,6 +752,11 @@ class SimulationResult:
         relevant cutoff and compare observables to establish convergence. Native
         arrays remain differentiable; warning thresholds are evaluated only for
         concrete results. Boundaries are declared by the captured component model.
+
+        Parameters
+        ----------
+        threshold : float, default=1e-3
+            Maximum accepted boundary population.
         """
         from quchip.engine.truncation import evaluate_boundaries
         from quchip.utils.jax_utils import contains_tracer
@@ -621,6 +815,15 @@ class SimulationBatchResult(BatchResult[SimulationResult]):
     backend's array module, and the grid-aware :meth:`expect` /
     :meth:`population` accept ``reduce='last'`` for a final-value slice, so
     a loss function that sums over the batch stays JAX-traceable end-to-end.
+
+    Attributes
+    ----------
+    results : tuple of SimulationResult
+        Per-point results in sweep order.
+    shape : tuple of int
+        Sweep-grid shape.
+    axes : tuple
+        Named sweep-axis metadata.
     """
 
     def measure(self, *devices: Any, t: Any = None, basis: Any = "energy") -> Any:
@@ -631,6 +834,15 @@ class SimulationBatchResult(BatchResult[SimulationResult]):
         captured energy basis of the stored integration frame: one matrix for
         one device, or a device mapping. No phase-frame conversion is applied.
         Samples at different times represent independently terminated experiments.
+
+        Parameters
+        ----------
+        *devices : device object or str
+            Measured devices; an empty selection measures all devices.
+        t : scalar, array_like, or None, optional
+            Saved time or times in ns; ``None`` selects final states.
+        basis : {"energy", "solver"}, array_like, or mapping, default="energy"
+            Captured local measurement basis.
         """
         from quchip.results.terminal import measure_result
         return measure_result(self, devices, t=t, basis=basis)
@@ -677,11 +889,27 @@ class SimulationBatchResult(BatchResult[SimulationResult]):
         raise ValueError("reduce must be one of None, 'last', 'max', or 'mean'.")
 
     def expect(self, key: Any, index: int | None = None, *, reduce: str | None = None) -> Any:
-        """Return expectation traces reshaped to the natural sweep grid."""
+        """Return expectation traces on the natural sweep grid.
+
+        Parameters
+        ----------
+        key : object or str
+            Captured observable key.
+        index : int or None, optional
+            Entry of a list-valued observable.
+        reduce : {None, "last", "max", "mean"}, optional
+            Reduction along the time axis.
+        """
         return self._trace_values([r.expect(key, index=index) for r in self._results], reduce)
 
     def output(self, exposure: Any) -> OutputFieldTrace:
-        """Return one complete field trace reshaped to the natural sweep grid."""
+        """Return one complete field trace on the natural sweep grid.
+
+        Parameters
+        ----------
+        exposure : port object or str
+            External output reference plane.
+        """
         traces = [result.output(exposure) for result in self._results]
         if not traces:
             raise RuntimeError("Empty batch has no output fields.")
@@ -699,7 +927,17 @@ class SimulationBatchResult(BatchResult[SimulationResult]):
         )
 
     def population(self, device: str | BaseDevice, level: int = 0, *, reduce: str | None = None) -> Any:
-        """Return population traces reshaped to the natural sweep grid."""
+        """Return population traces on the natural sweep grid.
+
+        Parameters
+        ----------
+        device : device object or str
+            Captured device.
+        level : int, default=0
+            Zero-based isolated energy level.
+        reduce : {None, "last", "max", "mean"}, optional
+            Reduction along the time axis.
+        """
         return self._trace_values([r.population(device, level) for r in self._results], reduce)
 
     def jump_rate(self, key: Any, *, reduce: str | None = None) -> Any:
@@ -707,11 +945,26 @@ class SimulationBatchResult(BatchResult[SimulationResult]):
 
         ``reduce`` accepts ``None``, ``"last"``, ``"max"``, or ``"mean"``
         and acts on the time axis.
+
+        Parameters
+        ----------
+        key : channel object or str
+            Resolved channel key.
+        reduce : {None, "last", "max", "mean"}, optional
+            Reduction along the time axis.
         """
         return self._trace_values([r.jump_rate(key) for r in self._results], reduce)
 
     def collapse_flux(self, key: Any, *, reduce: str | None = None) -> Any:
-        """Deprecated alias for :meth:`jump_rate`."""
+        """Deprecated alias for :meth:`jump_rate`.
+
+        Parameters
+        ----------
+        key : channel object or str
+            Resolved channel key.
+        reduce : {None, "last", "max", "mean"}, optional
+            Reduction along the time axis.
+        """
         from quchip.utils.deprecation import warn_renamed
 
         warn_renamed("collapse_flux()", "jump_rate()")
@@ -723,6 +976,13 @@ class SimulationBatchResult(BatchResult[SimulationResult]):
         ``reduce`` accepts ``None``, ``"last"``, ``"max"``, or ``"mean"``
         and acts on the time axis. ``reduce="last"`` returns the expected
         number of jumps in each solve.
+
+        Parameters
+        ----------
+        key : channel object or str
+            Resolved channel key.
+        reduce : {None, "last", "max", "mean"}, optional
+            Reduction along the time axis.
         """
         return self._trace_values([r.collapse_integral(key) for r in self._results], reduce)
 
@@ -745,11 +1005,23 @@ class SimulationBatchResult(BatchResult[SimulationResult]):
         return self._stack(values)
 
     def final_overlap_magnitudes(self, targets: list[Any] | tuple[Any, ...]) -> Any:
-        """Return final target-state populations for each result, without requiring histories."""
+        """Return final target-state populations without requiring histories.
+
+        Parameters
+        ----------
+        targets : sequence of state_like
+            One target ket per batch result.
+        """
         return self._final_projections(targets, amplitude=False)
 
     def final_amplitudes(self, targets: list[Any] | tuple[Any, ...]) -> Any:
-        """Return final complex ket amplitudes for each result, without requiring histories."""
+        """Return final complex ket amplitudes without requiring histories.
+
+        Parameters
+        ----------
+        targets : sequence of state_like
+            One target ket per batch result.
+        """
         return self._final_projections(targets, amplitude=True)
 
 # ---------------------------------------------------------------------------
@@ -802,6 +1074,15 @@ def wrap_solver_result(solver_result: SolverResult, problem: SolveProblem, backe
     metadata needed to rebuild dict-form observables
     (:func:`~quchip.engine.observables.build_observable_traces`)
     and to label devices for partial-trace helpers.
+
+    Parameters
+    ----------
+    solver_result : SolverResult
+        Raw backend solve output.
+    problem : SolveProblem
+        Frozen request carrying result metadata.
+    backend : Backend
+        Backend that owns the native states and arrays.
     """
     from quchip.engine.truncation import boundary_traces
 

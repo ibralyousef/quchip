@@ -139,7 +139,13 @@ class Bath:
         super().__setattr__(name, value)
 
     def resolve_targets(self, chip: "Chip") -> list[str]:
-        """Return the ordered target device labels (defaults to all devices)."""
+        """Return ordered target labels, defaulting to all devices.
+
+        Parameters
+        ----------
+        chip : Chip
+            Chip supplying labels when targets were omitted.
+        """
         if self._targets is None or self._retained is not None:
             return [d.label for d in chip.devices]
         return [resolve_label(t) for t in self._targets]
@@ -183,7 +189,13 @@ class Bath:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Bath":
-        """Reconstruct a bath from serialized state (targets as label strings)."""
+        """Reconstruct a bath from serialized state.
+
+        Parameters
+        ----------
+        d : dict[str, Any]
+            Payload produced by :meth:`to_dict`; targets are label strings.
+        """
         bath = cls(
             d["recipe"],
             targets=d.get("targets"),
@@ -259,7 +271,15 @@ class Bath:
         }
 
     def set_parameter_value(self, name: str, value: Any) -> None:
-        """Apply one bath value on an isolated bath copy."""
+        """Apply one bath value on an isolated bath copy.
+
+        Parameters
+        ----------
+        name : {"temperature", "rate"}
+            Local parameter name.
+        value : Any
+            Temperature in mK or rate in 1/ns.
+        """
         if name not in self._parameter_names:
             raise KeyError(name)
         setattr(self, name, value)
@@ -349,6 +369,13 @@ class Bath:
 
         Contributions remain backend-neutral; the engine projects and lowers
         them with the same basis records used for Hamiltonian terms.
+
+        Parameters
+        ----------
+        chip : Chip
+            Chip whose targets and tensor-product order define the operators.
+        bases : mapping or None, default=None
+            Captured basis records keyed by device label. ``None`` resolves them.
         """
         fields = {name: Parameter() for name in self._parameter_names}
         p = ParameterNamespace(f"bath.{self.label}", fields)
@@ -419,7 +446,15 @@ class Bath:
         chip: "Chip",
         bases: Mapping[str, Any] | None = None,
     ) -> tuple[CollapseChannel, ...]:
-        """Return normalized full-chip bath channels."""
+        """Return normalized full-chip bath channels.
+
+        Parameters
+        ----------
+        chip : Chip
+            Chip whose targets define the channels.
+        bases : mapping or None, default=None
+            Captured basis records, or ``None`` to resolve them.
+        """
         return tuple(
             channel
             for channel, _paths in self._collapse_channels_with_paths(chip, bases)

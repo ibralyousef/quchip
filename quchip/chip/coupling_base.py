@@ -91,7 +91,13 @@ class BaseCoupling(StateVersioned, Registrable, ABC, registry_root=True):
         self.label = label if label is not None else auto_label(type(self)._type_prefix)
 
     def copy(self, device_map: dict[str, BaseDevice]) -> "BaseCoupling":
-        """Copy authored values and rebind endpoints to *device_map*."""
+        """Copy authored values and rebind endpoints.
+
+        Parameters
+        ----------
+        device_map : dict[str, BaseDevice]
+            Destination devices keyed by label.
+        """
         from quchip.declarative.parameters import copy_authored_fields
 
         cloned = copy.copy(self)
@@ -108,7 +114,15 @@ class BaseCoupling(StateVersioned, Registrable, ABC, registry_root=True):
         return {self.coupling_strength_name: self.coupling_strength}
 
     def set_parameter_value(self, name: str, value: Any) -> None:
-        """Apply one local parameter value on an isolated coupling copy."""
+        """Apply one local parameter value on an isolated coupling copy.
+
+        Parameters
+        ----------
+        name : str
+            Local parameter name.
+        value : Any
+            Replacement value in the parameter's declared units.
+        """
         fields = getattr(type(self), "__quchip_param_fields__", None)
         if fields is not None and name in fields:
             setattr(self, name, value)
@@ -181,6 +195,11 @@ class BaseCoupling(StateVersioned, Registrable, ABC, registry_root=True):
 
         Examples include ``g``, ``g_0``, and ``chi``. Override when the writable
         attribute differs from that name.
+
+        Parameters
+        ----------
+        value : Any
+            Coupling strength in GHz.
         """
         setattr(self, self.coupling_strength_name, value)
 

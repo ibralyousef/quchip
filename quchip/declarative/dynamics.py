@@ -80,7 +80,13 @@ class TimeCoefficient(Registrable, ABC, registry_root=True, metaclass=Declarativ
 
     @abstractmethod
     def value(self, t: Any) -> Any:
-        """Evaluate the coefficient at time *t* in ns."""
+        """Evaluate the coefficient at time *t* in ns.
+
+        Parameters
+        ----------
+        t : scalar or array-like
+            Time in ns.
+        """
 
     def _signal_program(self) -> Any:
         """Lower this coefficient to the engine's private signal program."""
@@ -105,7 +111,17 @@ class TimeCoefficient(Registrable, ABC, registry_root=True, metaclass=Declarativ
 
 
 class CosineCoefficient(TimeCoefficient):
-    """Cosine coefficient with amplitude in GHz and frequency in GHz."""
+    r"""Cosine coefficient :math:`A\cos(2\pi f t+\phi)`.
+
+    Parameters
+    ----------
+    amplitude : float
+        Coefficient amplitude in GHz; may be signed.
+    frequency : float
+        Ordinary modulation frequency in GHz; positive.
+    phase : float, default 0.0
+        Phase offset in radians.
+    """
 
     amplitude: Scalar = parameter(default=UNBOUND, unit="GHz")
     frequency: Scalar = parameter(default=UNBOUND, positive=True, unit="GHz")
@@ -145,7 +161,15 @@ def bind_time_coefficient(
 
 @dataclass(frozen=True)
 class TimeDependentTerm:
-    """An authored local operator and its time coefficient."""
+    """An authored local operator and its time coefficient.
+
+    Parameters
+    ----------
+    operator : PhysicsExpr or backend operator
+        Hamiltonian operator multiplied by the coefficient.
+    coefficient : TimeCoefficient
+        Scalar coefficient evaluated as a function of time in ns.
+    """
 
     operator: Any
     coefficient: TimeCoefficient

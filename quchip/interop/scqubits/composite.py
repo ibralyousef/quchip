@@ -454,6 +454,12 @@ def export_chip(chip: Chip, **opts: Any) -> Any:
         A device has no registered scqubits export mapping.
     TypeError
         An unexpected keyword option is passed (composite export takes none).
+
+    Other Parameters
+    ----------------
+    **opts
+        No keyword options are accepted for composite export. Any supplied
+        key raises ``TypeError``.
     """
     import scqubits
 

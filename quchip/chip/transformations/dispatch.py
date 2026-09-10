@@ -72,7 +72,13 @@ _ELIMINATION_TARGETS: list[EliminationTarget] = []
 
 
 def register_elimination_target(target: EliminationTarget) -> None:
-    """Register an :class:`EliminationTarget` kind for :func:`eliminate` to dispatch on."""
+    """Register an elimination target kind.
+
+    Parameters
+    ----------
+    target : EliminationTarget
+        Target handler added to the dispatch registry.
+    """
     _ELIMINATION_TARGETS.append(target)
 
 

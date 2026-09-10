@@ -160,7 +160,13 @@ class ActivePatchResult:
                             DeferredValue(lambda: reduce(jnp.matmul, (m.embedding for m in maps))))
 
     def simulate(self, **kwargs: Any) -> Any:
-        """Solve the patch sequence (automatic partitioning still applies inside)."""
+        """Solve the patch sequence.
+
+        Parameters
+        ----------
+        **kwargs : Any
+            Arguments forwarded to :meth:`QuantumSequence.simulate`.
+        """
         return self.sequence.simulate(**kwargs)
 
 

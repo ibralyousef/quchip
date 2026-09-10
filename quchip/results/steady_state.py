@@ -15,7 +15,23 @@ from quchip.utils.labeling import resolve_label
 
 @dataclass(frozen=True)
 class SteadyStateResult:
-    """One normalized stationary density matrix and its diagnostics."""
+    """One normalized stationary density matrix and its diagnostics.
+
+    Attributes
+    ----------
+    state : backend state
+        Stationary density matrix in solver basis.
+    residual : scalar
+        Residual norm of the stationary equation.
+    nullity : scalar
+        Null-space dimension of the trace-constrained generator.
+    dims : tuple of int
+        Hilbert-space dimensions in chip order.
+    device_info : tuple
+        ``(label, computational)`` records used by accessors.
+    stats : mapping
+        Backend solver statistics.
+    """
 
     state: Any
     residual: Any
@@ -70,7 +86,15 @@ class SteadyStateResult:
         return self.nullity == 1
 
     def expect(self, key: Any, index: int | None = None) -> Any:
-        """Return one named stationary expectation value."""
+        """Return one named stationary expectation value.
+
+        Parameters
+        ----------
+        key : object or str
+            Captured observable key.
+        index : int or None, optional
+            Entry of a list-valued observable.
+        """
         resolved = tuple(resolve_label(item) for item in key) if isinstance(key, tuple) else resolve_label(key)
         value = self._expectations[resolved]
         if isinstance(value, tuple):
@@ -84,7 +108,13 @@ class SteadyStateResult:
         return value
 
     def reduced_state(self, device: str | BaseDevice) -> Any:
-        """Partial-trace the stationary state down to one device."""
+        """Partial-trace the stationary state down to one device.
+
+        Parameters
+        ----------
+        device : device object or str
+            Device to retain.
+        """
         label = resolve_label(device)
         for index, (candidate, _) in enumerate(self.device_info):
             if candidate == label:
@@ -132,8 +162,26 @@ def build_steady_state_result(
 
 
 class SteadyStateBatchResult(BatchResult[SteadyStateResult]):
-    """Immutable stationary results reshaped to their declared sweep grid."""
+    """Immutable stationary results reshaped to their declared sweep grid.
+
+    Attributes
+    ----------
+    results : tuple of SteadyStateResult
+        Per-point stationary results.
+    shape : tuple of int
+        Sweep-grid shape.
+    axes : tuple
+        Named sweep-axis metadata.
+    """
 
     def expect(self, key: Any, index: int | None = None) -> Any:
-        """Return one expectation value reshaped to the sweep grid."""
+        """Return one expectation value on the sweep grid.
+
+        Parameters
+        ----------
+        key : object or str
+            Captured observable key.
+        index : int or None, optional
+            Entry of a list-valued observable.
+        """
         return self._reshape([result.expect(key, index=index) for result in self._results])

@@ -21,7 +21,17 @@ def collapse_parameter_paths(operator: Any, rate: Any) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class CollapseChannel:
-    """One unscaled Lindblad operator and its rate in inverse nanoseconds."""
+    """One unscaled Lindblad operator and its rate in inverse nanoseconds.
+
+    Parameters
+    ----------
+    operator : expression or backend operator
+        Unscaled collapse operator :math:`L`; the engine applies the rate.
+    rate : float or expression
+        Non-negative Lindblad rate in 1/ns.
+    name : str
+        Non-empty stable channel name.
+    """
 
     operator: Any
     rate: Any

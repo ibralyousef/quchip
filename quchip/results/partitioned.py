@@ -20,7 +20,17 @@ _JOINT_WARNING = (
 
 
 class PartitionedSimulationResult:
-    """Result of one partitioned solve: K component results + a key plan."""
+    """Result of one partitioned solve: K component results plus a key plan.
+
+    Attributes
+    ----------
+    component_results : sequence of SimulationResult
+        Per-component results in ``partition.components`` order.
+    partition : object
+        Component and device ownership metadata.
+    key_plan : mapping
+        Mapping from requested observable keys to component traces.
+    """
 
     def __init__(self, component_results: list, partition: Any, key_plan: dict) -> None:
         """Wrap the per-component solves produced by one partitioned run.
@@ -79,6 +89,15 @@ class PartitionedSimulationResult:
         return self._results[entry.component].expect(entry.key, effective)
 
     def expect(self, key: Any, index: int | None = None) -> Any:
+        """Return one captured expectation trace.
+
+        Parameters
+        ----------
+        key : object or str
+            Captured observable key.
+        index : int or None, optional
+            Entry of a list-valued observable.
+        """
         entry = self._key_plan.get(self._normalize_key(key))
         if entry is None:
             raise KeyError(f"No observable {key!r} in this partitioned result. Known: {list(self._key_plan)}")
@@ -94,10 +113,29 @@ class PartitionedSimulationResult:
         return self._local_values(entry, index)
 
     def observable_at(self, t: Any, values: Any, *, method: str = "exact") -> Any:
-        """Select or linearly interpolate observable values on the shared grid."""
+        """Select or linearly interpolate observable values on the shared grid.
+
+        Parameters
+        ----------
+        t : scalar or array_like
+            Query times in ns.
+        values : array_like
+            Saved values with time on the final axis.
+        method : {"exact", "nearest", "interpolate"}, default="exact"
+            Time-selection rule.
+        """
         return self._results[0].observable_at(t, values, method=method)
 
     def expect_final(self, key: Any, index: int | None = None) -> Any:
+        """Return the final expectation value for an observable.
+
+        Parameters
+        ----------
+        key : object or str
+            Captured observable key.
+        index : int or None, optional
+            Entry of a list-valued observable.
+        """
         return self.expect(key, index)[-1]
 
     expect_values = expect
@@ -106,7 +144,15 @@ class PartitionedSimulationResult:
         return self._results[self._partition.owner_of(device)]
 
     def iq_readout(self, output: Any, **kwargs: Any) -> Any:
-        """Build a detector from the unique component owning an exposed output."""
+        """Build a detector from the component owning an exposed output.
+
+        Parameters
+        ----------
+        output : port object or str
+            External output reference plane.
+        **kwargs
+            Forwarded to :meth:`SimulationResult.iq_readout`.
+        """
         label = resolve_label(output)
         owners = [result for result in self._results if result._readout_wiring is not None
                   and label in result._readout_wiring.exposed]
@@ -122,11 +168,29 @@ class PartitionedSimulationResult:
         captured energy basis of the stored integration frame: one matrix for
         one device, or a device mapping. No phase-frame conversion is applied.
         Samples at different times represent independently terminated experiments.
+
+        Parameters
+        ----------
+        *devices : device object or str
+            Measured devices; an empty selection measures all devices.
+        t : scalar, array_like, or None, optional
+            Saved time or times in ns; ``None`` selects the final state.
+        basis : {"energy", "solver"}, array_like, or mapping, default="energy"
+            Captured local measurement basis.
         """
         from quchip.results.terminal import measure_result
         return measure_result(self, devices, t=t, basis=basis)
 
     def population(self, device: Any, level: int = 0) -> Any:
+        """Return occupation of a captured isolated energy level.
+
+        Parameters
+        ----------
+        device : device object or str
+            Captured device.
+        level : int, default=0
+            Zero-based isolated energy level.
+        """
         return self._owner_result(device).population(device, level)
 
     def check_truncation(self, threshold: float = 1e-3) -> dict[str, float]:
@@ -135,6 +199,11 @@ class PartitionedSimulationResult:
         Mirrors :meth:`~quchip.results.results.SimulationResult.check_truncation`'s
         return shape (a ``dict`` keyed by device label) for duck-typing parity
         between a joint and a partitioned result.
+
+        Parameters
+        ----------
+        threshold : float, default=1e-3
+            Maximum accepted boundary population.
         """
         merged: dict[str, float] = {}
         for result in self._results:
@@ -230,7 +299,15 @@ class PartitionedSimulationResult:
         return self._joint_state([r.final_state for r in self._results])
 
     def state_at(self, t: Any, *, method: str = "exact") -> Any:
-        """Reconstruct a joint state at a saved time, with optional nearest selection."""
+        """Reconstruct a joint state at a saved time.
+
+        Parameters
+        ----------
+        t : scalar
+            Query time in ns.
+        method : {"exact", "nearest"}, default="exact"
+            Time-selection rule.
+        """
         return self._joint_state([r.state_at(t, method=method) for r in self._results])
 
     def _joint_state(self, states: list) -> Any:

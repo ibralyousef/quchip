@@ -12,16 +12,29 @@ from quchip.utils.jax_utils import contains_tracer, is_jax_array, select_array_m
 
 @dataclass(frozen=True)
 class IQReceiver:
-    """Configure ideal heterodyne detection after the physical calculation.
+    """Configure ideal heterodyne detection after a physical measurement.
 
+    Parameters
+    ----------
     integration_time : scalar
-        Boxcar integration duration in ns; white noise scales as 1/T.
-    transfer : callable, optional
-        Additional digital amplitude transfer at offset frequencies in GHz.
-        It must be covered by the measurement's stored spectral grid. DC gain
-        also transforms the mean. No filter is applied to the physical chip.
-    tolerance : float
-        Relative tolerance for quadrature-grid convergence checks.
+        Positive boxcar duration in ns. White detector and field noise scale
+        as ``1 / integration_time``.
+    transfer : callable or None, optional
+        Digital complex amplitude transfer function. It receives offset
+        frequencies in GHz, must be supported on the captured spectral grid,
+        and its value at zero also scales the mean field. It does not alter the
+        simulated chip or its physical noise sources.
+    tolerance : float, default=0.02
+        Relative convergence and spectral-support tolerance. Must satisfy
+        ``0 < tolerance < 1``.
+
+    Notes
+    -----
+    The receiver integrates the captured two-sided normally ordered spectrum
+    with the sinc-squared boxcar response and adds detector vacuum with
+    covariance ``1 / (2 * integration_time)`` per IQ quadrature. See Caves,
+    *Phys. Rev. D* 26, 1817 (1982), doi:10.1103/PhysRevD.26.1817, for the
+    phase-preserving amplifier noise convention.
     """
 
     integration_time: Any
@@ -40,7 +53,24 @@ class IQReceiver:
 
 
 def validate_samples(count: int, seed: Any, key: Any, values: Any) -> Any:
-    """Validate shot configuration and choose its native array namespace."""
+    """Validate Gaussian-shot arguments and choose NumPy or JAX arithmetic.
+
+    Parameters
+    ----------
+    count : int
+        Number of draws; must be positive.
+    seed : int or None
+        NumPy generator seed. Do not pass together with ``key``.
+    key : jax.Array or None
+        Explicit JAX PRNG key required when sampling traced values.
+    values : object
+        Mean and covariance values used to infer the array namespace.
+
+    Returns
+    -------
+    module
+        NumPy-like namespace selected for the draw.
+    """
     if not isinstance(count, int) or isinstance(count, bool) or count < 1:
         raise ValueError("Sample count must be a positive integer.")
     if seed is not None and key is not None:
@@ -55,7 +85,24 @@ def validate_samples(count: int, seed: Any, key: Any, values: Any) -> Any:
 
 
 def gaussian_samples(mean: Any, covariance: Any, count: int, *, seed: Any = None, key: Any = None) -> Any:
-    """Draw real Gaussian vectors with a leading shot axis and full covariance."""
+    """Draw correlated real Gaussian vectors.
+
+    Parameters
+    ----------
+    mean : array_like
+        Mean with shape ``(..., n)``.
+    covariance : array_like
+        Positive-definite covariance with shape ``(..., n, n)``.
+    count : int
+        Number of draws.
+    seed, key : optional
+        Use ``seed`` for NumPy or ``key`` for JAX; passing both is invalid.
+
+    Returns
+    -------
+    array
+        Samples with shape ``(count, ..., n)`` in the input array namespace.
+    """
     xp = validate_samples(count, seed, key, (mean, covariance))
     mean, covariance = xp.asarray(mean), xp.asarray(covariance)
     shape = (count, *mean.shape)
@@ -69,7 +116,19 @@ def gaussian_samples(mean: Any, covariance: Any, count: int, *, seed: Any = None
 
 
 def noise_grid(frequencies: Any = None) -> np.ndarray:
-    """Validate a two-sided offset grid in GHz, or supply the standard grid."""
+    """Validate or construct the two-sided spectral offset grid in GHz.
+
+    Parameters
+    ----------
+    frequencies : 1-D array_like or None, optional
+        Strictly increasing, finite, symmetric offsets containing zero. With
+        ``None``, return the default grid spanning ``-0.1`` to ``+0.1`` GHz.
+
+    Returns
+    -------
+    numpy.ndarray
+        Validated offsets in GHz.
+    """
     if frequencies is None:
         positive = np.geomspace(1e-9, 0.1, 161)
         return np.concatenate((-positive[::-1], [0.0], positive))

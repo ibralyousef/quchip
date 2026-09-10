@@ -137,6 +137,7 @@ def analyze_static_zz(chip: "Chip", device_a: str | BaseDevice, device_b: str | 
     Parameters
     ----------
     chip : Chip
+        Chip whose dressed spectrum and couplings define the static model.
     device_a, device_b : str or BaseDevice
         The two devices whose static ZZ is analyzed.
 
@@ -297,6 +298,7 @@ def effective_hamiltonian(
     Parameters
     ----------
     chip : Chip
+        Chip whose dressed spectrum defines the effective subspace.
     subspace : mapping or sequence
         ``{device: levels}`` keeps ``range(levels)`` of each named device
         (spectators grounded); a bare sequence of devices keeps each one's
@@ -343,6 +345,7 @@ def effective_hamiltonian_between_states(
     Parameters
     ----------
     chip : Chip
+        Chip whose dressed spectrum defines the effective Hamiltonian.
     state_a, state_b : tuple[int, ...]
         Full chip-length bare-occupation tuples (one entry per device, in
         :attr:`~quchip.chip.chip.Chip.devices` order).

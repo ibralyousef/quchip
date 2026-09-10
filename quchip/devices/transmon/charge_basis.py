@@ -17,7 +17,51 @@ from quchip.utils.jax_utils import maybe_concrete_scalar
 
 
 class ChargeBasisTransmon(DeviceModel):
-    """Transmon with its Hamiltonian authored in the integer-charge basis."""
+    r"""Transmon with its Hamiltonian authored in the integer-charge basis.
+
+    The native Hamiltonian is :math:`4E_C(n-n_g)^2-E_J\cos\varphi` in
+    ordinary GHz.
+
+    Parameters
+    ----------
+    E_C, E_J : float
+        Positive charging and Josephson energies in GHz.
+    n_g : float, default 0.0
+        Offset charge in Cooper-pair units.
+    levels : int or None, default None
+        Number of projected eigenstates. Required when ``basis="eigen"``;
+        ``None`` uses the native dimension for the native basis.
+    label : str or None, default None
+        Device label.
+    num_basis : int, keyword-only, default 61
+        Odd integer-charge basis size, at least 3.
+    basis : {None, "native", "eigen"}, keyword-only
+        Requested solver basis. ``None`` inherits the chip policy and uses
+        native basis for standalone resolution; ``native`` keeps the charge
+        basis, while ``eigen`` projects onto ``levels`` energy states.
+    collapse_model : {"fermi_golden", "ladder"}, default "fermi_golden"
+        Relaxation construction; Fermi-golden-rule relaxation needs
+        ``coupling_channel="charge"`` when ``T1`` is set.
+    coupling_channel : {None, "charge"}, default None
+        Physical operator for matrix-element relaxation. Only ``"charge"``
+        is supported and selects the authored charge operator :math:`n`.
+    collapse_rate_threshold : float, default 1e-8
+        Non-negative dimensionless cutoff on squared matrix-element ratios
+        relative to the selected ``0 -> 1`` transition.
+    T1, T2 : float or None
+        Relaxation and dephasing times in ns; ``None`` disables each channel.
+    thermal_occupation : float or None
+        Mean thermal occupation (dimensionless); ``None`` disables thermal
+        absorption.
+    noise : keyword arguments
+        The concrete constructor accepts inherited noise fields as keyword
+        arguments.
+
+    References
+    ----------
+    See Koch et al., *Phys. Rev. A* 76, 042319 (2007),
+    https://doi.org/10.1103/PhysRevA.76.042319.
+    """
 
     _type_prefix = "charge_basis_transmon"
     tunable_param_names = ("E_C", "E_J", "n_g")
@@ -99,7 +143,15 @@ class ChargeBasisTransmon(DeviceModel):
         return ChargeSpace(self.num_basis)
 
     def local_hamiltonian(self, op: LocalOps, p: Any) -> PhysicsExpr:
-        """Return 4 E_C (n - n_g)^2 - E_J cos(phi)."""
+        """Return the charge-basis transmon Hamiltonian.
+
+        Parameters
+        ----------
+        op : LocalOps
+            Charge-space operator namespace.
+        p : ParameterNamespace
+            Symbolic ``E_C``, ``E_J`` and ``n_g`` values.
+        """
         shifted_charge = op.n - p.n_g * op.I
         return 4.0 * p.E_C * (shifted_charge @ shifted_charge) - p.E_J * op.cos_phi
 
@@ -136,7 +188,15 @@ class ChargeBasisTransmon(DeviceModel):
         return self.local_space().matrix("sin_phi")
 
     def tunable_param_bounds(self, name: str, value: float) -> tuple[float, float]:
-        """Return the physical charge period for n_g."""
+        """Return physical bounds for a tunable parameter.
+
+        Parameters
+        ----------
+        name : str
+            Tunable parameter name.
+        value : float
+            Concrete optimizer seed.
+        """
         if name == "n_g":
             return (-0.5, 0.5)
         return super().tunable_param_bounds(name, value)
@@ -180,7 +240,25 @@ class ChargeBasisTransmon(DeviceModel):
         basis: Literal["native", "eigen"] | None = None,
         **kwargs: Any,
     ) -> "ChargeBasisTransmon":
-        """Construct from the leading transmon-regime inversion."""
+        """Construct from the leading transmon-regime inversion.
+
+        Parameters
+        ----------
+        freq, anharmonicity : float
+            Calibrated transition and anharmonicity in GHz.
+        n_g : float, default 0.0
+            Offset charge in Cooper-pair units.
+        levels : int or None, default None
+            Projected eigenstate count.
+        label : str or None, default None
+            Device label.
+        num_basis : int, keyword-only, default 61
+            Odd charge-basis dimension.
+        basis : {None, "native", "eigen"}, keyword-only
+            Basis policy.
+        **kwargs : Any
+            Noise and other constructor keyword arguments.
+        """
         E_C = -anharmonicity
         E_J = (freq + E_C) ** 2 / (8.0 * E_C)
         ratio = maybe_concrete_scalar(E_J / E_C)
@@ -213,6 +291,13 @@ class ChargeBasisTransmon(DeviceModel):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ChargeBasisTransmon":
+        """Reconstruct from serialized constructor data.
+
+        Parameters
+        ----------
+        data : mapping
+            Record produced by :meth:`to_dict`.
+        """
         return cls(
             E_C=data["E_C"],
             E_J=data["E_J"],
