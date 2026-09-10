@@ -771,21 +771,14 @@ and active physics and the declared truncation. These queries use captured
 arrays; receiver processing does not change internal occupation.
 
 An attenuator, isolator load, or `network.termination()` can declare
-`occupation=n` or `temperature=T, noise_frequency=f`. Temperature is mK and
-`f` is a positive physical frequency in GHz. The Markov occupation is evaluated
-at this declared frequency and held constant over the simulated band. It is
-never evaluated at a rotating-frame offset. Vacuum remains the default.
-
-Attenuators also accept positive `loss_db` instead of `eta`.
-Amplifiers accept `gain_db` instead of linear power gain and either equivalent
-input `noise_temperature` in mK or `noise_figure_db` referenced to 290 K,
-with a positive `noise_frequency` in GHz. The conversion is
-`n_add = k_B T_e/(h f)` and `T_e = 290 K (10^(NF/10)-1)`. This is an
-equivalent symmetrized noise temperature, not a physical Planck occupation.
-The phase-preserving quantum floor still applies. Authored dB/temperature
-parameters remain the rebinding and serialization paths; conversion has one
-owner at resolution. As with direct added quanta, these values are flat at
-their declared noise reference over the modeled band.
+`thermal_occupation=n`: a finite, non-negative mean thermal population in
+quanta. Vacuum remains the default. Amplifiers require input-referred
+symmetrized `added_noise` in quanta, subject to the phase-preserving quantum
+floor. Both noise values are constant across the modeled band, including
+frequency sweeps; no temperature or reference frequency is inferred.
+Attenuators accept positive `loss_db` instead of `eta`; amplifiers accept
+`gain_db` instead of linear power gain. Authored parameters remain the
+rebinding and serialization paths.
 
 For a full unitary scattering matrix S, input j couples through
 `K_j = (S† L)_j`. In addition to vacuum `sum_i D[L_i]`, its thermal population
@@ -811,7 +804,7 @@ detuned-fluorescence spectrum in 0.3.0.
 Physical source budgets separate directly propagated fields from
 `device.correlations`. The latter includes nonlinear response and interference,
 so it need not be positive or independently sampleable. A matched absorptive
-filter declares `loss_occupation` or `loss_temperature` and emits
+filter declares `thermal_occupation` and emits
 `(1-|H(f)|²)n` in each direction. A scalar H(f) without that declaration does
 not imply an absorptive thermal model. Colored emission may propagate to
 external outputs, but colored noise that feeds a quantum coupling is rejected:
