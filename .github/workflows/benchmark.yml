@@ -1,14 +1,10 @@
 name: benchmark
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, edited]
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       base_ref:
-        description: Comparison commit or ref (defaults to the preceding commit)
+        description: Comparison commit or ref (relative to the selected branch)
         type: string
         default: HEAD^
 
@@ -16,8 +12,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: benchmark-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   closed-system:
@@ -25,9 +21,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      BENCHMARK_RUNGS: ${{ github.event_name == 'push' && '1,2,3,4,5,6,7' || '1,3,5,7' }}
-      BUILD_REPEAT: ${{ github.event_name == 'push' && '5' || '3' }}
-      SOLVE_REPEAT: ${{ github.event_name == 'push' && '7' || '5' }}
+      BENCHMARK_RUNGS: "1,2,3,4,5,6,7"
+      BUILD_REPEAT: "5"
+      SOLVE_REPEAT: "7"
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
@@ -38,7 +34,7 @@ jobs:
       - name: Check out exact head
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Set up uv
@@ -57,7 +53,7 @@ jobs:
       - name: Resolve comparison commit
         id: comparison
         env:
-          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base_ref }}
+          BASE_REF: ${{ inputs.base_ref }}
         run: |
           base_sha=$(git rev-parse --verify "${BASE_REF}^{commit}")
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"

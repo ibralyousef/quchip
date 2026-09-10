@@ -1,8 +1,7 @@
 name: pre-merge
 
-# This required check is skipped for explicitly classified documentation,
-# Markdown metadata, and release-workflow-only pull requests. Other changes
-# fail cheaply until a maintainer adds ready-to-merge to the current PR commit.
+# Completes the suite after the required fast lanes. Documentation-only PRs
+# skip it; other changes require ready-to-merge on the current PR commit.
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
@@ -47,4 +46,9 @@ jobs:
             ci-constraints-*.txt
       - run: uv venv --python 3.11
       - run: uv pip install -e '.[test,dynamiqs]' -c ci-constraints-3.11.txt
-      - run: uv run --no-sync pytest
+      # The separately required fast lanes already cover core + physics_sentinel.
+      # Use the complement so new markers cannot silently fall out of CI.
+      - if: github.event_name == 'pull_request'
+        run: uv run --no-sync pytest -m "not (core or physics_sentinel)"
+      - if: github.event_name == 'workflow_dispatch'
+        run: uv run --no-sync pytest
