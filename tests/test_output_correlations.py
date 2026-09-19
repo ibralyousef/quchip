@@ -39,7 +39,8 @@ def test_cross_port_correlations_retain_both_field_labels() -> None:
         ),
         ports=[input_port, output_port],
     )
-    vna.pump(input_port, freq=6.0, amplitude=0.02)
+    frequency, amplitude = 6.003, 0.01 + 0.01j
+    vna.pump(input_port, freq=frequency, amplitude=amplitude)
     delays = np.array([0.0, 2.0, 7.0])
 
     g1 = vna.g1(output_port, delays, input=input_port)
@@ -47,7 +48,10 @@ def test_cross_port_correlations_retain_both_field_labels() -> None:
 
     assert g1.input_port == g2.input_port == "in"
     assert g1.output_port == g2.output_port == "out"
-    np.testing.assert_allclose(np.abs(g1.values), np.ones(3), atol=2e-6)
+    means = VNA(vna.chip).finite_power(frequency, amplitude, input=input_port)
+    cross = np.conj(means.mean(output_port))*means.mean(input_port)
+    np.testing.assert_allclose(g1.unnormalized, cross, atol=1e-10)
+    np.testing.assert_allclose(g1.values, cross/abs(cross), atol=2e-6)
     np.testing.assert_allclose(g2.values, np.ones(3), atol=2e-5)
 
 
@@ -65,7 +69,7 @@ def test_vacuum_output_has_zero_fluctuation_spectrum() -> None:
     np.testing.assert_allclose(result.total_fluctuation_spectrum, 0.0, atol=1e-10)
     np.testing.assert_allclose(result.signal_coherent_flux, 0.0, atol=1e-12)
     np.testing.assert_allclose(result.signal_photon_flux, 0.0, atol=1e-12)
-    assert result.fourier_convention == "2 Re integral_0^inf d tau exp(+i 2 pi f tau) C(tau)"
+    assert result.fourier_convention == "2 Re integral_0^inf d tau exp(-j 2 pi f tau) C(tau); engineering j = -i"
 
 
 def test_thermal_output_has_g2_zero_near_two() -> None:
@@ -142,3 +146,5 @@ def test_detuned_thermal_spectrum_uses_the_physical_upper_sideband() -> None:
     result = vna.output_spectrum(port, frequencies=offsets)
     expected = 0.03*0.05*0.2 / ((0.08/2)**2 + (2*np.pi*(offsets-0.01))**2)
     np.testing.assert_allclose(result.total_fluctuation_spectrum, expected, atol=1e-9)
+    measured = VNA(vna.chip).measure(6., 0., input=port, noise_frequencies=[-.02, -.01, 0., .01, .02])
+    np.testing.assert_allclose(measured.noise_spectrum(port)[1:-1], expected, atol=1e-9)

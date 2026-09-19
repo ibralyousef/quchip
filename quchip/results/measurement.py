@@ -260,7 +260,7 @@ class VNAMeasurement(MeanFieldResponseResult):
     photon_numbers: Any
     mode_frequencies: Any
     conventions: tuple[str, ...] = (
-        "b=I+iQ; frequencies in GHz; time in ns",
+        "b=I+jQ; engineering e^{+jωt}, j = −i; frequencies in GHz; time in ns",
         "Physical normal-order spectra; detector vacuum added by the receiver",
         "Independent stationary experiments across sweep points",
         "Gaussian sampling uses second moments, not full photon statistics",
@@ -371,7 +371,7 @@ class VNAMeasurement(MeanFieldResponseResult):
             Boxcar receiver and optional digital transfer.
         """
         covariance, contributions, mean_gain = integrate_noise(
-            self.values, self.noise_frequencies, self.noise_components, self.output_delays, receiver)
+            self.values, self.noise_frequencies, self.noise_components, self.output_delays, receiver, fourier_sign=-1)
         return VNAMeasurementStatistics(self.ports, self.input, self.axes, self.incident,
                                      self.values * mean_gain, covariance, receiver, contributions)
 

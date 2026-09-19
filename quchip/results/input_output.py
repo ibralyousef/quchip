@@ -256,7 +256,7 @@ class OutputSpectrumResult:
     signal_coherent_flux: Any
     signal_incoherent_flux: Any
     steady_state: Any
-    fourier_convention: str = "2 Re integral_0^inf d tau exp(+i 2 pi f tau) C(tau)"
+    fourier_convention: str = "2 Re integral_0^inf d tau exp(-j 2 pi f tau) C(tau); engineering j = -i"
 
 
 @dataclass(frozen=True)

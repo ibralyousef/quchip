@@ -146,8 +146,12 @@ def _integrate(values: Any, frequencies: Any, xp: Any) -> Any:
 
 
 def integrate_noise(values: Any, noise_frequencies: Any, noise_components: Any,
-                    output_delays: Any, receiver: IQReceiver) -> tuple[Any, Any, Any]:
-    """Integrate normal spectra plus detector vacuum; return covariance, budget, DC gain."""
+                    output_delays: Any, receiver: IQReceiver, *, fourier_sign: int = 1) -> tuple[Any, Any, Any]:
+    """Integrate normal spectra plus detector vacuum; return covariance, budget, DC gain.
+
+    ``fourier_sign`` is +1 for physics spectra and -1 for engineering spectra.
+    It sets the relative-delay phase of the captured white cross-spectrum.
+    """
     count = values.shape[-1]
     receiver_upper = None if receiver.transfer is None else receiver.transfer(noise_frequencies)
     xp = select_array_module(is_jax_array(values)
@@ -176,7 +180,7 @@ def integrate_noise(values: Any, noise_frequencies: Any, noise_components: Any,
             analytic = white * overlap / receiver.integration_time
         else:
             relative = delays[..., :, None] - delays[..., None, :]
-            phase = xp.exp(2j * xp.pi * frequencies[:, None, None] * relative[..., None, :, :])
+            phase = xp.exp(fourier_sign * 2j * xp.pi * frequencies[:, None, None] * relative[..., None, :, :])
             physical = excess + white[..., None, :, :] * phase
             spectrum = transform @ physical @ xp.conj(xp.swapaxes(transform, -1, -2))
             analytic = 0.0

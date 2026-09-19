@@ -650,6 +650,15 @@ This makes `result.expect` a **co-rotating readout**: observables are always rep
 
 ### 8.1 Stationary solves and scattering
 
+S-parameters follow the engineering `e^{+jωt}` convention, where `j = −i`.
+`VNA.sweep()`, `finite_power()`, and `measure()` conjugate the complete
+physics response at the instrument boundary, including network propagation.
+VNA probe and pump amplitudes use this convention and are conjugated on entry.
+Internal Hamiltonians, network declarations, and mode observables retain
+`e^{-iωt}`. The engine equations below use that internal convention.
+A one-port resonator therefore reports `1 - κe/(κ/2 + j 2π(f-f0))`, and a
+positive cable delay contributes `exp(-j 2π f τ)` per traversal.
+
 `Chip.steadystate()` solves `L(rho_ss) = 0` together with
 `Tr(rho_ss) = 1`. It requires a static resolved Hamiltonian and a unique
 normalized stationary state. `VNA.sweep()` adds continuous-wave port terms in
@@ -749,6 +758,12 @@ solver or consult a later mutable chip. `measurement.parameters` records the
 numerical model parameters in flattened sweep order; `noise_frequencies`
 records the stored offset grid. The finite-power ratio is output mean divided
 by the probe amplitude, not the small-signal derivative around a separate pump.
+At capture, the instrument conversion sends `I -> I`, `Q -> -Q` on both
+covariance axes. Spectral covariances are also complex conjugated, preserving
+the physical sideband labels `f_carrier + offset`. Receiver transfer functions,
+calibration, and sampled IQ fields use the engineering convention.
+`VNA.g1()` uses the same field convention, including cross-port phases;
+intensity correlations and scalar noise power are invariant under the conversion.
 
 For eligible passive harmonic models, `measure()` uses the same compact
 mode-space lowering and backend response solver as `sweep()`. With response
@@ -802,9 +817,11 @@ This interference prevents double counting fluorescence on top of an
 incident thermal field at equilibrium. Real IQ sources constructed from B
 retain normal, anomalous, and cross-output second moments. `output_spectrum()`
 selects the scalar normal spectrum from the same calculation as `measure()`.
-The Fourier convention is `integral exp(+i 2π offset τ) <δb†(0) δb(τ)> dτ`;
+The internal Fourier convention is `integral exp(+i 2π offset τ) <δb†(0) δb(τ)> dτ`;
 a mode above the carrier peaks at positive offset. This corrects the mirrored
 detuned-fluorescence spectrum in 0.3.0.
+The equivalent engineering spectrum uses `exp(-j 2π offset τ)` and the
+conjugated field correlation, retaining the same physical frequency axis.
 
 Physical source budgets separate directly propagated fields from
 `device.correlations`. The latter includes nonlinear response and interference,
