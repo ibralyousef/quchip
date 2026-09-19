@@ -150,7 +150,7 @@ def measure(
         points = tqdm(points, desc="VNA measurement")
     for chip, linear, params, amplitude, frequency in points:
         parameters.append(dict(chip.parameters))
-        tones = vna._tone_values(params) + ((input_label, frequency, amplitude),)
+        tones = vna._tone_values(params) + ((input_label, frequency, xp.conj(amplitude)),)
         if linear is None:
             operating = _operating_point(chip, tones, frequency, (), options)
             mean = _plane_means(operating.engine, operating.state.state, chip.backend, labels, tones, frequency)
@@ -160,16 +160,22 @@ def measure(
                                     amplitudes_at_point, numbers_at_point, frames_at_point)
         else:
             acquired = capture_linear(
-                linear, chip.backend, labels, input_label, frequency, amplitude, xp.asarray(offsets))
+                linear, chip.backend, labels, input_label, frequency, xp.conj(amplitude), xp.asarray(offsets))
         captured.append(acquired)
         incident.append(xp.asarray(amplitude))
     size = 2 * len(labels)
+    # Conjugate fields and reverse Q on both spectral covariance axes.
+    # Conjugating the spectrum retains physical upper/lower sideband labels.
+    signs = xp.tile(xp.asarray([1., -1.]), len(labels))
+    iq_signs = signs[:, None] * signs[None, :]
     names = tuple(captured[0].components)
     if any(tuple(point.components) != names for point in captured):
         raise ValueError("Measurement variations must preserve noise source structure.")
     components = {
-        name: (xp.stack([point.components[name][0] for point in captured]).reshape((*shape, size, size)),
-               xp.stack([point.components[name][1] for point in captured]).reshape((*shape, len(offsets), size, size)))
+        name: (iq_signs * xp.conj(xp.stack([point.components[name][0] for point in captured])
+                                 .reshape((*shape, size, size))),
+               iq_signs * xp.conj(xp.stack([point.components[name][1] for point in captured])
+                                 .reshape((*shape, len(offsets), size, size))))
         for name in names
     }
     return VNAMeasurement(
@@ -177,7 +183,7 @@ def measure(
         frequencies=frequency_values if frequency_axis else frequency_values[0],
         amplitudes=amplitude_values if amplitude_axis else amplitude_values[0], axes=axes, shape=shape,
         diagnostics=tuple(point.diagnostics for point in captured),
-        values=xp.stack([point.mean for point in captured]).reshape((*shape, len(labels))),
+        values=xp.conj(xp.stack([point.mean for point in captured]).reshape((*shape, len(labels)))),
         incident=xp.stack(incident).reshape(shape), noise_frequencies=offsets, noise_components=components,
         output_delays=xp.stack([point.delays for point in captured]).reshape((*shape, len(labels))),
         parameters=tuple(parameters), modes=modes,

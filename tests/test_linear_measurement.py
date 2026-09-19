@@ -114,7 +114,7 @@ def test_nine_mode_measurement_matches_independent_star_response_without_density
     den = den+2j*np.pi*(frequencies[None, :]-probe[:, None])
     bus_den = (2*np.pi+2*np.pi*bus.freq/bus.internal_quality_factor)/2+2j*np.pi*(bus.freq-probe)
     bus_den += np.sum((2*np.pi*np.array([c.g for c in couplings]))**2/den, axis=1)
-    np.testing.assert_allclose(measured.ratio(output), 100*(1-2*np.pi/bus_den), atol=1e-9)
+    np.testing.assert_allclose(measured.ratio(output), 100*(1-2*np.pi/bus_den).conj(), atol=1e-9)
     covariance = measured.statistics(receiver=IQReceiver(integration_time=1e6)).covariance(output)
     np.testing.assert_allclose(covariance, np.broadcast_to(np.eye(2)*(85000.5/2e6), covariance.shape), atol=1e-10)
 
@@ -179,7 +179,7 @@ def test_internal_occupation_includes_filtered_drive_and_thermal_bath(monkeypatc
     result = VNA(chip).measure(frequencies, amplitudes, input=drive, outputs=[readout],
                                noise_frequencies=[-.04, -.004, 0., .004, .04])
     kappa = .04 + 2*np.pi*6/10_000
-    field = -np.sqrt(.04*.1)*amplitudes[:, None]/(
+    field = -np.sqrt(.04*.1)*amplitudes.conj()[:, None]/(
         (1-1j*(frequencies-6)/.1)*(kappa/2+2j*np.pi*(6-frequencies)))
     thermal = .04*.9*.02/kappa
     np.testing.assert_allclose(result.mode_amplitude(mode), field, atol=1e-12)
