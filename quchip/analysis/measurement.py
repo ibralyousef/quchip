@@ -9,7 +9,7 @@ import numpy as np
 
 from quchip.analysis.field_statistics import proper_spectrum, quadrature_spectrum
 from quchip.analysis.field_noise import propagate_noise
-from quchip.results.receiver import noise_grid
+from quchip.results.receiver import _engineering_iq, noise_grid
 from quchip.engine.ir import LinearResponseProblem
 from quchip.devices.spaces import FockSpace
 from quchip.engine.linear_response import try_build_linear_response_problem
@@ -164,18 +164,14 @@ def measure(
         captured.append(acquired)
         incident.append(xp.asarray(amplitude))
     size = 2 * len(labels)
-    # Conjugate fields and reverse Q on both spectral covariance axes.
-    # Conjugating the spectrum retains physical upper/lower sideband labels.
-    signs = xp.tile(xp.asarray([1., -1.]), len(labels))
-    iq_signs = signs[:, None] * signs[None, :]
     names = tuple(captured[0].components)
     if any(tuple(point.components) != names for point in captured):
         raise ValueError("Measurement variations must preserve noise source structure.")
     components = {
-        name: (iq_signs * xp.conj(xp.stack([point.components[name][0] for point in captured])
-                                 .reshape((*shape, size, size))),
-               iq_signs * xp.conj(xp.stack([point.components[name][1] for point in captured])
-                                 .reshape((*shape, len(offsets), size, size))))
+        name: (_engineering_iq(xp.stack([point.components[name][0] for point in captured])
+                              .reshape((*shape, size, size)), xp),
+               _engineering_iq(xp.stack([point.components[name][1] for point in captured])
+                              .reshape((*shape, len(offsets), size, size)), xp))
         for name in names
     }
     return VNAMeasurement(

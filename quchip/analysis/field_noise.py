@@ -119,7 +119,7 @@ class ReadoutWiring:
     def iq_readout(self, output: Any, *, means: Any, frequency: Any, receiver: Any,
                    noise_frequencies: Any = None) -> Any:
         """Propagate conditional coherent boundary templates and downstream noise."""
-        from quchip.results.receiver import integrate_noise, noise_grid
+        from quchip.results.receiver import _engineering_iq, integrate_noise, noise_grid
         from quchip.results.terminal import IQReadout
         from quchip.utils.jax_utils import contains_tracer, is_jax_array, is_jax_namespace, select_array_module
         from quchip.utils.labeling import resolve_label
@@ -135,7 +135,7 @@ class ReadoutWiring:
                                  or contains_tracer((frequency, receiver.integration_time, tuple(templates.values()))))
         if not contains_tracer(frequency) and (np.ndim(frequency) or not np.isfinite(frequency)):
             raise ValueError("Readout frequency must be a finite scalar in GHz.")
-        arrays = {k: xp.asarray(v, dtype=complex) for k, v in templates.items()}
+        arrays = {k: xp.conj(xp.asarray(v, dtype=complex)) for k, v in templates.items()}
         first = next(iter(arrays.values()))
         if first.ndim != 1 or len(first) < 1 or any(a.shape != first.shape for a in arrays.values()):
             raise ValueError("Conditional fields must be equal-length vectors ordered by physical outcome.")
@@ -144,12 +144,14 @@ class ReadoutWiring:
         mixing = xp.eye(len(self.fields)) if self.graph is None else pad_mixing(
             self.graph.evaluate(frequency, xp)[0], len(self.fields), xp)
         gain = cw_transfer(self.fields[selected].reference.outbound, frequency, xp)
-        centers = (fields @ mixing.T)[..., selected] * gain
+        centers = xp.conj((fields @ mixing.T)[..., selected] * gain)
         offsets = xp.asarray(noise_grid(noise_frequencies))
         size = 2 * (len(self.fields) if self.graph is not None else 1)
         components, delays = propagate_noise(
             self.fields, xp.eye(len(self.fields)), self.graph,
             xp.zeros((len(offsets), size, size), dtype=complex), (label,), frequency, offsets, xp,
             include_inputs=False)
+        components = {name: (_engineering_iq(white, xp), _engineering_iq(excess, xp))
+                      for name, (white, excess) in components.items()}
         covariance, budget, dc_gain = integrate_noise(xp.zeros(1), offsets, components, delays, receiver)
         return IQReadout(centers * dc_gain, covariance, budget)
