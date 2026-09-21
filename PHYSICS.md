@@ -1180,7 +1180,11 @@ selection, return collapsed states, or describe continuous quantum trajectories.
 evolution. `result.iq_readout()` uses the simulation's captured wiring instead.
 Both propagate supplied conditional coherent fields through
 captured output reference sections and downstream mixing. Unspecified boundary
-channels are vacuum. It includes downstream added noise and ideal heterodyne
+channels are vacuum. Supplied means, returned detector IQ, and receiver transfers
+use the same engineering convention as VNA. Simulation field traces retain the
+physics convention; conjugate stationary `output(...).raw_amplitude` values
+before using them as boundary templates.
+Both paths include downstream added noise and ideal heterodyne
 vacuum through the same propagation and integration used by VNA. Boundary
 thermal noise, device correlations and transient field correlations are outside
 this coherent-field readout model; calibrated conditional distributions may include

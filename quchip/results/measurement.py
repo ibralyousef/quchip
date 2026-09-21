@@ -371,7 +371,7 @@ class VNAMeasurement(MeanFieldResponseResult):
             Boxcar receiver and optional digital transfer.
         """
         covariance, contributions, mean_gain = integrate_noise(
-            self.values, self.noise_frequencies, self.noise_components, self.output_delays, receiver, fourier_sign=-1)
+            self.values, self.noise_frequencies, self.noise_components, self.output_delays, receiver)
         return VNAMeasurementStatistics(self.ports, self.input, self.axes, self.incident,
                                      self.values * mean_gain, covariance, receiver, contributions)
 
