@@ -26,7 +26,7 @@ from quchip.engine.reference import (
     has_colored_noise,
     source_occupation,
 )
-from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar, select_array_module
+from quchip.utils.jax_utils import contains_tracer, select_array_module
 from quchip.utils.labeling import auto_label, resolve_label
 from quchip.utils.values import copy_value
 from quchip.utils.deprecation import warn_renamed
