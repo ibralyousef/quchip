@@ -6,6 +6,7 @@ from quchip.approximations import RWA, Exact
 
 import numpy as np
 import qutip
+import pytest
 
 from quchip.backend import PreparedHamiltonian
 from quchip.chip.chip import Chip
@@ -24,6 +25,27 @@ from quchip.engine.ir import (
 )
 from quchip.engine.frames import resolve_frame
 from quchip.engine.assembly import build_engine_result
+
+
+@pytest.mark.parametrize("start,duration", [(10.2, 5.3), (150.17, 5.1), (1000.1, 5.3)])
+def test_shifted_square_preserves_edges_and_pulse_area(start, duration):
+    """Translating a square preserves its closed edges and sampled rotation angle."""
+    import jax
+    import jax.numpy as jnp
+    from quchip.backend.qutip import _envelope_coefficient
+    from quchip.engine.ir import Constant, Shift, Window
+
+    signal = Shift(Window(Constant(1.), 0., duration), start)
+    stop = start + duration
+    times = np.array([np.nextafter(start, -np.inf), start, stop, np.nextafter(stop, np.inf)])
+    np.testing.assert_array_equal(signal.evaluate(times, xp=np), [0., 1., 1., 0.])
+    evaluated = jax.jit(lambda t: signal.evaluate(t, xp=jnp))(jnp.asarray(times))
+    np.testing.assert_array_equal(evaluated, [0., 1., 1., 0.])
+    coefficient = _envelope_coefficient(signal, np.array([0., stop+2.]))
+    # Midpoint quadrature is exact for a square and detects a lost edge cell.
+    query = start + (np.arange(10000)+.5)*duration/10000
+    area = np.mean([coefficient(t) for t in query])*duration
+    np.testing.assert_allclose(area, duration, atol=1e-11)
 
 
 class TestPrepareHamiltonian:

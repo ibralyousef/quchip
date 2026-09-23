@@ -58,6 +58,8 @@ class OutputFieldTrace:
     is the normally ordered ``<b_out dagger b_out>`` in photons/ns.
     ``raw_*`` retain the same moments at the Markov boundary, before propagation
     through the outbound reference run.
+    Complex amplitudes use the physics ``e^{-iωt}`` convention. Conjugate
+    ``raw_amplitude`` to supply a boundary template to ``iq_readout()``.
 
     Attributes
     ----------
@@ -527,6 +529,9 @@ class SimulationResult:
         at the selected Markov boundary channel. A mapping supplies fields at
         several boundary channels; unspecified fields are vacuum. The output
         line adds its resolved gain, filter loss noise, and amplifier noise.
+        Supplied means, returned IQ, and receiver transfers follow the VNA
+        engineering convention. Conjugate ``output(...).raw_amplitude`` before
+        using its stationary value as a boundary template.
         This stationary coherent-state readout model excludes quantum-device
         correlations and occupied boundary inputs. Use calibrated IQReadout
         distributions when those effects are included in a detector calibration.
@@ -536,7 +541,7 @@ class SimulationResult:
         output : port object or str
             External output reference plane.
         means : array_like or mapping
-            Conditional Markov-boundary means in ``1/sqrt(ns)``.
+            Engineering-convention Markov-boundary means in ``1/sqrt(ns)``.
         frequency : scalar
             Carrier frequency in GHz.
         receiver : IQReceiver

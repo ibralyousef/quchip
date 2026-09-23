@@ -196,6 +196,15 @@ def test_joint_thermal_outputs_keep_phase_delay_and_digital_filter() -> None:
                            * np.cos(2*np.pi*grid*100), grid)
     np.testing.assert_allclose(filtered.covariance(left, right), expected_cross*integral, atol=1e-10)
 
+    # An asymmetric passband checks the sign of the delayed cross-spectrum;
+    # a symmetric boxcar alone cannot distinguish the two Fourier conventions.
+    receiver = IQReceiver(integration_time=200, transfer=lambda f: np.exp(-((f-.003)/.01)**2))
+    filtered = measured.statistics(receiver=receiver)
+    cross = normal[0, 1] * np.trapezoid(np.sinc(grid*200)**2 * np.abs(receiver.transfer(grid))**2
+                                       * np.exp(2j*np.pi*grid*100), grid)/2
+    np.testing.assert_allclose(filtered.covariance(left, right),
+                               [[cross.real, -cross.imag], [cross.imag, cross.real]], atol=1e-10)
+
 
 def test_amplifier_before_splitter_preserves_correlated_noise_and_signal() -> None:
     """An upstream amplifier contributes one shared noise field to both splitter outputs."""
@@ -210,12 +219,12 @@ def test_amplifier_before_splitter_preserves_correlated_noise_and_signal() -> No
     right = net.expose("right", input=split.input_terminal("right"), output=split.output_terminal("right"))
     chip = Chip([mode], port_network=net)
     measured = VNA(chip).measure(6.0, 0.01, input=left, outputs=[left, right])
-    np.testing.assert_allclose(measured.values, -0.1*np.array([1, 1j])/np.sqrt(2), atol=1e-9)
+    np.testing.assert_allclose(measured.values, -0.1*np.array([1, -1j])/np.sqrt(2), atol=1e-9)
     deterministic = VNA(chip).sweep([6.0])
     np.testing.assert_allclose(measured.ratio(left), deterministic.s(left, left)[0], atol=1e-7)
     stats = measured.statistics(receiver=IQReceiver(integration_time=1000))
     np.testing.assert_allclose(stats.covariance(left), np.eye(2)*(149.5/2+1)/2000, atol=1e-10)
-    np.testing.assert_allclose(stats.covariance(left, right), [[0,149.5/4000],[-149.5/4000,0]], atol=1e-10)
+    np.testing.assert_allclose(stats.covariance(left, right), [[0,-149.5/4000],[149.5/4000,0]], atol=1e-10)
     vna = VNA(chip)
     vna.pump(left, freq=6.0, amplitude=0.01)
     np.testing.assert_allclose(vna.output_spectrum(right, frequencies=[0.0]).added_noise_spectrum, [149.5/2])
@@ -259,7 +268,7 @@ def test_branched_chain_preserves_independently_peeled_reverse_leg(kind) -> None
     left = net.expose("left", input=section.input_terminal("2"), output=splitter.output_terminal("left"))
     right = net.expose("right", input=splitter.input_terminal("right"), output=splitter.output_terminal("right"))
     measured = VNA(Chip([mode], port_network=net)).measure(6.0, 0.01, input=left, outputs=[left, right])
-    np.testing.assert_allclose(measured.values, -0.1*transmission**2*np.array([1,1j])/np.sqrt(2), atol=1e-8)
+    np.testing.assert_allclose(measured.values, -0.1*np.conj(transmission)**2*np.array([1,-1j])/np.sqrt(2), atol=1e-8)
     noise = measured.noise_contributions(left)
     normal = sum(noise.values())
     np.testing.assert_allclose(np.real(np.trace(normal, axis1=-2, axis2=-1)),

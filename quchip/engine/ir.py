@@ -255,6 +255,12 @@ class Shift(SignalNode):
 
     def evaluate(self, t: Any, *, xp: Any) -> Any:
         """Return the child evaluated at ``t - delta_t`` (ns)."""
+        if isinstance(self.child, Window):
+            # Compare on the caller's clock: (start + duration) - start
+            # can round past duration and discard a closed window endpoint.
+            window = self.child
+            return Window(Shift(window.child, self.delta_t),
+                          window.start + self.delta_t, window.stop + self.delta_t).evaluate(t, xp=xp)
         return self.child.evaluate(xp.asarray(t, dtype=float) - self.delta_t, xp=xp)
 
     def bands(self) -> tuple[CarrierBand, ...]:
