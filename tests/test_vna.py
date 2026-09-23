@@ -25,6 +25,55 @@ def _network(*ports: Port) -> PortNetwork:
     return PortNetwork.from_ports(ports)
 
 
+@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
+@pytest.mark.parametrize("options", [None, {}])
+def test_instrument_reflection_convention_with_complex_probe_and_delay(backend, options) -> None:
+    """Both response routes report engineering reflection, cable phase, and IQ means."""
+    from quchip import IQReceiver
+
+    if backend == "dynamiqs":
+        pytest.importorskip("dynamiqs")
+    r = Resonator(freq=6., levels=3, internal_quality_factor=30000, label="r")
+    network = PortNetwork()
+    port = network.port("p", target=r, external_quality_factor=10000)
+    cable = network.delay("cable", duration=0.123)
+    network.link(port, cable)
+    network.expose("vna", at=cable.port(2))
+    vna = VNA(Chip([r], port_network=network, backend=backend))
+    frequencies = np.array([5.9996, 6., 6.0004])
+    expected = np.array([.25-.75j, -.5, .25+.75j]) * np.exp(-4j*np.pi*frequencies*.123)
+    beta = 1e-5 * (1+2j)
+    measured = vna.measure(frequencies, beta, options=options, noise_frequencies=[-.1, -.01, 0., .01, .1])
+    np.testing.assert_allclose(vna.sweep(frequencies, options=options).s11, expected, atol=1e-8)
+    np.testing.assert_allclose(measured.ratio("vna"), expected, atol=1e-8)
+    np.testing.assert_allclose(vna.finite_power(frequencies, beta).ratio("vna"), expected, atol=1e-8)
+    stats = measured.statistics(receiver=IQReceiver(integration_time=1000.))
+    np.testing.assert_allclose(stats.mean("vna"), beta*expected, atol=1e-12)
+
+
+def test_vna_reflection_fit_recovers_resonance_and_quality_factors() -> None:
+    """Complex VNA data fits the engineering reflection model without conjugation."""
+    from scipy.optimize import least_squares
+
+    r = Resonator(freq=6., levels=3, internal_quality_factor=30000, label="r")
+    network = PortNetwork()
+    network.port("p", target=r, external_quality_factor=10000)
+    frequencies = np.linspace(5.997, 6.003, 61)
+    data = VNA(Chip([r], port_network=network)).sweep(frequencies).s11
+
+    def residual(parameters):
+        f0, qi, qe = parameters
+        ql = 1/(1/qi + 1/qe)
+        model = 1 - (2*ql/qe)/(1 + 2j*ql*(frequencies-f0)/f0)
+        error = model-data
+        return np.concatenate((error.real, error.imag))
+
+    fit = least_squares(residual, [6.0001, 25000., 12000.], x_scale="jac",
+                        bounds=([5.99, 100., 100.], [6.01, 1e6, 1e6]), gtol=1e-12)
+    assert fit.success
+    np.testing.assert_allclose(fit.x, [6., 30000., 10000.], rtol=1e-7)
+
+
 def _linear_resonator(*, kappa_in: float, kappa_out: float = 0.0):
     resonator = Resonator(freq=6.0, levels=8, label="r")
     input_port = Port(resonator, rate=kappa_in, label="in")
@@ -95,7 +144,7 @@ def test_one_sided_small_signal_reflection_matches_analytic_response() -> None:
 
     result = VNA(chip, ports=[input_port]).sweep(frequencies)
 
-    detuning = 2 * np.pi * (resonator.freq - frequencies)
+    detuning = 2 * np.pi * (frequencies - resonator.freq)
     expected = 1.0 - 0.04 / (0.02 + 1j * detuning)
     np.testing.assert_allclose(result.s11, expected, atol=2e-8)
     np.testing.assert_allclose(result.s("in", "in"), expected, atol=2e-8)
@@ -186,7 +235,7 @@ def test_filter_section_is_exact_for_continuous_waves_and_sweepable() -> None:
 
     filtered = VNA(chip).sweep(frequencies)
     reference = VNA(bare_chip, ports=[bare_port]).sweep(frequencies)
-    expected = _lowpass(frequencies, cutoff=6.5, order=2) ** 2 * reference.s11
+    expected = _lowpass(frequencies, cutoff=6.5, order=2).conj() ** 2 * reference.s11
     np.testing.assert_allclose(filtered.s11, expected, atol=1e-10)
     np.testing.assert_allclose(
         VNA(chip).sweep(frequencies, options={"method": "direct"}).s11, expected, atol=2e-8
@@ -195,7 +244,7 @@ def test_filter_section_is_exact_for_continuous_waves_and_sweepable() -> None:
     rebound = VNA(chip).sweep(frequencies, Sweep([6.5, 8.0], name="network.component.lowpass.cutoff"))
     np.testing.assert_allclose(rebound.s11[0], expected, atol=1e-10)
     np.testing.assert_allclose(
-        rebound.s11[1], _lowpass(frequencies, cutoff=8.0, order=2) ** 2 * reference.s11, atol=1e-10
+        rebound.s11[1], _lowpass(frequencies, cutoff=8.0, order=2).conj() ** 2 * reference.s11, atol=1e-10
     )
     with pytest.raises(TypeError, match="lowpass"):
         chip.to_dict()
@@ -574,7 +623,7 @@ def test_vna_uses_network_exposure_labels_and_scattering_background() -> None:
     result = VNA(chip, ports=["readout"]).sweep([5.98, 6.0, 6.02])
 
     detuning = 2 * np.pi * (resonator.freq - np.asarray([5.98, 6.0, 6.02]))
-    expected = 1j * (1.0 - 0.04 / (0.02 + 1j * detuning))
+    expected = -1j * (1.0 - 0.04 / (0.02 - 1j * detuning))
     np.testing.assert_allclose(result.s11, expected, atol=2e-8)
 
 
@@ -591,7 +640,7 @@ def test_vna_reference_delay_is_reciprocal() -> None:
         return complex(VNA(chip, ports=["readout"]).sweep([6.01]).s11[0])
 
     delay = 0.125
-    expected_phase = np.exp(1j * 2.0 * 2.0 * np.pi * 6.01 * delay)
+    expected_phase = np.exp(-1j * 2.0 * 2.0 * np.pi * 6.01 * delay)
     assert response(delay) == pytest.approx(expected_phase * response(0.0), abs=2e-8)
 
 
@@ -807,11 +856,11 @@ def test_eight_resonator_cascade_matches_exact_series_product() -> None:
         ports=["readout"],
     ).sweep(frequencies)
 
-    expected = np.exp(1j * np.sum(phases)) * np.exp(1j * 4 * np.pi * frequencies * 0.08)
+    expected = np.exp(-1j * np.sum(phases)) * np.exp(-1j * 4 * np.pi * frequencies * 0.08)
     for resonance, external_rate, quality in zip(resonances, external_rates, qualities, strict=True):
         internal_rate = 2 * np.pi * resonance / quality
         expected *= 1.0 - external_rate / (
-            0.5 * (external_rate + internal_rate) + 1j * 2 * np.pi * (resonance - frequencies)
+            0.5 * (external_rate + internal_rate) + 1j * 2 * np.pi * (frequencies - resonance)
         )
     np.testing.assert_allclose(result.s11, expected, atol=2e-11)
     assert all(diagnostic["mode_count"] == 8 for diagnostic in result.diagnostics)
@@ -860,7 +909,7 @@ def test_harmonic_level_shift_retains_compact_response(backend) -> None:
     chip = Chip([first, second], [LevelShift(first, second)], port_network=_network(*ports), backend=backend)
     frequencies = np.asarray([6.01, 6.02, 6.03])
     result = VNA(chip, ports=["readout"]).sweep(frequencies)
-    expected = 1 - 0.04 / (0.02 + 2j * np.pi * (6.02 - frequencies))
+    expected = 1 - 0.04 / (0.02 + 2j * np.pi * (frequencies - 6.02))
     np.testing.assert_allclose(result.s11, expected, atol=2e-10)
     assert {item["solver"] for item in result.diagnostics} == {"linear_response"}
 
@@ -895,7 +944,7 @@ def test_reordered_saved_level_uses_its_physical_spectrum(backend, custom_space)
     chip = Chip([first, second], [SavedShift(first, second)], port_network=_network(*ports), backend=backend)
     frequencies = np.asarray([5.97, 5.98, 5.99])
     result = VNA(chip, ports=["readout"]).sweep(frequencies)
-    expected = 1 - 0.04 / (0.02 + 2j * np.pi * (5.98 - frequencies))
+    expected = 1 - 0.04 / (0.02 + 2j * np.pi * (frequencies - 5.98))
     np.testing.assert_allclose(result.s11, expected, atol=2e-10)
     assert {item["solver"] for item in result.diagnostics} == {"stationary_resolvent"}
 
@@ -1096,7 +1145,7 @@ def test_pumped_vna_reports_phase_conjugate_response() -> None:
     network.expose("pump", input=splitter.input_terminal("left"), output=splitter.output_terminal("right"))
     network.expose("probe", input=splitter.input_terminal("right"), output=port.output)
     vna = VNA(Chip([cavity], port_network=network), ports=["probe"])
-    vna.pump("pump", freq=6.0, amplitude=0.3)
+    vna.pump("pump", freq=6.0, amplitude=0.3 + 0.1j)
 
     small_signal = vna.sweep([6.0])
     s_value = complex(np.asarray(small_signal.s("probe", "probe"))[0])

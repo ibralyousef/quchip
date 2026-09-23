@@ -281,7 +281,7 @@ def test_reference_section_and_downstream_loss_share_an_external_run() -> None:
     chip = Chip([resonator], port_network=interior)
     from quchip import VNA
     actual = VNA(chip).sweep([6.0]).s("readout", "readout")[0]
-    np.testing.assert_allclose(actual, -0.5*np.exp(4j*np.pi*6.0*0.1), atol=1e-10)
+    np.testing.assert_allclose(actual, -0.5*np.exp(-4j*np.pi*6.0*0.1), atol=1e-10)
 
 
 def test_attenuator_is_a_reciprocal_two_sided_vacuum_dilation() -> None:

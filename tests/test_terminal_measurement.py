@@ -152,37 +152,49 @@ def test_closed_rabi_needs_no_readout_pulse_or_master_equation():
     assert result.measure(q).probabilities[1] > .99
 
 
-def wired_result(*, backend="qutip", gain=100., noise=1., loss=.25):
+def wired_result(*, backend="qutip", gain=100., noise=1., loss=.25, delay=0.):
     r = Resonator(freq=6., levels=2, label="r")
     net = PortNetwork()
     port = net.port("p", target=r, rate=.04)
     circ = net.circulator("circ")
     amp = net.amplifier("hemt", gain=gain, added_noise=noise)
     attenuator = net.attenuator("cable", eta=loss, thermal_occupation=.2)
+    line = net.delay("delay", duration=delay)
     net.link(port, circ.port(2))
-    net.link(circ.port(3), amp, attenuator)
+    net.link(circ.port(3), amp, attenuator, line)
     drive = net.expose("drive", at=circ.port(1))
-    out = net.expose("out", at=attenuator.port(2))
+    out = net.expose("out", at=line.port(2))
     chip = Chip([r], port_network=net, frame="rotating", backend=backend)
     result = QuantumSequence(chip).simulate(tlist=[0., 1.], states="final")
     return chip, out, drive, result
 
 
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
-def test_wiring_readout_matches_vna_noise_and_captures_model(backend):
+@pytest.mark.parametrize("delay", [0., .123])
+def test_wiring_readout_matches_vna_noise_and_captures_model(backend, delay):
     """Coherent templates use the same downstream noise, gain and receiver as VNA."""
-    chip, out, drive, result = wired_result(backend=backend)
+    chip, out, drive, result = wired_result(backend=backend, delay=delay)
     receiver = IQReceiver(1000)
-    detector = result.iq_readout(out, means=[-.1, .1], frequency=6., receiver=receiver)
-    np.testing.assert_allclose(detector.means, [-.5, .5])
+    means = np.array([-.001-.002j, .001+.002j])
+    detector = result.iq_readout(out, means=means, frequency=6., receiver=receiver)
+    np.testing.assert_allclose(detector.means, 5*means*np.exp(-2j*np.pi*6*delay), atol=1e-12)
+    direct = IQReadout.from_wiring(chip, out, means={out: means}, frequency=6., receiver=receiver)
+    np.testing.assert_allclose(direct.means, detector.means, atol=1e-12)
     expected = (.25*(100+99/2)+.75*.2+1)/2000
     np.testing.assert_allclose(detector.iq_covariance[0], np.eye(2)*expected, atol=1e-12)
-    stationary = VNA(chip).measure(6., .001, input=drive, outputs=[out])
+    # At resonance the cavity's reflected boundary field is -beta.
+    stationary = VNA(chip).measure(6., -means[0], input=drive, outputs=[out])
+    np.testing.assert_allclose(detector.means[0], stationary.mean(out), atol=2e-8)
     np.testing.assert_allclose(detector.iq_covariance[0], stationary.statistics(receiver=receiver).covariance(out),
                                atol=1e-10)
     np.testing.assert_allclose(sum(detector.contributions.values()), detector.iq_covariance[0])
+    filtered = IQReceiver(1000, transfer=lambda f: (1+.4j)*np.exp(-((f-.003)/.01)**2))
+    filtered_detector = result.iq_readout(out, means=means, frequency=6., receiver=filtered)
+    filtered_vna = stationary.statistics(receiver=filtered)
+    np.testing.assert_allclose(filtered_detector.means[0], filtered_vna.mean(out), atol=2e-8)
+    np.testing.assert_allclose(filtered_detector.iq_covariance[0], filtered_vna.covariance(out), atol=1e-10)
     chip.disconnect_network()
-    captured = result.iq_readout(out, means=[-.1, .1], frequency=6., receiver=receiver)
+    captured = result.iq_readout(out, means=means, frequency=6., receiver=receiver)
     np.testing.assert_allclose(captured.means, detector.means)
     np.testing.assert_allclose(captured.iq_covariance, detector.iq_covariance)
 
@@ -257,7 +269,7 @@ def test_thermal_evolution_and_downstream_noise_have_separate_owners():
 
 
 def test_wiring_noise_retains_differentiated_gain():
-    """Resolved amplifier gain remains differentiable in the captured readout calculation."""
+    """Amplifier noise and engineering cable phase retain their analytical derivatives."""
     import jax
     import jax.numpy as jnp
     from quchip.analysis.field_noise import ReadoutWiring
@@ -268,6 +280,15 @@ def test_wiring_noise_retains_differentiated_gain():
         return wiring.iq_readout(out, means=[-.1, .1], frequency=6., receiver=IQReceiver(1000)).iq_covariance[0, 0, 0]
     v, g = jax.jit(jax.value_and_grad(variance))(jnp.asarray(100.))
     np.testing.assert_allclose([v, g], [(37.375+.15+1)/2000, .25*1.5/2000], atol=1e-12)
+
+    def field(delay):
+        candidate = chip.with_params({"network.component.delay.duration": delay})
+        value = IQReadout.from_wiring(candidate, out, means=[.1+.2j], frequency=6., receiver=IQReceiver(1000)).means[0]
+        return jnp.stack((value.real, value.imag))
+    expected = 5*(.1+.2j)*np.exp(-2j*np.pi*6*.123)
+    derivative = -2j*np.pi*6*expected
+    np.testing.assert_allclose(jax.jit(field)(.123), [expected.real, expected.imag], atol=1e-12)
+    np.testing.assert_allclose(jax.jit(jax.jacfwd(field))(.123), [derivative.real, derivative.imag], atol=1e-10)
 
 
 def test_custom_detector_basis_can_be_differentiated_after_qutip_evolution():

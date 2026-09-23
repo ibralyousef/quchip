@@ -260,7 +260,7 @@ class VNAMeasurement(MeanFieldResponseResult):
     photon_numbers: Any
     mode_frequencies: Any
     conventions: tuple[str, ...] = (
-        "b=I+iQ; frequencies in GHz; time in ns",
+        "b=I+jQ; engineering e^{+jωt}, j = −i; frequencies in GHz; time in ns",
         "Physical normal-order spectra; detector vacuum added by the receiver",
         "Independent stationary experiments across sweep points",
         "Gaussian sampling uses second moments, not full photon statistics",

@@ -40,6 +40,7 @@ class IQReadout:
     distributions: do not add apparatus noise already included in calibration.
     Covariances must be positive definite. Wiring-derived readouts use fields
     in 1/sqrt(ns) and retain their integrated noise contributions.
+    Means and IQ covariances follow the VNA engineering convention.
 
     Attributes
     ----------
@@ -90,8 +91,9 @@ class IQReadout:
             Chip whose current output wiring is captured.
         output : port object or str
             Output reference plane.
-        means : array_like
-            Conditional coherent fields in ``1/sqrt(ns)``.
+        means : array_like or mapping
+            Engineering-convention conditional Markov-boundary fields in
+            ``1/sqrt(ns)``; a mapping supplies multiple boundary channels.
         frequency : scalar
             Carrier frequency in GHz.
         receiver : IQReceiver

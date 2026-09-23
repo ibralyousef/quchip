@@ -4,6 +4,18 @@ This file records notable user-visible changes to quchip.
 
 ## Unreleased
 
+- VNA S-parameters, finite-power fields, field correlations, and IQ statistics now follow the
+  engineering `e^{+jωt}` convention, where `j = −i`, including network phases
+  and delays. Remove manual conjugation of VNA outputs; conjugate old complex
+  probe and pump amplitudes to reproduce the same physical drive. Internal
+  mode observables and authored network parameters keep their physics convention.
+- Wiring-derived IQ readouts share the VNA convention for supplied boundary
+  means, detector fields, and receiver filtering. Conjugate raw simulation
+  fields before supplying them as readout templates. Receiver-filter validation
+  now also accepts JAX arrays.
+- Preserve shifted square-pulse endpoints when floating-point subtraction
+  rounds the local time past the pulse duration.
+
 - Add native quantum-jump and diffusive SSE/SME solvers on QuTiP and Dynamiqs,
   with parameter batches, native results, and explicit monitored-channel selection.
 - Truncation diagnostics are now explicit. Remove `check_truncation` and

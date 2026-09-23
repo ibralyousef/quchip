@@ -140,6 +140,12 @@ def noise_grid(frequencies: Any = None) -> np.ndarray:
     return values
 
 
+def _engineering_iq(spectrum: Any, xp: Any) -> Any:
+    """Reverse both Q axes and conjugate spectra, preserving physical sideband labels."""
+    signs = xp.where(xp.arange(spectrum.shape[-1]) % 2, -1, 1)
+    return signs[:, None] * xp.conj(spectrum) * signs[None, :]
+
+
 def _integrate(values: Any, frequencies: Any, xp: Any) -> Any:
     weights = xp.diff(frequencies)
     return xp.sum((values[..., 1:, :, :] + values[..., :-1, :, :]) * weights[:, None, None] / 2, axis=-3)
@@ -147,7 +153,10 @@ def _integrate(values: Any, frequencies: Any, xp: Any) -> Any:
 
 def integrate_noise(values: Any, noise_frequencies: Any, noise_components: Any,
                     output_delays: Any, receiver: IQReceiver) -> tuple[Any, Any, Any]:
-    """Integrate normal spectra plus detector vacuum; return covariance, budget, DC gain."""
+    """Integrate normal spectra plus detector vacuum; return covariance, budget, DC gain.
+
+    Captured IQ spectra and the receiver transfer use the engineering convention.
+    """
     count = values.shape[-1]
     receiver_upper = None if receiver.transfer is None else receiver.transfer(noise_frequencies)
     xp = select_array_module(is_jax_array(values)
@@ -176,7 +185,7 @@ def integrate_noise(values: Any, noise_frequencies: Any, noise_components: Any,
             analytic = white * overlap / receiver.integration_time
         else:
             relative = delays[..., :, None] - delays[..., None, :]
-            phase = xp.exp(2j * xp.pi * frequencies[:, None, None] * relative[..., None, :, :])
+            phase = xp.exp(-2j * xp.pi * frequencies[:, None, None] * relative[..., None, :, :])
             physical = excess + white[..., None, :, :] * phase
             spectrum = transform @ physical @ xp.conj(xp.swapaxes(transform, -1, -2))
             analytic = 0.0
@@ -197,7 +206,7 @@ def integrate_noise(values: Any, noise_frequencies: Any, noise_components: Any,
             raise ValueError("Receiver integration extends beyond captured spectral support; "
                              "capture a wider noise_frequencies grid.")
         if receiver.transfer is not None:
-            edge = np.max(np.abs(np.asarray(receiver.transfer(frequencies[[0, -1]]))))
+            edge = np.max(np.abs(np.asarray(receiver.transfer(frequencies[xp.asarray([0, -1])]))))
             if edge > receiver.tolerance:
                 raise ValueError("Receiver filter extends beyond captured spectral support; "
                                  "capture a wider noise_frequencies grid.")

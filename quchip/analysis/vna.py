@@ -125,6 +125,10 @@ class VNA:
     Pass exposed port objects or their labels as ``ports`` to select a subset;
     a bare label string is rejected.
 
+    S-parameters follow the engineering ``e^{+jωt}`` convention, where ``j = −i``.
+    Probe and pump amplitudes, returned fields, correlations, and IQ statistics use this
+    convention. Internal mode observables retain the physics convention.
+
     Parameters
     ----------
     chip : Chip
@@ -241,8 +245,8 @@ class VNA:
                 axes=axes,
                 shape=shape,
                 diagnostics=tuple(diagnostics),
-                matrix=xp.reshape(matrix, block),
-                conjugate_matrix=xp.reshape(conjugate, block),
+                matrix=xp.conj(xp.reshape(matrix, block)),
+                conjugate_matrix=xp.conj(xp.reshape(conjugate, block)),
             )
 
         chip_points = [(self._tone_values(p), self._chip_at(p)) for _, p in variation_points]
@@ -362,7 +366,7 @@ class VNA:
         incident: list[Any] = []
         diagnostics: list[Mapping[str, Any]] = []
         for tones, chip, amplitude, frequency in iterator:
-            all_tones = tones + ((input_label, frequency, amplitude),)
+            all_tones = tones + ((input_label, frequency, xp.conj(amplitude)),)
             operating = _operating_point(
                 chip, all_tones, frequency, (), options
             )
@@ -379,7 +383,7 @@ class VNA:
             axes=axes,
             shape=shape,
             diagnostics=tuple(diagnostics),
-            values=xp.reshape(xp.stack(values), (*shape, len(labels))),
+            values=xp.conj(xp.reshape(xp.stack(values), (*shape, len(labels)))),
             incident=xp.reshape(xp.stack(incident), shape),
         )
 
@@ -653,6 +657,7 @@ class VNA:
             else input_intensity * output_intensity
         )
         same_port = input_port == output_port
+        raw = xp.conj(raw)
         return OutputCorrelationResult(
             order=order,
             input_port=input_port,
@@ -738,7 +743,7 @@ class VNA:
         for tone in self._tones:
             freq = params.get(f"{_TONE_PREFIX}{tone._index}_freq", tone.freq)
             amplitude = params.get(f"{_TONE_PREFIX}{tone._index}_amplitude", tone.amplitude)
-            tones.append((tone.port, freq, amplitude))
+            tones.append((tone.port, freq, self.chip.backend.array_module.conj(amplitude)))
         return tuple(tones)
 
 
