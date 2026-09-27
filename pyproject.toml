@@ -25,7 +25,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dynamiqs = ["dynamiqs>=0.3.4"]
+# dynamiqs 0.3.6 fails to import with jax>=0.11.1; drop the jax bound once a
+# dynamiqs release includes https://github.com/dynamiqs/dynamiqs/pull/1145.
+dynamiqs = ["dynamiqs>=0.3.6", "jax<0.11.1"]
 viz = ["pyvis"]
 scqubits = ["scqubits>=4.2", "qutip<5.3.1"]
 test = ["pytest", "pyvis", "scqubits>=4.2", "qutip<5.3.1", "jupytext", "nbconvert", "ipykernel"]

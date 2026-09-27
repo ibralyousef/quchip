@@ -122,7 +122,6 @@ def _build_native_dynamiqs(n: int, levels: int) -> dict[str, Any]:
     n_ops = [_dynamiqs_site(number, index, n, levels) for index in range(n)]
     state = dq.tensor(*[dq.fock(levels, 0) for _ in range(n)])
     method = dq.method.Tsit5(rtol=RTOL, atol=ATOL, max_steps=MAX_STEPS)
-    options = dq.Options(save_states=False, progress_meter=False)
 
     @jax.jit
     def solve(amplitude: Any) -> Any:
@@ -149,7 +148,8 @@ def _build_native_dynamiqs(n: int, levels: int) -> dict[str, Any]:
             time_grid(),
             exp_ops=n_ops,
             method=method,
-            options=options,
+            save_states=False,
+            progress_meter=False,
         )
         return result.expects
 
