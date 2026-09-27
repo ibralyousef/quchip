@@ -26,15 +26,15 @@ from __future__ import annotations
 
 import itertools
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, Sequence
 
 import dynamiqs as dq
 import equinox as eqx
 import numpy as np
-from dynamiqs.qarrays.dense_qarray import DenseQArray
-from dynamiqs.qarrays.sparsedia_qarray import SparseDIAQArray
+from dynamiqs.qarrays.qarray import QArray
+from dynamiqs.qarrays.sparsedia_dataarray import SparseDIADataArray
 
 # x64 is enabled at the package boundary in ``quchip/__init__.py``.
 
@@ -72,6 +72,11 @@ from quchip.engine.ir import (  # noqa: E402
 # not at the native Tsit5 defaults (rtol = atol = 1e-6).
 _DEFAULT_RTOL = 1e-9
 _DEFAULT_ATOL = 1e-11
+
+
+def _dia_qarray(dims: tuple[int, ...], offsets: tuple[int, ...], diags: Any) -> QArray:
+    """Build an operator in sparse-DIA layout; *diags* may be traced, *offsets* are static."""
+    return QArray(dims, False, SparseDIADataArray(offsets, diags))
 
 
 def _signal_discontinuities(signal: Any) -> Any:
@@ -192,7 +197,7 @@ class DynamiqsBackend(Backend):
 
         Overrides the protocol default to keep the operator in sparse-DIA
         layout even when *values* is a JAX tracer — the offsets ``(0,)`` are
-        concrete, so the SparseDIAQArray constructor accepts the traced
+        concrete, so the sparse-DIA constructor accepts the traced
         values directly. Without this override, dynamiqs's
         ``from_canonical_operator`` densifies any traced DIA payload, which
         forces a dense ``H₀`` for circuit-style devices and triggers the
@@ -214,16 +219,14 @@ class DynamiqsBackend(Backend):
         dim_tuple = self._coerce_dims(dims, (n, n))
         if dim_tuple is None:
             dim_tuple = (n,)
-        return SparseDIAQArray(dim_tuple, False, (0,), v[None, :])
+        return _dia_qarray(dim_tuple, (0,), v[None, :])
 
     def from_array(self, data: Any, dims: list[list[int]] | None = None) -> Operator:
-        if isinstance(data, (DenseQArray, SparseDIAQArray)):
+        if isinstance(data, QArray):
             dims_tuple = self._coerce_dims(dims, data.shape)
             if dims_tuple is None or dims_tuple == data.dims:
                 return data
-            if isinstance(data, SparseDIAQArray):
-                return SparseDIAQArray(dims_tuple, data.vectorized, data.offsets, data.diags)
-            return DenseQArray(dims_tuple, data.vectorized, data.data)
+            return replace(data, dims=dims_tuple)
         if hasattr(data, "to_jax"):
             data = data.to_jax()
         elif hasattr(data, "full"):
@@ -243,15 +246,15 @@ class DynamiqsBackend(Backend):
         dims_attr = getattr(op, "dims", None)
         dims = tuple(dims_attr) if dims_attr is not None else (self.to_array(op).shape[0],)
         labels = tuple(str(i) for i in range(len(dims)))
-        if isinstance(op, SparseDIAQArray):
+        if isinstance(op, QArray) and op.layout is dq.dia:
             return CanonicalOperator.from_dia(
-                jnp.asarray(op.diags, dtype=jnp.complex128),
-                np.asarray(op.offsets, dtype=int),
+                jnp.asarray(op.data.diags, dtype=jnp.complex128),
+                np.asarray(op.data.offsets, dtype=int),
                 shape=op.shape, dims=dims, basis="fock", subsystem_labels=labels,
             )
-        if isinstance(op, DenseQArray):
+        if isinstance(op, QArray):
             return CanonicalOperator.from_dense(
-                jnp.asarray(op.data, dtype=jnp.complex128),
+                jnp.asarray(op.to_jax(), dtype=jnp.complex128),
                 dims=dims, basis="fock", subsystem_labels=labels,
             )
 
@@ -270,12 +273,11 @@ class DynamiqsBackend(Backend):
 
             if contains_tracer(canonical.offsets):
                 # Sparse structure must be static. Value payloads may remain
-                # traced because SparseDIAQArray treats them as JAX leaves.
+                # traced because sparse-DIA diagonals are JAX leaves.
                 dense = canonical_to_dense_array(canonical)
                 return dq.asqarray(jnp.asarray(dense, dtype=jnp.complex128), dims=dims)
-            return SparseDIAQArray(
+            return _dia_qarray(
                 dims,
-                False,
                 tuple(int(x) for x in canonical.offsets),
                 jnp.asarray(canonical.values, dtype=jnp.complex128),
             )
@@ -732,7 +734,7 @@ class DynamiqsBackend(Backend):
         tlist_arr, c_ops, solver_name, opts, e_ops_arg = self._resolve_solve_config(
             problem, engine_result
         )
-        options_obj = self._options_from_dict(opts)
+        native_options = self._options_from_dict(opts)
         method_obj = self._method_from_dict(opts)
         gradient = opts.get("gradient")
 
@@ -750,7 +752,7 @@ class DynamiqsBackend(Backend):
 
         solve_fn = self._cached_jit_solve(
             solver_name=solver_name,
-            options_obj=options_obj,
+            native_options=native_options,
             method_obj=method_obj,
             gradient=gradient,
             has_e_ops=e_ops_arg is not None,
@@ -780,7 +782,7 @@ class DynamiqsBackend(Backend):
                 raise ValueError("Conflicting states and native save_states.")
             options["save_states"] = problem.states == "all"
         kwargs = dict(H=self.prepare_hamiltonian(problem.engine_result, problem.tlist).rhs,
-                      tsave=problem.tlist, exp_ops=problem.e_ops, options=dq.Options(**options), **problem.run_args)
+                      tsave=problem.tlist, exp_ops=problem.e_ops, **options, **problem.run_args)
         state = self.coerce_state(problem.initial_state, dims=problem.engine_result.dims)
         kwargs["rho0" if problem.solver == "dsmesolve" else "psi0"] = state
         if problem.solver in ("dssesolve", "dsmesolve") and (
@@ -818,7 +820,7 @@ class DynamiqsBackend(Backend):
         batched: bool = False,
         point_e_ops: bool = False,
         solver_name: str,
-        options_obj: Any,
+        native_options: dict[str, Any],
         method_obj: Any,
         gradient: Any,
         has_e_ops: bool,
@@ -829,8 +831,8 @@ class DynamiqsBackend(Backend):
         """Return a cached single or vmapped solve for this static config.
 
         The key is built ONLY from static/structural metadata: solver name,
-        the (hashable, value-equal) dynamiqs ``Options``/``method``/``gradient``
-        objects, observable/collapse/term *counts*, and the e_ops presence flag.
+        the native option values and the (hashable, value-equal) dynamiqs
+        ``method``/``gradient`` objects, observable/collapse/term *counts*, and the e_ops presence flag.
         No traced array, and no operator/coefficient *value*, touches the key:
         those all flow as jit arguments, where jax's own cache keys on their
         treedefs + shapes. Two structurally-different problems therefore land on
@@ -841,7 +843,7 @@ class DynamiqsBackend(Backend):
             "batch" if batched else "single",
             point_e_ops,
             solver_name,
-            options_obj,
+            tuple(sorted(native_options.items())),
             method_obj,
             gradient,
             bool(has_e_ops),
@@ -854,7 +856,7 @@ class DynamiqsBackend(Backend):
         if fn is not None:
             return fn
 
-        kwargs: dict[str, Any] = {"options": options_obj, "method": method_obj}
+        kwargs: dict[str, Any] = {**native_options, "method": method_obj}
         if gradient is not None:
             kwargs["gradient"] = gradient
 
@@ -905,7 +907,7 @@ class DynamiqsBackend(Backend):
         """Build the common dynamiqs solver kwargs from quchip's option dict."""
         kwargs: dict[str, Any] = {
             "exp_ops": e_ops,
-            "options": self._options_from_dict(options),
+            **self._options_from_dict(options),
             "method": self._method_from_dict(options),
         }
         # Opt-in differentiation mode. Default (no key) leaves dynamiqs'
@@ -1164,7 +1166,7 @@ class DynamiqsBackend(Backend):
             batched=True,
             point_e_ops=point_e_ops is not None,
             solver_name=solver_name,
-            options_obj=options,
+            native_options=options,
             method_obj=method,
             gradient=gradient,
             has_e_ops=e_ops is not None,
@@ -1241,7 +1243,7 @@ class DynamiqsBackend(Backend):
         Decomposes each nonzero's ``(row, col)`` into subsystem indices
         ``(row_A, row_B)`` × ``(col_A, col_B)`` via ``divmod``, fans each out
         across every spectator basis state using the stride array, and
-        reassembles as a :class:`SparseDIAQArray`. Keeps complexity linear
+        reassembles in sparse-DIA layout. Keeps complexity linear
         in ``nnz × n_spectators`` rather than ``nnz × total_dim``.
         """
         from quchip.engine.bands import canonical_to_coo
@@ -1322,12 +1324,7 @@ class DynamiqsBackend(Backend):
         diag_data = jnp.zeros((n_diagonals, total_dim), dtype=jnp.complex128)
         diag_data = diag_data.at[diag_indices, cols_np].add(values_jax)
 
-        return SparseDIAQArray(
-            dims,
-            False,
-            tuple(int(x) for x in offsets.tolist()),
-            diag_data,
-        )
+        return _dia_qarray(dims, tuple(int(x) for x in offsets.tolist()), diag_data)
 
     # ------------------------------------------------------------------
     # Internal: options / method builders
@@ -1338,14 +1335,14 @@ class DynamiqsBackend(Backend):
         options: dict[str, Any] | None,
         *,
         cartesian_batching: bool = True,
-    ) -> Any:
-        """Map a quchip solver-options dict onto a ``dynamiqs.Options`` object."""
+    ) -> dict[str, Any]:
+        """Map a quchip solver-options dict onto dynamiqs solver keyword arguments."""
         options = DynamiqsBackend._normalize_dq_options(options)
-        return dq.Options(
-            save_states=bool(options.get("store_states", True)),
-            cartesian_batching=cartesian_batching,
-            progress_meter=options.get("progress_meter", False),
-        )
+        return {
+            "save_states": bool(options.get("store_states", True)),
+            "cartesian_batching": cartesian_batching,
+            "progress_meter": options.get("progress_meter", False),
+        }
 
     @staticmethod
     def _method_from_dict(options: dict[str, Any] | None) -> Any:
@@ -1432,7 +1429,7 @@ class DynamiqsBackend(Backend):
         """Restore vectorized final-only ME states, preserving subsystem dimensions."""
         state = result.final_state
         if solver == "mesolve" and state.vectorized:
-            # Native Expm 0.3.4 unvectorizes sampled saves but retains ylast as a vector.
+            # Native Expm (0.3.4 to 0.3.6) unvectorizes sampled saves but retains ylast as a vector.
             state = dq.asqarray(dq.unvectorize(state).to_jax(), dims=state.dims)
         return state
 

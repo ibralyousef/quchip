@@ -35,7 +35,7 @@ dill==0.4.1
     #   multiprocess
     #   pathos
     #   scqubits
-dynamiqs==0.3.4
+dynamiqs==0.3.6
     # via quchip (pyproject.toml)
 equinox==0.13.8
     # via
@@ -60,7 +60,7 @@ ipython==9.16.1
     #   pyvis
 ipython-pygments-lexers==1.1.1
     # via ipython
-jax==0.6.2
+jax==0.11.0
     # via
     #   quchip (pyproject.toml)
     #   diffrax
@@ -68,7 +68,7 @@ jax==0.6.2
     #   equinox
     #   lineax
     #   optimistix
-jaxlib==0.6.2
+jaxlib==0.11.0
     # via jax
 jaxtyping==0.3.11
     # via
@@ -111,6 +111,7 @@ librt==0.15.0
 lineax==0.1.0
     # via
     #   diffrax
+    #   dynamiqs
     #   optimistix
 loky==3.5.6
     # via quchip (pyproject.toml)

@@ -4,6 +4,12 @@ This file records notable user-visible changes to quchip.
 
 ## Unreleased
 
+- The dynamiqs backend targets dynamiqs 0.3.6, whose qarray rewrite broke the
+  previous import. The `dynamiqs` extra requires dynamiqs 0.3.6 or newer and
+  caps jax below 0.11.1 until a dynamiqs release includes dynamiqs/dynamiqs#1145.
+  Stochastic Dynamiqs `options` are passed as native solver keywords:
+  `save_states`, `cartesian_batching` and `save_extra`, plus `t0` and
+  `nmaxclick` for `jssesolve`.
 - Custom devices can use declared operator names for ports and observables,
   and existing lowering, raising and number hooks for T1/T2 channels.
   Elimination supports non-capacitive mediated exchange, derives decay

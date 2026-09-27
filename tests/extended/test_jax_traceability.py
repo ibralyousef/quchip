@@ -411,7 +411,7 @@ def test_dynamiqs_from_canonical_operator_accepts_traced_dia_offsets() -> None:
 @pytest.mark.optional_backend
 def test_dynamiqs_preserves_static_dia_structure_with_traced_values() -> None:
     """Differentiable DIA values lower sparsely when their offsets are static."""
-    pytest.importorskip("dynamiqs")
+    dq = pytest.importorskip("dynamiqs")
     from quchip.backend.dynamiqs import DynamiqsBackend
 
     backend = DynamiqsBackend()
@@ -428,9 +428,9 @@ def test_dynamiqs_preserves_static_dia_structure_with_traced_values() -> None:
             subsystem_labels=("q",),
         )
         native = backend.from_canonical_operator(canonical)
-        seen["type"] = type(native).__name__
+        seen["layout"] = native.layout
         return backend.to_array(native)
 
     rebuilt = lower(jnp.asarray(3.0))
-    assert seen["type"] == "SparseDIAQArray"
+    assert seen["layout"] is dq.dia
     np.testing.assert_allclose(np.asarray(rebuilt), [[0.0, 3.0], [0.0, 0.0]])
