@@ -1067,7 +1067,7 @@ class CanonicalOperator:
         Two crosstalk-rebuilt operators carrying the same coefficients
         collapse to the same key so they batch into one solve slot.
         Under ``jax.jit`` the payload is a tracer (possibly hidden inside
-        a backend qarray wrapper, e.g. dynamiqs ``SparseDIAQArray``);
+        a backend qarray wrapper, e.g. a sparse-DIA dynamiqs ``QArray``);
         :func:`contains_tracer` detects that and the key falls back to
         layout + shape/dtype structure only, so ``tobytes()`` is never
         called on a tracer and two equivalent traced operators in
