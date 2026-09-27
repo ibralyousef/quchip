@@ -1,6 +1,6 @@
 """Validate numerical outcomes at the Dynamiqs integration boundary.
 
-Dynamiqs 0.3.4 discards this status after integration. Keep the adapter local:
+Dynamiqs 0.3.6 discards this status after integration. Keep the adapter local:
 native integrators still own equations, saving, controllers and adjoints.
 """
 
@@ -21,14 +21,17 @@ from quchip.utils.jax_utils import contains_tracer
 
 
 def solve_with_status(H: Any, jumps: list[Any], state: Any, times: Any,
-                      observables: Any, *, solver: str, options: Any,
-                      method: Any, gradient: Any = None) -> tuple[Any, Any]:
-    """Run one native lane, retaining status for Diffrax-backed methods."""
+                      observables: Any, *, solver: str, method: Any, gradient: Any = None,
+                      **options: Any) -> tuple[Any, Any]:
+    """Run one native lane, retaining status for Diffrax-backed methods.
+
+    ``options`` are the native solver keyword arguments (``save_states``, ...).
+    """
     ordinary = (dq.method.Euler, dq.method.Dopri5, dq.method.Dopri8,
                 dq.method.Tsit5, dq.method.Kvaerno3, dq.method.Kvaerno5)
     rouchon = (dq.method.Rouchon1, dq.method.Rouchon2, dq.method.Rouchon3)
     if type(method) not in ordinary + (rouchon if solver == "mesolve" else ()):
-        kwargs = dict(exp_ops=observables, options=options, method=method, gradient=gradient)
+        kwargs = dict(exp_ops=observables, method=method, gradient=gradient, **options)
         result = (dq.mesolve(H, jumps, state, times, **kwargs) if solver == "mesolve"
                   else dq.sesolve(H, state, times, **kwargs))
         return result, expm_status(result)
@@ -42,7 +45,7 @@ def solve_with_status(H: Any, jumps: list[Any], state: Any, times: Any,
         module = rouchon_integrator if type(method) in rouchon else diffrax_integrator
         constructor = getattr(module, f"{solver}_{type(method).__name__.lower()}_integrator_constructor")
     except (ImportError, AttributeError) as exc:
-        raise RuntimeError("Native batch status requires the Dynamiqs 0.3.4 integrator interface.") from exc
+        raise RuntimeError("Native batch status requires the Dynamiqs 0.3.6 integrator interface.") from exc
 
     H = astimeqarray(H)
     observables = observables or None
@@ -53,11 +56,11 @@ def solve_with_status(H: Any, jumps: list[Any], state: Any, times: Any,
         extra["Ls"] = jumps
     else:
         _check_sesolve_args(H, state, observables)
+        extra["result_class"] = dq.SESolveResult  # master-equation constructors bind their own
     method.assert_supports_gradient(gradient)
     integrator = constructor(
         H=H, y0=state, ts=check_times(times, "tsave"), Es=observables,
-        method=method, gradient=gradient, options=options.initialise(),
-        result_class=dq.MESolveResult if solver == "mesolve" else dq.SESolveResult, **extra,
+        method=method, gradient=gradient, options=dq.Options(**options).initialise(), **extra,
     )
     saveat = dx.SaveAt(subs=[
         dx.SubSaveAt(ts=integrator.ts, fn=lambda t, y, args: integrator.save(y)),

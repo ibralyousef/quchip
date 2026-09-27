@@ -138,8 +138,9 @@ transient field responses.
 
 Use the native name in `solver`. `run_args` forwards native call keywords;
 `options` contains the native integrator options. For stochastic Dynamiqs calls,
-`options` is a dictionary of `dq.Options` fields, while `method` and `gradient`
-belong in `run_args`. Native required arguments remain required. quchip supplies
+`options` holds native solver keywords (`save_states`, `cartesian_batching` and
+`save_extra`; `jssesolve` also takes `t0` and `nmaxclick`), while `method` and
+`gradient` belong in `run_args`. Native required arguments remain required. quchip supplies
 no stochastic method, timestep, trajectory count, or stopping policy.
 
 ```python
@@ -197,7 +198,7 @@ the native timestep to check discretization and norm/positivity errors. Native
 advanced jump-sampling averages include the no-click contribution; an unweighted
 mean of the retained jump paths does not reproduce them.
 
-Dynamiqs 0.3.4 `Event` can exhaust `nmaxclick` before completing evolution.
+Dynamiqs 0.3.6 `Event` can exhaust `nmaxclick` before completing evolution.
 The raw result remains accessible, but quchip analysis views reject that incomplete
 evolution. Increase the buffer and rerun. Fixed-step click buffers can truncate
 records without truncating state evolution; inspect saturation before interpreting
@@ -211,14 +212,15 @@ including repeated sets. Legacy uint32 keys have a trailing dimension of two.
 `solve_many([problem, ...])` preserves each point's explicit keys. Solving a built
 batch point alone replays its assigned noise. Quantum partitioning is skipped.
 
-Validated native contracts use QuTiP 5.2.3 and Dynamiqs 0.3.4; CI also checks QuTiP
+Validated native contracts use QuTiP 5.2.3 and Dynamiqs 0.3.6; CI also checks QuTiP
 5.3.0. Dynamiqs diffusive SSE supports outer JIT with a static tuple time grid.
 Its fixed-noise Euler pathwise derivative is checked against a central finite
 difference. This is not an unbiased ensemble-gradient claim for jump events.
-Dynamiqs 0.3.4 SME supports eager execution and outer vmap with shared concrete
-efficiencies and times. Different efficiencies use separate `solve_many` groups.
-Its public tuple-time and outer-JIT validation limitations are retained; full SME
-JIT is not supported by that dependency. No solver replacement is used.
+Dynamiqs SME supports eager execution. Outer vmap with shared concrete
+efficiencies and times, and the lack of full SME JIT, were last checked on
+Dynamiqs 0.3.4. Different efficiencies use separate `solve_many` groups.
+Its public tuple-time and outer-JIT validation limitations are retained.
+No solver replacement is used.
 
 See [QuTiP Monte Carlo](https://qutip.readthedocs.io/en/stable/guide/dynamics/dynamics-monte.html),
 [Dynamiqs stochastic solvers](https://www.dynamiqs.org/stable/python_api/integrators/dsmesolve.html),

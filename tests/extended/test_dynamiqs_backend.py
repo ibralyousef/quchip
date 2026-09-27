@@ -61,7 +61,7 @@ def test_fock_noise_and_physical_observables_preserve_sparse_layout() -> None:
     result = chip.resolve(frame="lab")
     assert result.collapse_terms
     assert {term.operator.layout for term in result.collapse_terms} == {"dia"}
-    assert type(chip.observable(q0, "charge")).__name__ == "SparseDIAQArray"
+    assert chip.observable(q0, "charge").layout is dynamiqs.dia
 
 
 def test_native_batch_stack_preserves_compatible_dia_layout(backend: DynamiqsBackend) -> None:
@@ -70,7 +70,7 @@ def test_native_batch_stack_preserves_compatible_dia_layout(backend: DynamiqsBac
 
     stacked = backend._stack_qarray_batch(operators)
 
-    assert type(stacked).__name__ == "SparseDIAQArray"
+    assert stacked.layout is dynamiqs.dia
     assert stacked.shape == (3, 4, 4)
     npt.assert_allclose(
         np.asarray(backend.to_array(stacked)),
