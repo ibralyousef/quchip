@@ -19,36 +19,65 @@ QuTiP is the default backend. The `dynamiqs` extra enables JAX-native solver, gr
 
 ## Tests
 
-Run the complete test suite with:
+Every PR adding a feature must include new or extended `unit` and/or `e2e`
+tests for the added behavior. PRs adding physics must also add or extend tests
+in `validation`, with an independent numerical reference, an analytic limit,
+or a convergence check appropriate to the claim. Keep a representative cheap
+physics check in the daily suites as well. Assert physical quantities and
+meaningful tolerances; execution, output shape, or a finite gradient alone
+does not establish correctness.
+
+Use the two daily suites while developing:
 
 ```bash
+python -m pytest -m unit
+python -m pytest -m e2e
+```
+
+`unit` checks small deterministic components and API contracts. `e2e` covers
+integration workflows and physics, including every physics sentinel. Aim for
+under 30 seconds for units and 3–5 minutes for E2E on a developer machine;
+use `--durations=20` to inspect regressions. These are runtime targets, not
+guarantees across machines or optional dependencies. CI stops the unit step
+after two minutes and the E2E step after ten minutes to bound runaway checks.
+
+Expensive gradients, convergence studies, full guide replays, and exhaustive
+checks remain in `validation`.
+Run them separately, or run all tests:
+
+```bash
+python -m pytest -m validation --durations=20
 python -m pytest
 ```
 
-The suite is also divided into lanes:
+Validation runs in one pytest process, including in pre-merge CI. Measure
+changes with this sequential command; parallel wall time does not establish
+a cheaper suite. Five minutes is the target, not a measured CI guarantee.
+Preserve independent numerical references, failure paths and statistical
+sample sizes when reducing repeated setup or solver work.
 
-```bash
-python -m pytest -m core
-python -m pytest -m physics_sentinel
-python -m pytest -m extended
-python -m pytest -m "not (core or physics_sentinel)"
-```
+Every collected test belongs to exactly one of these suites. Mark small test
+modules with `pytestmark = pytest.mark.unit` and expensive functions with
+`@pytest.mark.validation`. For an expensive parameter value, use
+`pytest.param(value, marks=pytest.mark.validation)`. Unmarked tests enter `e2e`,
+so new tests run in PR CI by default. Conflicting suite markers fail collection. Keep meaningful cheap
+checks; choose validation candidates by cost and coverage overlap, while
+retaining representative numerical oracles in E2E. Coverage overlap alone
+does not show that two tests check the same assertion.
 
-- `core` covers analytical behavior and public API contracts.
-- `physics_sentinel` checks simulation-backed physics invariants.
-- `extended` contains slower and long-tail coverage.
-- `not (core or physics_sentinel)` runs the remainder, including example tests.
+The location markers `core`, `physics_sentinel`, `extended`, and `examples`
+remain available for focused work. They do not promise a runtime budget.
 
 ### CI and merging
 
 | Event | Checks |
 | --- | --- |
-| PR opened or updated | Lint/types and `core or physics_sentinel` on Python 3.11 and 3.12 |
-| `ready-to-merge` added to the current PR commit | Remaining tests on Python 3.11 |
+| PR opened or updated | Lint/types, then separate `unit` and `e2e` runs on Python 3.11 and 3.12 |
+| `ready-to-merge` added to the current PR commit | `validation` on Python 3.11 |
 | Push to `main` | Relevant docs build/deployment; no repeated test or benchmark run |
-| Manual pre-merge run | Full test suite |
+| Manual pre-merge run | `validation` on Python 3.11 |
 | Manual benchmark run | Full benchmark ladder against the selected comparison ref |
-| Weekly dependency canary | Full suite on Python 3.11 and 3.12 with fresh dependencies |
+| Weekly dependency canary | `unit` and `e2e` on Python 3.11 and 3.12 with fresh dependencies |
 
 The required fast and pre-merge checks together cover the full suite without
 repeating the fast tests on Python 3.11. Re-add `ready-to-merge` after updating
@@ -56,6 +85,14 @@ a PR; a label on an older commit does not approve the new one. Documentation
 and release metadata use lightweight validation. Source, tests, executable
 examples (including Markdown), tooling, and CI policy require the test lanes.
 An unreadable change list fails classification.
+
+Validation runs only for an explicit merge attempt or a manual pre-merge run;
+regular PR updates and scheduled dependency checks do not run it. Until the
+merge attempt, the required `pre-merge full suite` check fails before installing
+dependencies. That check name is retained for branch protection: its validation
+run completes the coverage supplied by the separate unit and E2E checks.
+Manual dispatch runs validation on the selected ref; use the PR label when
+requesting the required check for a PR.
 
 The `main` ruleset requires the PR branch to include current `main` before
 merging. Its configuration is recorded in
@@ -71,10 +108,15 @@ Test public behavior and physical invariants, not implementation details. A beha
 Before opening a pull request, run:
 
 ```bash
-python -m pytest
+python -m pytest -m unit
+python -m pytest -m e2e
 ruff check .
 python -m mypy quchip tests/typing/external_declarative_models.py
 ```
+
+Run new or changed validation tests locally while developing the physics.
+Run the complete validation suite at merge readiness, through `ready-to-merge`
+or a manual pre-merge run, as described above.
 
 Ruff uses a 120-character line limit. Public API docstrings use NumPy-style sections and imperative summaries ending with periods. Every test has a one-line docstring stating the invariant under test.
 

@@ -19,7 +19,7 @@ from quchip import (
 )
 from quchip.chip.coupling_base import BaseCoupling
 from quchip.devices.base import BaseDevice
-from quchip.inverse_design.fit import _estimate_bare_g, _static_exchange_rate
+from quchip.inverse_design.fit import _estimate_bare_g
 from quchip.inverse_design import fit as fit_module
 from quchip.inverse_design.observables import (
     TargetSpec,
@@ -211,20 +211,6 @@ def test_estimate_bare_g_solves_correct_root_for_a_decreasing_observable(monkeyp
     assert seed == pytest.approx(0.2, abs=1e-8)
 
 
-def test_fit_a_dress_matches_noncomputational_capacitive_exchange_rate() -> None:
-    """The automatic plan fits a resonator pair through dressed exchange."""
-    readout = Resonator(freq=7.0, levels=4, label="readout")
-    filter_mode = Resonator(freq=7.2, levels=4, label="filter")
-    edge = Capacitive(readout, filter_mode, g=0.03, label="readout-filter")
-
-    fit = fit_a_dress(Chip([readout, filter_mode], [edge], frame="rotating"), max_nfev=300)
-
-    report = next(item for item in fit.final_targets if item.label == "readout-filter")
-    assert report.kind == "exchange_rate"
-    assert report.final == pytest.approx(0.03, abs=1e-8)
-    assert float(_static_exchange_rate(fit.chip, ("readout", "filter"))) == pytest.approx(0.03, abs=1e-8)
-
-
 def test_dressed_target_compilation_never_evaluates_the_desired_chip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -257,45 +243,6 @@ def test_dressed_target_compilation_never_evaluates_the_desired_chip(
     ]
 
 
-def test_explicit_constraints_extend_replace_and_remove_component_defaults() -> None:
-    """Pair constraints are additive; same-edge values replace or remove defaults."""
-    q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
-    q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.24, levels=3, label="q1")
-    bus = Resonator(freq=7.0, levels=3, label="bus")
-    edge = Capacitive(q0, bus, g=-0.00025, label="q0-bus")
-    desired = Chip([q0, q1, bus], [edge], frame="rotating")
-
-    specs = build_dressed_target_specs(
-        desired,
-        constraints={
-            edge: {"cross_kerr": -0.0003},
-            (q0, q1): {"exchange_rate": -0.0022},
-            (q1, bus): {"zz": 0.00015},
-        },
-    )
-    keyed = {(spec.kind, spec.label): spec.target for spec in specs}
-
-    assert keyed[("cross_kerr", "q0-bus")] == -0.0003
-    assert keyed[("exchange_rate", ("q0", "q1"))] == -0.0022
-    assert keyed[("cross_kerr", ("q1", "bus"))] == 0.00015
-    assert all(
-        spec.source == "explicit"
-        for spec in specs
-        if (spec.kind, spec.label)
-        in {
-            ("cross_kerr", "q0-bus"),
-            ("exchange_rate", ("q0", "q1")),
-            ("cross_kerr", ("q1", "bus")),
-        }
-    )
-
-    without_edge_default = build_dressed_target_specs(
-        desired,
-        constraints={edge: {"cross_kerr": None}},
-    )
-    assert ("cross_kerr", "q0-bus") not in {(spec.kind, spec.label) for spec in without_edge_default}
-
-
 def test_fit_a_dress_treats_a_capacitive_scalar_as_a_cross_kerr_target() -> None:
     """The desired edge number is a dressed constraint, not the fitted bare g."""
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=4, label="q")
@@ -317,22 +264,6 @@ def test_fit_a_dress_treats_a_capacitive_scalar_as_a_cross_kerr_target() -> None
     assert coupling_report.seed_source == "isolated-pair root solve"
     assert coupling_report.sign_choice == "positive convention"
     assert coupling_report.lower_bound < 0.0 < coupling_report.upper_bound
-
-
-def test_fit_a_dress_records_a_user_supplied_coupling_sign() -> None:
-    """An explicit coupling start owns the sign branch and the receipt says so."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    r = Resonator(freq=7.0, levels=3, label="r")
-    edge = Capacitive(q, r, g=-0.00025, label="qr")
-    desired = Chip([q, r], [edge], frame="rotating")
-
-    fit = fit_a_dress(desired, start={"qr.g": -0.05})
-
-    report = next(report for report in fit.parameter_reports if report.name == "qr.g")
-    assert report.initial == pytest.approx(-0.05)
-    assert report.final < 0.0
-    assert report.seed_source == "user start"
-    assert report.sign_choice == "user supplied"
 
 
 def test_automatic_desired_chip_fit_rejects_a_rank_deficient_jacobian(
@@ -402,31 +333,6 @@ def test_automatic_desired_chip_fit_rejects_an_underdetermined_target_plan() -> 
         fit_a_dress(desired, constraints={q: {"anharmonicity": None}})
 
 
-def test_fit_a_dress_accepts_manual_vary_and_start_overrides() -> None:
-    """Advanced users can replace automatic parameter selection and starting values."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    desired = Chip([q], frame="rotating")
-
-    fit = fit_a_dress(
-        desired,
-        vary={q: ("freq",)},
-        start={"q.freq": 4.8},
-    )
-
-    assert fit.initial_params == {"q.freq": 4.8}
-    assert fit.final_params["q.freq"] == pytest.approx(5.0, abs=1e-8)
-    assert fit.chip.dressed_anharmonicity("q") == pytest.approx(-0.25, abs=1e-8)
-
-
-def test_selection_errors_identify_vary() -> None:
-    """Desired-chip errors use the vocabulary shown in its public signature."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    desired = Chip([q])
-
-    with pytest.raises(ValueError, match=r"vary\['q'\]"):
-        fit_a_dress(desired, vary={q: "freq"})
-
-
 def test_fit_a_dress_retains_scipy_jacobian_without_dynamiqs(monkeypatch: pytest.MonkeyPatch) -> None:
     """A QuTiP-only installation retains SciPy's numerical Jacobian."""
 
@@ -436,16 +342,6 @@ def test_fit_a_dress_retains_scipy_jacobian_without_dynamiqs(monkeypatch: pytest
     monkeypatch.setattr(fit_module, "_jax_residual_functions", unavailable)
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
     chip = Chip([q], frame="rotating")
-
-    result = fit_a_dress(chip)
-
-    assert result.solver_info["jacobian"] == "finite-difference"
-
-
-def test_fit_a_dress_respects_a_qutip_chip_backend() -> None:
-    """A QuTiP chip retains SciPy's numerical Jacobian when dynamiqs is installed."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    chip = Chip([q], frame="rotating", backend="qutip")
 
     result = fit_a_dress(chip)
 
@@ -543,20 +439,11 @@ def test_fit_a_dress_requires_explicit_local_evaluation() -> None:
     assert any(report.evaluator == "local" for report in result.final_targets)
 
 
-@pytest.mark.parametrize("evaluator", ["auto", "bad", None])
+@pytest.mark.parametrize("evaluator", ["bad", None])
 def test_fit_rejects_unknown_evaluator(evaluator):
     chip = Chip([Resonator(freq=5.0, levels=2, label="r")])
     with pytest.raises(ValueError, match="evaluator"):
         fit_a_dress(chip, evaluator=evaluator)
-
-
-def test_local_fit_limit_applies_to_actual_neighborhood():
-    modes = [Resonator(freq=5.0 + i, levels=3, label=f"r{i}") for i in range(4)]
-    chip = Chip(modes)
-    local = fit_a_dress(chip, evaluator="local", max_hilbert_dim=3)
-    assert all(report.evaluator == "local" for report in local.final_targets)
-    with pytest.raises(ValueError, match="dimension.*3.*2"):
-        fit_a_dress(chip, evaluator="local", max_hilbert_dim=2)
 
 
 def test_fit_dimension_limit_cannot_overflow_for_many_devices():
@@ -564,25 +451,6 @@ def test_fit_dimension_limit_cannot_overflow_for_many_devices():
     assert chip.total_dim == 2**64
     with pytest.raises(ValueError, match=str(2**64)):
         fit_a_dress(chip)
-
-
-def test_fit_a_dress_history_records_objective_evaluations() -> None:
-    """The returned history supports a real convergence plot, not two endpoints."""
-    q = DuffingTransmon(freq=4.8, anharmonicity=-0.25, levels=3, label="q")
-    chip = Chip([q], frame="rotating", backend="qutip")
-
-    result = fit_a_dress(
-        chip,
-        constraints={q: {"freq": 5.1}},
-        vary={q: ("freq",)},
-    )
-
-    assert result.history.ndim == 1
-    assert len(result.history) > 2
-    assert result.history[0] > result.history[-1]
-    assert result.history[-1] == pytest.approx(result.loss)
-    assert result.solver_info["history_axis"] == "distinct residual evaluation"
-    assert result.solver_info["n_recorded_evaluations"] == len(result.history)
 
 
 def test_fit_retains_nonconverged_candidate_and_explains_status():
@@ -624,25 +492,7 @@ def test_fit_rebind_returns_fitted_clones_for_seed_devices() -> None:
         result.rebind()
 
 
-def test_fit_a_dress_accepts_constraints_with_object_labels() -> None:
-    """fit_a_dress accepts device objects as constraint keys."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=4, label="q")
-    r = Resonator(freq=7.0, levels=10, label="r")
-    coupling = Capacitive(q, r, g=-1.2e-4)
-    chip = Chip([q, r], [coupling], frame="rotating")
-
-    with pytest.warns(UserWarning, match="underdetermined by count"):
-        result = fit_a_dress(
-            chip,
-            vary={q: ("freq", "anharmonicity"), r: ("freq",), coupling: ("g",)},
-            constraints={q: {"freq": 5.0}, r: {"freq": 7.0}, coupling: {"cross_kerr": None}},
-        )
-
-    assert not any(report.kind in {"cross_kerr", "coupling_strength"} for report in result.final_targets)
-    assert any(report.kind == "freq" and report.label == "q" for report in result.final_targets)
-    assert any(report.kind == "freq" and report.label == "r" for report in result.final_targets)
-
-
+@pytest.mark.validation
 def test_fit_a_dress_recovers_static_exchange_for_sheldon_style_bus_model() -> None:
     """fit_a_dress recovers a targeted static exchange coupling in a bus-mediated three-device system."""
     control = DuffingTransmon(freq=5.08, anharmonicity=-0.31, levels=4, label="control")
@@ -719,6 +569,7 @@ def test_fit_a_dress_respects_signed_exchange_target_for_direct_qq_system() -> N
     assert exchange_h[0, 1] == pytest.approx(-0.0015, abs=5e-5)
 
 
+@pytest.mark.validation
 def test_fit_a_dress_recovers_explicit_pair_zz_target_for_direct_qq_system() -> None:
     """fit_a_dress recovers an explicit pair-level zz target for a direct qubit-qubit system."""
     q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")

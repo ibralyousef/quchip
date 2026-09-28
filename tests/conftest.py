@@ -39,8 +39,14 @@ def backend() -> QuTiPBackend:
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Assign test-lane markers from the folder layout."""
+    """Assign a daily suite and retain the independent location markers."""
     for item in items:
+        suites = {name for name in ("unit", "e2e", "validation") if item.get_closest_marker(name)}
+        if len(suites) > 1:
+            raise pytest.UsageError(f"Conflicting test suites for {item.nodeid}: {sorted(suites)}")
+        if not suites:
+            item.add_marker(pytest.mark.e2e)
+
         rel_path = Path(str(item.fspath)).resolve().relative_to(PROJECT_ROOT)
         filename = rel_path.name
 

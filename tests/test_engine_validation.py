@@ -12,6 +12,9 @@ import pytest
 from quchip.engine.ir import EngineResult, ResolvedSLH
 
 
+pytestmark = pytest.mark.unit
+
+
 def _empty_engine_result(**kwargs) -> EngineResult:
     """Build an empty resolved model for metadata-only validation tests."""
     return EngineResult(

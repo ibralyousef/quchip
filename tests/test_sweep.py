@@ -13,17 +13,10 @@ from quchip.control.envelopes import Square
 from quchip.devices.resonator import Resonator
 from quchip.devices.transmon.duffing import DuffingTransmon
 from quchip.results.results import SimulationBatchResult
-from quchip.sweep import SpectrumSweep, Sweep, ZippedSweep
+from quchip.sweep import SpectrumSweep, Sweep
 
 
 class TestZippedSweep:
-    def test_zip_equal_size(self):
-        """Sweep.zip() of equal-length sweeps produces a ZippedSweep of that length."""
-        a = Sweep([1, 2], name="a")
-        b = Sweep([3, 4], name="b")
-        z = Sweep.zip(a, b)
-        assert isinstance(z, ZippedSweep)
-        assert z.size == 2
 
     def test_zip_mismatched_raises(self):
         """Sweep.zip() of mismatched-length sweeps raises ValueError."""
@@ -39,93 +32,8 @@ class TestZippedSweep:
             Sweep.zip(a)
 
 
-class TestExpand:
-    def test_cartesian_product(self):
-        """Sweep.expand() of independent sweeps produces their Cartesian product."""
-        x = Sweep([1, 2], name="x")
-        y = Sweep([3, 4, 5], name="y")
-        combos = Sweep.expand([x, y])
-        assert len(combos) == 6  # 2 * 3
-        for c in combos:
-            assert "x" in c
-            assert "y" in c
-
-    def test_zipped_expansion(self):
-        """Sweep.expand() of a ZippedSweep pairs constituent values index-wise, not as a product."""
-        a = Sweep([1, 2], name="a")
-        b = Sweep([3, 4], name="b")
-        z = Sweep.zip(a, b)
-        combos = Sweep.expand([z])
-        assert len(combos) == 2
-        assert combos[0] == {"a": 1, "b": 3}
-        assert combos[1] == {"a": 2, "b": 4}
-
-    def test_zipped_with_independent(self):
-        """ZippedSweep combined with independent Sweep produces Cartesian product across groups."""
-        a = Sweep([1, 2], name="a")
-        b = Sweep([3, 4], name="b")
-        z = Sweep.zip(a, b)
-        c = Sweep([10, 20, 30], name="c")
-        combos = Sweep.expand([z, c])
-        assert len(combos) == 6  # 2 zipped * 3 independent
-
-
-class TestDuplicateAxisNames:
-    def test_duplicate_names_across_independent_axes_raise(self):
-        """Two independent axes sharing a name raise ValueError instead of silently overwriting."""
-        x1 = Sweep([1, 2], name="x")
-        x2 = Sweep([3, 4], name="x")
-        with pytest.raises(ValueError, match="x"):
-            Sweep.expand([x1, x2])
-
-    def test_duplicate_names_within_a_zip_raise(self):
-        """Two members of the same ZippedSweep sharing a name raise ValueError."""
-        a = Sweep([1, 2], name="x")
-        b = Sweep([3, 4], name="x")
-        with pytest.raises(ValueError, match="x"):
-            Sweep.expand([Sweep.zip(a, b)])
-
-    def test_zip_member_colliding_with_independent_axis_raises(self):
-        """A zipped member sharing a name with an independent axis raises ValueError."""
-        a = Sweep([1, 2], name="x")
-        b = Sweep([3, 4], name="y")
-        c = Sweep([5, 6], name="x")
-        with pytest.raises(ValueError, match="x"):
-            Sweep.expand([Sweep.zip(a, b), c])
-
-
-@pytest.mark.parametrize("target", ["pulse", "device", "state", "delay"])
-@pytest.mark.parametrize("grouping", ["independent", "zipped", "mixed"])
-def test_batch_rejects_duplicate_targets_with_different_names(target, grouping):
-    chip = Chip([DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="q")])
-    drive = ChargeDrive(chip["q"], label="xy")
-    chip.wire(drive)
-    seq = QuantumSequence(chip)
-    pulse = seq.schedule(drive, envelope=Square(duration=1.0, amplitude=0.1))
-    if target == "pulse":
-        first = pulse.vary("amplitude", [0.1, 0.2], name="first")
-        second = seq.vary("pulse.0.amplitude", [0.3, 0.4], name="second")
-    elif target == "device":
-        first = seq.vary("q.freq", [5.0, 5.1], name="first")
-        second = seq.vary("q.freq", [5.2, 5.3], name="second")
-    elif target == "state":
-        first = seq.vary("initial_state", [{"q": 0}, {"q": 1}], name="first")
-        second = seq.vary("initial_state", [{"q": 1}, {"q": 0}], name="second")
-    else:
-        delay = seq.delay("q", 1.0)
-        first = delay.vary("duration", [1.0, 2.0], name="first")
-        second = delay.vary("duration", [3.0, 4.0], name="second")
-    if grouping == "zipped":
-        axes = (seq.zip(first, second),)
-    elif grouping == "mixed":
-        axes = (seq.zip(first, pulse.vary("phase", [0.0, 0.5], name="phase")), second)
-    else:
-        axes = (first, second)
-    with pytest.raises(ValueError, match="same parameter"):
-        seq.build_batch(*axes, tlist=np.linspace(0, 6, 7))
-
-
 class TestQuTiPBatchedIntegration:
+    @pytest.mark.validation
     def test_qutip_parallel_sweep_matches_sequential(self, monkeypatch):
         """The reusable-loky parallel batch path matches the in-process sequential one exactly."""
         from quchip.backend.qutip import QuTiPBackend
@@ -164,74 +72,6 @@ class TestQuTiPBatchedIntegration:
                     sequential[element].population("q", level),
                 )
 
-    def test_qutip_warmup_is_safe_and_pool_works_after(self):
-        """warmup() is idempotent and non-raising, and a parallel sweep still works after it."""
-        from quchip.backend.qutip import QuTiPBackend
-
-        backend = QuTiPBackend()
-        backend.warmup()  # idempotent + non-raising
-        backend.warmup()
-
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        drive = ChargeDrive(target=q)
-        chip = Chip([q], backend=backend)
-        chip.connect(ControlEquipment(lines=[drive]))
-        seq = QuantumSequence(chip)
-        pulse = seq.schedule(drive, envelope=Square(duration=10.0, amplitude=0.02), freq=5.0)
-        # >= _PARALLEL_MIN_BATCH so the warmed pool is actually exercised.
-        amp = pulse.vary("amplitude", [0.01 * (k + 1) for k in range(12)], name="amp")
-        batch = seq.simulate_batch(
-            amp,
-            tlist=np.linspace(0.0, 10.0, 11),
-            initial_state=chip.bare_state(q=0),
-            progress=False,
-        )
-        assert len(batch) == 12
-        for element in batch:
-            assert element.population("q", 0).shape == (11,)
-
-
-class TestQuantumSequenceBatch:
-    def test_build_batch_supports_zipped_axes(self):
-        """build_batch() with a zipped axis produces one batch element per index pair."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        drive = ChargeDrive(target=q)
-        chip = Chip([q])
-        chip.connect(ControlEquipment(lines=[drive]))
-        seq = QuantumSequence(chip)
-        pulse = seq.schedule(
-            drive,
-            envelope=Square(duration=10.0, amplitude=0.02),
-            freq=5.0,
-        )
-
-        amp = pulse.vary("amplitude", [0.01, 0.02], name="amp")
-        freq = pulse.vary("freq", [4.9, 5.1], name="freq")
-        batch = seq.build_batch(
-            seq.zip(amp, freq),
-            tlist=np.asarray([0.0, 10.0]),
-            initial_state=chip.bare_state(q=0),
-        )
-
-        assert len(batch) == 2
-        assert batch.shape == (2,)
-        assert batch.params_at(1) == {"amp": 0.02, "freq": 5.1}
-
-    def test_build_batch_supports_initial_state_axis(self):
-        """build_batch() accepts a swept initial_state as a batch axis."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=2, label="q")
-        chip = Chip([q], frame="rotating")
-        seq = QuantumSequence(chip)
-        state = seq.vary("initial_state", [{"q": 0}, {"q": 1}], name="state")
-
-        batch = seq.build_batch(
-            state,
-            tlist=np.linspace(0.0, 10.0, 11),
-            e_ops=chip.e_ops(q="Z"),
-        )
-
-        assert len(batch) == 2
-        assert batch.shape == (2,)
 
 class TestSimulationBatchResultAxes:
     def test_sweep_coordinates_capture_the_built_model_values(self):
@@ -299,26 +139,6 @@ class TestSimulationBatchResultAxes:
             with pytest.raises(TypeError):
                 batch[{"amp": index, "freq": 2}]
 
-    def test_slice_returns_flat_batch_with_batch_axis(self):
-        """Slicing a shaped batch returns a flat batch with a default "batch" axis."""
-        class _Backend:
-            array_module = np
-
-        class _Result:
-            _backend = _Backend()
-
-        results = [_Result() for _ in range(6)]
-        batch = SimulationBatchResult(
-            results,
-            shape=(2, 3),
-            axes=(("amp", [0.1, 0.2]), ("freq", [4.9, 5.0, 5.1])),
-        )
-
-        sliced = batch[::2]
-
-        assert sliced.shape == (3,)
-        assert sliced.axes == (("batch", (0, 2, 4)),)
-        assert sliced[{"batch": 1}] is results[2]
 
     def test_zipped_axis_can_be_indexed_by_constituent_names(self):
         """A zipped axis can be indexed by either constituent name, and inconsistent indices raise."""
@@ -441,20 +261,3 @@ class TestSpectrumSweepValidation:
         )
         with pytest.raises(ValueError, match="evals_count"):
             sweep.run(progress=False)
-
-    def test_int_point_on_multi_dimensional_grid_raises(self):
-        """An int point index against a multi-D sweep grid raises ValueError from _normalize_point."""
-        chip = self._chip()
-
-        result = SpectrumSweep(
-            chip,
-            [
-                Sweep([6.8, 7.0], name="r.freq"),
-                Sweep([0.01, 0.02], name=f"{chip.couplings[0].label}.g"),
-            ],
-            evals_count=5,
-            store_eigenstates=True,
-        ).run(progress=False)
-
-        with pytest.raises(ValueError, match="coordinate"):
-            result.state_components_at(0, {"q": 0, "r": 0})

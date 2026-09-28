@@ -100,6 +100,7 @@ def test_render_plots_writes_one_simple_comparison(tmp_path: Path) -> None:
     assert all(output.stat().st_size > 1_000 for output in outputs)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("family", ["qutip", "dynamiqs"])
 def test_benchmark_solves_current_api_without_state_history(family: str) -> None:
     """Benchmark the current storage contract against native population traces."""

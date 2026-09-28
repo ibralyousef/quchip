@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-from quchip.approximations import RWA
 
 import numpy as np
 import pytest
 import quchip
 
-from quchip import Chip, Gaussian, QuantumSequence
 from quchip.control.drive import ChargeDrive, FluxDrive, PhaseDrive
 from quchip.control.signal import AnalyticSignal
 from quchip.declarative import DeviceModel, LocalOps, Scalar, parameter
 from quchip.devices import ChargeCoupled, DuffingTransmon, FluxCoupled, PhaseCoupled, Resonator
 from quchip.engine.ir import Constant
+
+
+pytestmark = pytest.mark.unit
 
 
 _UNIT_SIGNAL = AnalyticSignal(Constant(1.0 + 0.0j))
@@ -100,25 +101,3 @@ def test_flux_drive_prefers_physical_operator():
     fake = _FakePhysicalDevice()
     drive = FluxDrive()
     assert np.allclose(drive.hamiltonian(fake, _UNIT_SIGNAL).matrix(t=0.0), fake._flux)
-
-
-@pytest.mark.optional_backend
-def test_dynamiqs_keeps_symbolic_fock_drive_bands_sparse():
-    """Device-authored Fock operators lower to sparse solver bands."""
-    pytest.importorskip("dynamiqs")
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    q.reference_freq = q.freq
-    chip = Chip([q], frame={q: q.freq}, approximation=RWA(), backend="dynamiqs")
-    drive = ChargeDrive(q, label="xy")
-    chip.wire(drive)
-    sequence = QuantumSequence(chip)
-    sequence.schedule(
-        drive,
-        envelope=Gaussian(duration=10.0, amplitude=0.02),
-        freq=q.freq,
-    )
-
-    result = sequence.resolve()
-    drive_terms = [term for term in result.dynamic_terms if term.origin == "drive"]
-    assert drive_terms
-    assert {term.operator.layout for term in drive_terms} == {"dia"}

@@ -82,6 +82,7 @@ def test_exact_elimination_also_retains_the_network_boundary() -> None:
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_transformed_port_is_differentiable_in_coupling_strength() -> None:
     """The effective external rate remains differentiable through SW reduction."""
@@ -101,7 +102,7 @@ def test_transformed_port_is_differentiable_in_coupling_strength() -> None:
         coupling = eliminate(chip, "r").chip.resolve().slh.external_channels[0].coupling
         return jnp.abs(coupling.to_dense()[0, 1]) ** 2
 
-    gradient = jax.grad(effective_rate)(jnp.asarray(0.04))
+    gradient = jax.jit(jax.grad(effective_rate))(jnp.asarray(0.04))
 
     np.testing.assert_allclose(gradient, 0.03 * np.sin(2.0 * 0.04), rtol=1e-5)
 

@@ -179,6 +179,7 @@ def test_describe_reports_the_planned_frame() -> None:
     assert "residual" in frame_block and "q2" in frame_block and "-0.4 GHz" in frame_block
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("workflow", ["rabi", "coupled_pair", "dispersive_readout", "two_photon"])
 def test_auto_frame_reproduces_current_default_observables(workflow: str) -> None:
     """Flip readiness: the planned frame gives the same demodulated observables as the explicit frame."""

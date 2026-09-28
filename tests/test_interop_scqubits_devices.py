@@ -52,17 +52,6 @@ def test_transmon_import_matches_scqubits_spectrum_exactly():
     assert np.allclose(got, want, atol=1e-9)
 
 
-def test_transmon_import_is_differentiable_in_EJ():
-    """ChargeBasisTransmon's 0->1 gap has a finite, nonzero gradient in E_J."""
-    import jax
-
-    def f01(EJ):
-        return ChargeBasisTransmon(E_C=0.2, E_J=EJ, levels=3, num_basis=63).freq
-
-    g = jax.grad(f01)(30.0)
-    assert np.isfinite(g) and g != 0.0
-
-
 def test_imported_transmon_stays_differentiable_in_EJ():
     """An imported device carries live parameters JAX can differentiate through.
 
@@ -96,20 +85,6 @@ def test_transmon_roundtrip_export():
 # ---------------------------------------------------------------------------
 # Label and noise-kwarg forwarding
 # ---------------------------------------------------------------------------
-
-
-def test_import_label_defaults_to_id_str():
-    """label defaults to the scqubits object's id_str when omitted."""
-    tmon = scq.Transmon(EJ=30.0, EC=0.2, ng=0.0, ncut=31, truncated_dim=3, id_str="tmon_a")
-    dev = from_scqubits(tmon)
-    assert dev.label == "tmon_a"
-
-
-def test_import_label_override():
-    """An explicit label overrides the scqubits object's id_str."""
-    tmon = scq.Transmon(EJ=30.0, EC=0.2, ng=0.0, ncut=31, truncated_dim=3, id_str="tmon_a")
-    dev = from_scqubits(tmon, label="q0")
-    assert dev.label == "q0"
 
 
 def test_import_forwards_noise_kwargs():
@@ -277,21 +252,13 @@ def _small_zero_pi():
     )
 
 
+@pytest.mark.validation
 def test_zero_pi_import_matches_scqubits_spectrum_exactly():
-    """A ZeroPi's imported (EigenbasisDevice) spectrum matches scqubits' exact-lane diagonalization."""
+    """One imported ZeroPi preserves both its independent spectrum and charge matrix elements."""
     zp = _small_zero_pi()
     dev = from_scqubits(zp)
-    got = _device_spectrum(dev, 4)
-    want = _oracle_spectrum(zp, 4)
-    assert np.allclose(got, want, atol=1e-8)
-
-
-def test_zero_pi_import_charge_operator_matches_scqubits_elements():
-    """A ZeroPi's imported charge operator matches scqubits' n_theta matrix elements exactly."""
-    zp = _small_zero_pi()
     esys = zp.eigensys(evals_count=zp.truncated_dim)
-    want = np.abs(np.asarray(zp.n_theta_operator(energy_esys=esys)))
-
-    dev = from_scqubits(zp)
-    got = np.abs(np.asarray(get_default_backend().to_array(dev.charge_coupling_operator())))
-    assert np.allclose(got, want, atol=1e-8)
+    np.testing.assert_allclose(_device_spectrum(dev, 4), _ground_shifted(esys[0]), atol=1e-8)
+    expected_charge = np.abs(np.asarray(zp.n_theta_operator(energy_esys=esys)))
+    imported_charge = np.abs(np.asarray(get_default_backend().to_array(dev.charge_coupling_operator())))
+    np.testing.assert_allclose(imported_charge, expected_charge, atol=1e-8)

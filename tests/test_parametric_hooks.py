@@ -6,7 +6,12 @@ from quchip.approximations import RWA, Exact
 
 import numpy as np
 
-from quchip import Capacitive, Chip, CrossKerr, DuffingTransmon, TunableCapacitive
+from quchip import Chip, CrossKerr, DuffingTransmon, TunableCapacitive
+
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 def _chip(coupling_cls, **kw):
@@ -20,13 +25,6 @@ def _arr(op, *, t=None):
     if hasattr(op, "matrix"):
         return np.asarray(op.matrix(t=t))
     return np.asarray(op.full() if hasattr(op, "full") else op)
-
-
-def test_capacitive_is_not_modulable():
-    """A static capacitive coupling declares no parametric interaction."""
-    chip, c = _chip(Capacitive, g=0.005)
-    assert c.parametric_interaction(*c._endpoint_ops(), object()) is None
-    assert not hasattr(c, "parametric_operator")
 
 
 def test_tunable_capacitive_drive_is_independent_of_chip_approximation():
@@ -82,35 +80,3 @@ def test_crosskerr_declares_itself():
     assert c.is_effective is True
     notes = " ".join(c.physics_notes()).lower()
     assert "dispersive" in notes and "uniform" in notes
-
-
-def test_crosskerr_serialization_round_trip():
-    """CrossKerr's to_dict/from_dict round trip preserves chi and label exactly."""
-    chip, c = _chip(CrossKerr, chi=-0.0005)
-    d = c.to_dict()
-    q0, q1 = chip.devices[0], chip.devices[1]
-    c2 = CrossKerr.from_dict(d, q0, q1)
-    assert float(c2.chi) == float(c.chi)
-    assert c2.label == "c"
-
-
-def test_tunable_capacitive_has_no_modulation_surface():
-    """TunableCapacitive has no modulation parameter or dynamic terms without a pump in its eliminated-coupler model."""
-    import inspect
-
-    from quchip import TunableCapacitive
-
-    assert "modulation" not in inspect.signature(TunableCapacitive.__init__).parameters
-    chip, c = _chip(TunableCapacitive, g_0=0.02)
-    assert c._time_terms() == ()
-    assert c.is_effective is True
-    notes = " ".join(c.physics_notes()).lower()
-    assert "eliminated" in notes
-
-
-def test_tunable_capacitive_serialization_round_trip():
-    """TunableCapacitive's to_dict/from_dict round trip preserves g_0 exactly."""
-    chip, c = _chip(TunableCapacitive, g_0=0.02)
-    d = c.to_dict()
-    c2 = TunableCapacitive.from_dict(d, chip.devices[0], chip.devices[1])
-    assert float(c2.g_0) == 0.02

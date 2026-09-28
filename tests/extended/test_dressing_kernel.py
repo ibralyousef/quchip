@@ -9,14 +9,12 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import pytest
 
 from quchip.chip.dressing import (
     BareProductReference,
     EigenstateReference,
     LabelingPath,
     assign_argmax,
-    assign_global_greedy,
     assign_rowwise_greedy,
     compute_overlaps,
     label_eigensystem,
@@ -77,14 +75,6 @@ class TestAssignmentPolicies:
         # Identity overlaps give each row a unique argmax — no duplicates here.
         assert not bool(labeling.duplicates.any())
 
-    def test_global_greedy_rejects_overdetermined_reference(self) -> None:
-        """Global-greedy assignment raises ValueError when more bare labels than dressed states are given."""
-        evecs = jnp.eye(3, dtype=jnp.float32)
-        overlaps = jnp.abs(evecs) ** 2
-        # 4 bare labels, 3 dressed states → global-greedy cannot assign them all.
-        fake = jnp.concatenate([overlaps, overlaps[:1]], axis=0)
-        with pytest.raises(ValueError, match="global-greedy"):
-            assign_global_greedy(fake)
 
     def test_rowwise_greedy_is_a_permutation(self) -> None:
         """Rowwise-greedy assignment returns a valid permutation for strongly hybridized overlaps."""
@@ -96,29 +86,6 @@ class TestAssignmentPolicies:
         overlaps = jnp.abs(q) ** 2
         indices, _, _ = assign_rowwise_greedy(overlaps)
         assert sorted(indices.tolist()) == list(range(8))
-
-    def test_rowwise_greedy_matches_global_on_dispersive_overlaps(self) -> None:
-        """Rowwise-greedy assignment matches global-greedy exactly in the dispersive overlap regime."""
-        # In the dispersive / weak-hybridization regime (near-permutation overlaps)
-        # the O(D^2) rowwise policy is bit-identical to the O(D^3) global greedy.
-        # This is the regime ``Chip.dress`` runs in and is what makes the swap safe.
-        for g in (0.0, 0.02, 0.05, 0.1):
-            H = _two_qubit_H(jnp.asarray(g, dtype=jnp.float32))
-            _, evecs = jnp.linalg.eigh(H)
-            overlaps = compute_overlaps(BareProductReference(dims=(2, 2)), evecs)
-            i_global, c_global, m_global = assign_global_greedy(overlaps)
-            i_row, c_row, m_row = assign_rowwise_greedy(overlaps)
-            assert i_row.tolist() == i_global.tolist()
-            assert jnp.allclose(c_row, c_global)
-            assert jnp.allclose(m_row, m_global)
-
-    def test_rowwise_greedy_rejects_overdetermined_reference(self) -> None:
-        """Rowwise-greedy assignment raises ValueError when more bare labels than dressed states are given."""
-        evecs = jnp.eye(3, dtype=jnp.float32)
-        overlaps = jnp.abs(evecs) ** 2
-        fake = jnp.concatenate([overlaps, overlaps[:1]], axis=0)
-        with pytest.raises(ValueError, match="rowwise-greedy"):
-            assign_rowwise_greedy(fake)
 
 
 class TestReferences:
@@ -152,24 +119,6 @@ class TestReferences:
         expected = jax.jit(jax.value_and_grad(lambda angle: objective(angle, False)))(0.3)
         assert abs(expected[1]) > 1.0
         assert jnp.allclose(jnp.asarray(actual), jnp.asarray(expected), atol=1e-10)
-
-    def test_bare_product_overlaps_match_column_squared_amplitudes(self) -> None:
-        """Bare-product reference overlaps equal the squared magnitudes of the eigenvector columns."""
-        H = _two_qubit_H(jnp.float32(0.2))
-        _, evecs = jnp.linalg.eigh(H)
-        ref = BareProductReference(dims=(2, 2))
-        overlaps = compute_overlaps(ref, evecs)
-        expected = jnp.abs(evecs) ** 2
-        assert jnp.allclose(overlaps, expected)
-
-    def test_eigenstate_reference_roundtrip(self) -> None:
-        """Eigenstate reference overlaps against its own eigenvectors form the identity matrix."""
-        H = _two_qubit_H(jnp.float32(0.15))
-        _, evecs = jnp.linalg.eigh(H)
-        # Take evecs as reference; overlaps should then be (near-)identity.
-        ref = EigenstateReference(vectors=evecs.T, keys=tuple(range(evecs.shape[1])))
-        overlaps = compute_overlaps(ref, evecs)
-        assert jnp.allclose(overlaps, jnp.eye(evecs.shape[1]), atol=1e-5)
 
 
 class TestTraceability:

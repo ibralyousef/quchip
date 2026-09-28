@@ -2,6 +2,7 @@ name: pre-merge
 
 # Completes the suite after the required fast lanes. Documentation-only PRs
 # skip it; other changes require ready-to-merge on the current PR commit.
+# Manual dispatch explicitly requests the same validation suite.
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
@@ -27,15 +28,25 @@ jobs:
   test-full:
     name: pre-merge full suite
     needs: changes
-    if: ${{ needs.changes.outputs.full_ci == 'true' }}
+    # Only a successful docs-only classification may skip the required check.
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.full_ci != 'false') }}
     runs-on: ubuntu-latest
     steps:
+      - name: Require a valid change classification
+        env:
+          CLASSIFICATION_RESULT: ${{ needs.changes.result }}
+          FULL_CI: ${{ needs.changes.outputs.full_ci }}
+        run: |
+          if [[ "$CLASSIFICATION_RESULT" != "success" || "$FULL_CI" != "true" ]]; then
+            echo "::error::Could not classify this change."
+            exit 1
+          fi
       - name: Require an explicit merge attempt
         if: >-
           github.event_name == 'pull_request' &&
           (github.event.action != 'labeled' || github.event.label.name != 'ready-to-merge')
         run: |
-          echo "::error::Add the ready-to-merge label to run the full suite for this commit."
+          echo "::error::Add (or remove and re-add) ready-to-merge to run validation for this commit."
           exit 1
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
@@ -46,9 +57,7 @@ jobs:
             ci-constraints-*.txt
       - run: uv venv --python 3.11
       - run: uv pip install -e '.[test,dynamiqs]' -c ci-constraints-3.11.txt
-      # The separately required fast lanes already cover core + physics_sentinel.
-      # Use the complement so new markers cannot silently fall out of CI.
-      - if: github.event_name == 'pull_request'
-        run: uv run --no-sync pytest -m "not (core or physics_sentinel)"
-      - if: github.event_name == 'workflow_dispatch'
-        run: uv run --no-sync pytest
+      # Validation completes the separately required unit and E2E suites.
+      # Collection enforces exactly one of those three suites for each test.
+      - name: Validation tests
+        run: uv run --no-sync pytest -m validation --durations=20

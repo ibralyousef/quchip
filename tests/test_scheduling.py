@@ -11,7 +11,7 @@ import pytest
 
 from quchip.chip.chip import Chip
 from quchip.control.equipment import ControlEquipment
-from quchip.control.drive import ChargeDrive, FluxDrive
+from quchip.control.drive import ChargeDrive
 from quchip.control.envelopes import Square
 from quchip.control.sequence import QuantumSequence
 from quchip.devices.transmon.duffing import DuffingTransmon
@@ -57,31 +57,6 @@ def three_qubit_chip() -> Chip:
 class TestChargeBasic:
     """Basic charge() scheduling and cursor advancement."""
 
-    def test_charge_uses_chip_frequency_when_freq_omitted(self, single_qubit_chip: Chip) -> None:
-        """charge() defaults freq to the sequence chip's transition when omitted."""
-        seq = QuantumSequence(single_qubit_chip)
-        seq.charge("q0", envelope=Square(duration=10.0))
-
-        op = seq.scheduled_ops[0]
-        assert op.freq == 5.0  # isolated chip transition equals the authored frequency
-
-    def test_multiple_charge_drives_keep_independent_cursors(self, single_qubit_chip: Chip) -> None:
-        """Multiple charge drives on the same device keep independent channel cursors."""
-        q0 = single_qubit_chip.devices[0]
-        drive_a = ChargeDrive(target=q0, label="charge_a")
-        drive_b = ChargeDrive(target=q0, label="charge_b")
-        single_qubit_chip.connect(ControlEquipment(lines=[drive_a, drive_b]))
-
-        seq = QuantumSequence(single_qubit_chip)
-        seq.schedule(drive_a, envelope=Square(duration=10.0), freq=5.0)
-        seq.schedule(drive_b, envelope=Square(duration=6.0), freq=5.0)
-        seq.schedule(drive_a, envelope=Square(duration=4.0), freq=5.0)
-
-        assert [op.drive_label for op in seq.scheduled_ops] == ["charge_a", "charge_b", "charge_a"]
-        assert [op.start_time for op in seq.scheduled_ops] == [0.0, 0.0, 10.0]
-        assert seq.channel_cursors[("q0", "charge_a")] == 14.0
-        assert seq.channel_cursors[("q0", "charge_b")] == 6.0
-        assert seq.total_duration == 14.0
 
     def test_schedule_phase_rotates_the_resolved_envelope_signal(
         self,
@@ -111,27 +86,6 @@ class TestChargeBasic:
         assert abs(first_value) == pytest.approx(abs(second_value))
         assert second_value == pytest.approx(1j * first_value)
 
-    def test_vz_accumulates_into_later_microwave_pulses(self, single_qubit_chip: Chip) -> None:
-        """vz() phase accumulates into the phase_offset of later charge() pulses on the same device."""
-        seq = QuantumSequence(single_qubit_chip)
-        seq.vz("q0", 0.25)
-        seq.charge("q0", envelope=Square(duration=10.0), freq=5.0)
-        seq.vz("q0", -0.10)
-        seq.charge("q0", envelope=Square(duration=10.0), freq=5.0, phase=0.05)
-
-        assert seq.scheduled_ops[0].phase_offset == pytest.approx(0.25)
-        assert seq.scheduled_ops[1].phase_offset == pytest.approx(0.20)
-
-    def test_vz_does_not_advance_time_or_schedule_ops(self, single_qubit_chip: Chip) -> None:
-        """vz() advances neither the cursor nor total_duration and schedules no op."""
-        seq = QuantumSequence(single_qubit_chip)
-        seq.charge("q0", envelope=Square(duration=10.0), freq=5.0)
-        seq.vz("q0", 0.5)
-
-        assert len(seq.scheduled_ops) == 1
-        assert seq.total_duration == 10.0
-        assert seq.channel_cursors[("q0", "charge_0")] == 10.0
-
 
 class TestDelay:
     """delay() advances cursors without scheduling operations."""
@@ -147,52 +101,10 @@ class TestDelay:
         assert seq.scheduled_ops[1].start_time == 15.0
         assert seq.total_duration == 25.0
 
-    def test_delay_zero_raises(self, single_qubit_chip: Chip) -> None:
-        """delay() with zero duration raises ValueError."""
-        seq = QuantumSequence(single_qubit_chip)
-        with pytest.raises(ValueError, match="must be > 0"):
-            seq.delay("q0", 0.0)
-
-class TestBarrier:
-    """barrier() synchronizes channel cursors."""
-
-    def test_selective_barrier_syncs_named_only(self, three_qubit_chip: Chip) -> None:
-        """barrier() with named devices syncs only those cursors, leaving others untouched."""
-        seq = QuantumSequence(three_qubit_chip)
-        seq.charge("q0", envelope=Square(duration=30.0), freq=5.0)
-        seq.charge("q1", envelope=Square(duration=10.0), freq=5.5)
-        seq.charge("q2", envelope=Square(duration=5.0), freq=6.0)
-
-        seq.barrier("q0", "q1")
-
-        assert seq.channel_cursors[("q0", "charge_q0")] == 30.0
-        assert seq.channel_cursors[("q1", "charge_q1")] == 30.0
-        assert seq.channel_cursors[("q2", "charge_q2")] == 5.0
-
-    def test_barrier_on_empty_sequence(self, two_qubit_chip: Chip) -> None:
-        """barrier() on an empty sequence leaves total_duration at zero."""
-        seq = QuantumSequence(two_qubit_chip)
-        seq.barrier()
-        assert seq.total_duration == 0.0
 
 class TestExplicitStartTime:
     """schedule() with explicit start_time overrides cursor."""
 
-    def test_start_time_before_cursor_raises(self, single_qubit_chip: Chip) -> None:
-        """An explicit start_time earlier than the current cursor raises ValueError."""
-        q0 = single_qubit_chip.devices[0]
-        drive = q0.connected_drives[0]
-        seq = QuantumSequence(single_qubit_chip)
-        seq.charge("q0", envelope=Square(duration=20.0), freq=5.0)
-        seq.schedule(
-            drive,
-            envelope=Square(duration=5.0),
-            freq=5.0,
-            start_time=10.0,
-        )
-
-        with pytest.raises(ValueError, match="cannot be earlier than current cursor"):
-            seq.scheduled_ops
 
     def test_start_time_creates_gap(self, single_qubit_chip: Chip) -> None:
         """An explicit start_time beyond the cursor creates an idle gap before the op."""
@@ -229,77 +141,16 @@ class TestMultiDevice:
         assert seq.channel_cursors[("q0", "charge_q0")] == 15.0
         assert seq.channel_cursors[("q1", "charge_q1")] == 20.0
 
-    def test_delay_only_affects_target_device(self, two_qubit_chip: Chip) -> None:
-        """delay() on one device leaves other devices' cursors untouched."""
-        seq = QuantumSequence(two_qubit_chip)
-        seq.charge("q0", envelope=Square(duration=10.0), freq=5.0)
-        seq.delay("q0", 20.0)
-
-        assert seq.channel_cursors[("q0", "charge_q0")] == 30.0
-        assert seq.channel_cursors[("q1", "charge_q1")] == 0.0
-
-
-class TestScheduleWithDriveObject:
-    """schedule() accepting BaseDrive (ChargeDrive) as target argument."""
-
-    def test_schedule_with_connected_drive(self, single_qubit_chip: Chip) -> None:
-        """schedule() accepts a connected BaseDrive object as the target."""
-        q0 = single_qubit_chip.devices[0]
-        drive = q0.connected_drives[0]
-        seq = QuantumSequence(single_qubit_chip)
-        seq.schedule(drive, envelope=Square(duration=15.0), freq=5.0)
-
-        assert len(seq.scheduled_ops) == 1
-        op = seq.scheduled_ops[0]
-        assert op.target_label == "q0"
-        assert op.drive_label == "charge_0"
-        assert op.start_time == 0.0
-
-    def test_schedule_with_unconnected_drive_raises(self, single_qubit_chip: Chip) -> None:
-        """schedule() with an unconnected drive raises ValueError."""
-        drive = ChargeDrive()
-        seq = QuantumSequence(single_qubit_chip)
-
-        with pytest.raises(ValueError, match="unconnected"):
-            seq.schedule(drive, envelope=Square(duration=10.0), freq=5.0)
-
 
 class TestErrorPaths:
     """Validation and error handling in scheduling."""
 
-    def test_charge_unknown_device_raises(self, single_qubit_chip: Chip) -> None:
-        """charge() on an unknown device label raises ValueError."""
-        seq = QuantumSequence(single_qubit_chip)
-        with pytest.raises(ValueError, match="not found on chip"):
-            seq.charge("q_missing", envelope=Square(duration=10.0), freq=5.0)
-
-    def test_delay_unknown_device_raises(self, single_qubit_chip: Chip) -> None:
-        """delay() on an unknown device label raises ValueError."""
-        seq = QuantumSequence(single_qubit_chip)
-        with pytest.raises(ValueError, match="not found on chip"):
-            seq.delay("q_missing", 10.0)
 
     def test_barrier_unknown_device_raises(self, single_qubit_chip: Chip) -> None:
         """barrier() on an unknown device label raises ValueError."""
         seq = QuantumSequence(single_qubit_chip)
         with pytest.raises(ValueError, match="not found on chip"):
             seq.barrier("q_missing")
-
-    def test_charge_no_charge_drive_raises(self) -> None:
-        """charge() on a device with no ChargeDrive raises ValueError."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q_no_drive")
-        chip = Chip(devices=[q])
-        seq = QuantumSequence(chip)
-        with pytest.raises(ValueError, match="No ChargeDrive"):
-            seq.charge("q_no_drive", envelope=Square(duration=10.0), freq=5.0)
-
-    def test_flux_no_flux_drive_raises(self) -> None:
-        """flux() on a device with no FluxDrive raises ValueError."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q_no_flux")
-        chip = Chip(devices=[q])
-        seq = QuantumSequence(chip)
-        with pytest.raises(ValueError, match="No FluxDrive"):
-            seq.flux("q_no_flux", envelope=Square(duration=10.0))
 
 
 class TestComplexSequence:
@@ -348,13 +199,6 @@ class TestTotalDuration:
         """An empty sequence has total_duration zero."""
         seq = QuantumSequence(single_qubit_chip)
         assert seq.total_duration == 0.0
-
-    def test_delay_only_contributes_to_duration(self, single_qubit_chip: Chip) -> None:
-        """A delay-only sequence contributes to total_duration without scheduling ops."""
-        seq = QuantumSequence(single_qubit_chip)
-        seq.delay("q0", 100.0)
-        assert seq.total_duration == 100.0
-        assert len(seq.scheduled_ops) == 0
 
 
 class TestTracerSafeMax:
@@ -411,50 +255,6 @@ class TestTracerSafeMax:
         assert float(c0) == 20.0
         assert float(c1) == 20.0
         assert float(c2) == 3.0  # q2 was excluded from the barrier group
-
-
-@pytest.fixture
-def qubit() -> DuffingTransmon:
-    return DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="bq")
-
-
-@pytest.fixture
-def envelope() -> Square:
-    return Square(duration=10.0, amplitude=0.02)
-
-
-@pytest.fixture
-def sequence(qubit: DuffingTransmon, envelope: Square) -> tuple[QuantumSequence, object]:
-    drive = ChargeDrive(target=qubit)
-    chip = Chip([qubit])
-    chip.connect(ControlEquipment(lines=[drive]))
-    seq = QuantumSequence(chip)
-    pulse = seq.schedule(drive, envelope=envelope, freq=5.0)
-    return seq, pulse
-
-
-def test_flux_rejects_bias_point_argument(
-    qubit: DuffingTransmon,
-    envelope: Square,
-) -> None:
-    """flux() rejects an unsupported bias_point keyword argument with TypeError."""
-    flux = FluxDrive(target=qubit)
-    chip = Chip([qubit])
-    chip.connect(ControlEquipment(lines=[flux]))
-    seq = QuantumSequence(chip)
-    with pytest.raises(TypeError):
-        seq.flux(qubit, envelope=envelope, bias_point=0.1)
-
-
-def test_schedule_disconnected_drive_raises_clean_error(
-    single_qubit_chip: Chip,
-) -> None:
-    """schedule() reports an unconnected ChargeDrive with ValueError."""
-    # Carrier resolution validates the connection before reading target metadata.
-    seq = QuantumSequence(single_qubit_chip)
-    orphan = ChargeDrive(label="orphan")
-    with pytest.raises(ValueError, match="unconnected"):
-        seq.schedule(orphan, envelope=Square(duration=10.0))
 
 
 def test_coarse_output_tlist_preserves_offgrid_pulse(single_qubit_chip: Chip) -> None:

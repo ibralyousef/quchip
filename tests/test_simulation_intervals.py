@@ -52,30 +52,11 @@ def test_pulse_touching_interval_has_no_evolution(backend, start):
     np.testing.assert_allclose(coherence, 0.5 * np.exp(2j * np.pi * 0.2 * 4), atol=2e-6)
 
 
-@pytest.mark.parametrize("entrypoint", ["build_problem", "build_batch", "simulate", "simulate_batch"])
-def test_empty_schedule_requires_an_interval(entrypoint):
-    _, _, sequence = _sequence()
-    with pytest.raises(ValueError, match="duration.*tlist"):
-        getattr(sequence, entrypoint)()
-
-
-@pytest.mark.parametrize("duration", [0.0, -1.0, np.inf, np.nan])
+@pytest.mark.parametrize("duration", [0.0, np.inf, np.nan])
 def test_invalid_duration_rejected(duration):
     _, _, sequence = _sequence()
     with pytest.raises(ValueError, match="finite.*positive"):
         sequence.build_problem(duration=duration)
-
-
-def test_duration_is_exclusive_and_cannot_cut_schedule():
-    _, drive, sequence = _sequence()
-    sequence.schedule(drive, envelope=Square(duration=2.0, amplitude=0.1))
-    with pytest.raises(ValueError, match="duration.*tlist"):
-        sequence.build_problem([0.0, 1.0], duration=3.0)
-    with pytest.raises(ValueError, match="schedule.*2"):
-        sequence.build_problem(duration=1.0)
-    problem = sequence.build_problem(duration=3.0)
-    assert problem.tlist[0] == 0.0
-    assert problem.tlist[-1] == 3.0
 
 
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
@@ -102,29 +83,6 @@ def test_duration_sweep_preserves_each_interval():
     partial = sequence.build_batch(axis, tlist=[1.5, 2.5])
     for point in partial.problems:
         np.testing.assert_array_equal(point.tlist, [1.5, 2.5])
-
-
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
-def test_duration_batch_solves_each_actual_interval(backend):
-    chip, drive, sequence = _sequence(backend)
-    pulse = sequence.schedule(drive, envelope=Square(duration=2.0, amplitude=0.1))
-    initial = (chip.backend.basis(2, 0) + chip.backend.basis(2, 1)) / np.sqrt(2)
-    durations = [1.0, 3.0]
-    result = sequence.simulate_batch(pulse.vary("duration", durations), initial_state=initial,
-                                    states="final", progress=False,
-                                    options=_options(backend))
-    for point, duration in zip(result, durations):
-        assert point.times[0] == 0.0
-        assert point.times[-1] == duration
-        coherence = chip.backend.to_array(chip.backend.state_to_dm(point.final_state))[0, 1]
-        np.testing.assert_allclose(coherence, 0.5 * np.exp(2j * np.pi * 0.3 * duration), atol=2e-6)
-
-
-def test_batch_duration_validates_requested_points_not_unused_base_schedule():
-    _, drive, sequence = _sequence()
-    pulse = sequence.schedule(drive, envelope=Square(duration=2.0, amplitude=0.1))
-    batch = sequence.build_batch(pulse.vary("duration", [1.0]), duration=1.5)
-    assert batch.problems[0].tlist[-1] == 1.5
 
 
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])

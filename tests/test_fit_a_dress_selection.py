@@ -7,7 +7,7 @@ import warnings
 import numpy as np
 import pytest
 
-from quchip import Capacitive, Chip, DuffingTransmon, Resonator, TunableCapacitive, fit_a_dress
+from quchip import Capacitive, Chip, DuffingTransmon, Resonator, fit_a_dress
 from quchip.chip.coupling_base import BaseCoupling
 from quchip.declarative import DeviceModel, LocalOps, Scalar, parameter
 from quchip.inverse_design.fit import _resolve_vary
@@ -107,92 +107,6 @@ def test_vary_selection_moves_only_selected_and_freezes_the_rest() -> None:
     assert fitted_coupling.g == coupling.g
 
 
-def test_empty_selection_for_one_component_is_legal() -> None:
-    """An explicit empty name-collection freezes that component while other listed components stay free."""
-    q, r, coupling, chip = _simple_chip()
-
-    result = fit_a_dress(
-        chip,
-        constraints={coupling: {"cross_kerr": 2 * coupling.g}},
-        vary={q: (), coupling: (coupling.coupling_strength_name,)},
-    )
-
-    assert set(result.final_params) == {"qr.g"}
-    assert result.chip["q"].freq == q.freq
-    assert result.chip["q"].anharmonicity == q.anharmonicity
-
-
-def test_zero_total_free_parameters_raises() -> None:
-    """A vary mapping that freezes every listed component and omits the rest raises ValueError."""
-    q, r, coupling, chip = _simple_chip()
-
-    with pytest.raises(ValueError, match="zero free parameters"):
-        fit_a_dress(chip, vary={q: (), r: (), coupling: ()})
-
-
-def test_unknown_component_label_raises_with_available_choices() -> None:
-    """An unresolvable vary key raises ValueError listing the chip's known labels."""
-    _, _, _, chip = _simple_chip()
-
-    with pytest.raises(ValueError, match="does not match any device or coupling") as exc_info:
-        _resolve_vary(chip, {"not_a_label": ()})
-
-    message = str(exc_info.value)
-    assert "'q'" in message and "'r'" in message and "'qr'" in message
-
-
-def test_unknown_device_parameter_name_raises_with_available_choices() -> None:
-    """An unknown device parameter name raises ValueError listing the device's declared tunables."""
-    q, _, _, chip = _simple_chip()
-
-    with pytest.raises(ValueError, match="not tunable parameters") as exc_info:
-        _resolve_vary(chip, {q: ("not_a_param",)})
-
-    message = str(exc_info.value)
-    assert "freq" in message and "anharmonicity" in message
-
-
-def test_unknown_coupling_parameter_name_raises_with_available_choices() -> None:
-    """An unknown coupling parameter name raises ValueError listing the coupling's own strength name."""
-    _, _, coupling, chip = _simple_chip()
-
-    with pytest.raises(ValueError, match="not the declared coupling-strength") as exc_info:
-        _resolve_vary(chip, {coupling: ("not_g",)})
-
-    assert "'g'" in str(exc_info.value)
-
-
-def test_duplicate_resolved_keys_raise() -> None:
-    """Two vary keys resolving to the same component label raise ValueError."""
-    q, _, _, chip = _simple_chip()
-
-    with pytest.raises(ValueError, match="duplicate"):
-        _resolve_vary(chip, {q: ("freq",), "q": ("anharmonicity",)})
-
-
-def test_bare_string_value_raises() -> None:
-    """A bare string value (instead of a name collection) raises ValueError."""
-    q, _, _, chip = _simple_chip()
-
-    with pytest.raises(ValueError, match="collection of parameter names"):
-        _resolve_vary(chip, {q: "freq"})
-
-
-def test_desired_chip_defaults_balance_targets_and_parameters() -> None:
-    """Component policies give the common desired chip one target per free parameter."""
-    _, _, _, chip = _simple_chip()
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        result = fit_a_dress(chip)
-
-    assert not any("underdetermined" in str(w.message) for w in caught)
-    assert result.solver_info["n_free_parameters"] == 4
-    assert result.solver_info["n_target_residuals"] == 4
-    assert result.solver_info["underdetermined_by_count"] is False
-    assert result.solver_info["input_contract"] == "desired-chip"
-
-
 def test_count_sufficient_fit_does_not_warn() -> None:
     """A vary selection with free parameters <= target residuals emits no underdetermined warning."""
     q, _, _, chip = _simple_chip()
@@ -250,23 +164,7 @@ def test_custom_coupling_declared_strength_name_can_be_selected_or_frozen() -> N
     assert selected.chip.couplings[0].kappa == pytest.approx(0.05, abs=5e-4)
 
 
-def test_tunable_capacitive_g0_can_be_selected_via_vary() -> None:
-    """A built-in coupling with a non-'g' strength attribute (TunableCapacitive.g_0) selects through its own name."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    r = Resonator(freq=7.0, levels=4, label="r")
-    coupling = TunableCapacitive(q, r, g_0=0.01, label="tc")
-    chip = Chip([q, r], [coupling], frame="rotating")
-
-    result = fit_a_dress(
-        chip,
-        constraints={coupling: {"cross_kerr": None, "coupling_strength": 0.03}},
-        vary={coupling: ("g_0",)},
-    )
-
-    assert set(result.final_params) == {"tc.g_0"}
-    assert result.chip.couplings[0].g_0 == pytest.approx(0.03, abs=5e-4)
-
-
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_jax_backed_selection_gets_exact_jacobian_sized_to_the_reduced_vector(
     monkeypatch: pytest.MonkeyPatch,

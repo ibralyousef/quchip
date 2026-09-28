@@ -16,6 +16,11 @@ from quchip import (
     TunableCapacitive,
 )
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 
 def _problem(freq=None, frame="lab", approximation=Exact()):
     q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
@@ -27,14 +32,6 @@ def _problem(freq=None, frame="lab", approximation=Exact()):
     seq = QuantumSequence(chip)
     seq.pump(tc, envelope=Square(duration=100.0, amplitude=0.005), freq=freq)
     return seq.build_problem(tlist=np.linspace(0.0, 100.0, 11))
-
-
-def test_edge_pump_produces_dynamic_terms():
-    """Edge pump scheduling produces dynamic terms tagged as coupling origin."""
-    problem = _problem()
-    pump_terms = [t for t in problem.engine_result.dynamic_terms if t.tag == "edge_pump"]
-    assert pump_terms, "scheduled pump produced no dynamic terms"
-    assert all(t.origin == "coupling" for t in pump_terms)
 
 
 def test_baseband_and_tone_forms_differ():

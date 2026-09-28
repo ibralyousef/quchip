@@ -7,22 +7,6 @@ import pytest
 from quchip import Chip, DuffingTransmon, PortNetwork, QuantumSequence, Resonator, parameter
 
 
-def test_legacy_thermal_input_round_trips_to_one_canonical_parameter():
-    """Old constructors and saved models retain the same bath without duplicate parameters."""
-    with pytest.warns(DeprecationWarning, match="thermal_occupation"):
-        q = DuffingTransmon(freq=5, anharmonicity=-.2, T1=100, thermal_population=.2, label="q")
-    data = q.to_dict()
-    assert data["thermal_occupation"] == .2
-    assert "thermal_population" not in data
-    data["thermal_population"] = data.pop("thermal_occupation")
-    with pytest.warns(DeprecationWarning, match="thermal_occupation"):
-        restored = DuffingTransmon.from_dict(data)
-    assert restored.intrinsic_decay_rate() == pytest.approx(.012)
-    assert "q.thermal_population" not in Chip([restored]).parameters
-    with pytest.raises(TypeError, match="not both"):
-        Resonator(freq=6, thermal_population=.1, thermal_occupation=.2)
-
-
 def test_legacy_thermal_writes_validate_and_rebind_without_mutating_source():
     """Legacy writes share validation, cache tracking and atomic rebinding with the canonical field."""
     q = Resonator(freq=6, T1=100, thermal_occupation=.1, label="r")

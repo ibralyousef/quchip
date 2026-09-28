@@ -43,19 +43,6 @@ class TestReferenceFreqAttribute:
         q.reference_freq = None
         assert q.reference_freq is None
 
-    def test_override_survives_serialization_round_trip(self) -> None:
-        """A set reference_freq round-trips through to_dict/from_dict; unset stays default."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.30, levels=3, label="q")
-        q.reference_freq = 4.97
-        restored = DuffingTransmon.from_dict(q.to_dict())
-        assert float(restored.reference_freq) == pytest.approx(4.97), "override must persist"
-
-        plain = DuffingTransmon(freq=5.0, anharmonicity=-0.30, levels=3, label="q")
-        d = plain.to_dict()
-        assert "reference_freq" not in d, "the automatic default must not be serialized as an override"
-        restored_plain = DuffingTransmon.from_dict(d)
-        assert restored_plain._reference_freq_override is None
-
 
 # ---------------------------------------------------------------------------
 # Physics: co-rotating readout

@@ -124,6 +124,7 @@ def test_rabi_backend_agreement() -> None:
     npt.assert_allclose(dyn, qutip, atol=1e-3, rtol=1e-3)
 
 
+@pytest.mark.validation
 def test_dispersive_backend_agreement() -> None:
     """Dispersive readout expectation traces from the qutip and dynamiqs backends agree."""
     qutip = _run_dispersive_expectation("qutip")
@@ -131,6 +132,7 @@ def test_dispersive_backend_agreement() -> None:
     npt.assert_allclose(dyn, qutip, atol=1e-3, rtol=1e-3)
 
 
+@pytest.mark.validation
 def test_cr_backend_agreement() -> None:
     """Cross-resonance expectation traces from the qutip and dynamiqs backends agree."""
     qutip = _run_cr_expectation("qutip")
@@ -169,6 +171,7 @@ def test_amplitude_array_phase_backend_agreement() -> None:
     npt.assert_allclose(dyn, qutip, atol=1e-3, rtol=1e-3)
 
 
+@pytest.mark.validation
 def test_multi_experiment_cr_batch_loss_supports_jax_grad() -> None:
     """One loss may differentiate a native batch of CR experiments."""
     _set_backend("dynamiqs")
@@ -203,39 +206,12 @@ def test_multi_experiment_cr_batch_loss_supports_jax_grad() -> None:
         targets = jnp.asarray([0.01, 0.02, 0.03])
         return jnp.sum((populations - targets) ** 2)
 
-    value, grad = jax.value_and_grad(loss)(jnp.asarray(0.02))
+    value, grad = jax.jit(jax.value_and_grad(loss))(jnp.asarray(0.02))
     assert jnp.isfinite(value)
     assert jnp.isfinite(grad)
 
 
-def test_unified_expect_method_on_dynamiqs() -> None:
-    """The unified expect() method returns full trace on dynamiqs backend."""
-    _set_backend("dynamiqs")
-    qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.3, levels=2, label="q")
-    drive = ChargeDrive(target=qubit, label="drive")
-    chip = Chip(
-        devices=[qubit],
-        control_equipment=ControlEquipment(lines=[drive]),
-        frame="rotating",
-        label="dynamiqs-unified-expect",
-    )
-
-    sequence = QuantumSequence(chip)
-    sequence.schedule(
-        drive,
-        envelope=Gaussian(duration=20.0, amplitude=0.02, sigmas=4),
-        freq=chip.freq("q"),
-    )
-    tlist = jnp.linspace(0.0, 20.0, 41)
-    result = sequence.simulate(tlist=tlist, e_ops=chip.e_ops(q="Z"))
-
-    values = result.expect("q")
-    assert np.asarray(values).shape[0] == len(result.times)
-
-    final = result.state()
-    assert final is not None
-
-
+@pytest.mark.validation
 def test_per_call_dynamiqs_backend_with_qutip_built_state() -> None:
     """backend="dynamiqs" scopes one call; a QuTiP-native psi0 is coerced."""
     # Process default stays QuTiP — the state below is a qutip.Qobj.
@@ -256,8 +232,11 @@ def test_per_call_dynamiqs_backend_with_qutip_built_state() -> None:
     tlist = np.linspace(0.0, 40.0, 81)
     psi0 = chip.state(q=0)  # QuTiP-native Qobj
 
-    res_dq = sequence.simulate(tlist=tlist, initial_state=psi0, backend="dynamiqs")
-    res_qt = sequence.simulate(tlist=tlist, initial_state=psi0)
+    res_dq = sequence.simulate(tlist=tlist, initial_state=psi0, backend="dynamiqs", e_ops=chip.e_ops(q="Z"))
+    res_qt = sequence.simulate(tlist=tlist, initial_state=psi0, e_ops=chip.e_ops(q="Z"))
+    assert np.asarray(res_dq.expect("q")).shape == (len(res_dq.times),)
+    npt.assert_allclose(res_dq.expect("q"), res_qt.expect("q"), atol=1e-5)
+    assert res_dq.state() is not None
 
     npt.assert_allclose(
         np.asarray(res_dq.population("q", level=1)),
@@ -277,6 +256,7 @@ def test_per_call_dynamiqs_backend_with_qutip_built_state() -> None:
     assert isinstance(chip.backend, QuTiPBackend)
 
 
+@pytest.mark.validation
 def test_per_call_dynamiqs_backend_preserves_composite_qutip_state_dims() -> None:
     """A QuTiP-built composite ket keeps its subsystem dimensions under the override."""
     q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.3, levels=2, label="q0")
@@ -315,6 +295,7 @@ def test_per_call_dynamiqs_batch_preserves_composite_qutip_state_dims() -> None:
         npt.assert_allclose(np.asarray(result.overlap(psi0)), 1.0, atol=1e-8)
 
 
+@pytest.mark.validation
 def test_per_call_dynamiqs_gradient_without_global_flip() -> None:
     """A jax.grad loss can pin dynamiqs per call while the default stays QuTiP."""
     tlist = jnp.linspace(0.0, 20.0, 41)

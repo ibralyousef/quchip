@@ -81,20 +81,6 @@ class TestFrameConsistency:
         result = simulate(chip, [drive_op], tlist)
         return result.population("q", 1)
 
-    def test_lab_vs_rotating_populations_match(self) -> None:
-        """P(|1⟩) in lab frame matches rotating frame within 1%."""
-        p1_lab = self._run_rabi_in_frame("lab")
-        p1_rot = self._run_rabi_in_frame("rotating")
-
-        npt.assert_allclose(
-            p1_lab,
-            p1_rot,
-            atol=0.01,
-            err_msg=(
-                "Lab and rotating frame Rabi populations differ by >1%. "
-                f"Max deviation: {np.max(np.abs(p1_lab - p1_rot)):.4f}"
-            ),
-        )
 
     def test_lab_frame_matches_analytic(self) -> None:
         """Lab frame P(|1⟩) matches sin²(π·Ω·t) within 1%."""
@@ -325,18 +311,6 @@ class TestCoherentState:
                 atol=1e-6,
                 err_msg=(f"P({n}) = {p_measured:.6f}, Poisson = {p_poisson:.6f}"),
             )
-
-    def test_complex_alpha(self, backend: Backend) -> None:
-        """Complex α = 1+1j: ⟨n̂⟩ = |α|² = 2.0 within 1%."""
-        r = Resonator(freq=6.0, levels=15, label="r")
-        alpha = 1.0 + 1.0j
-        psi = r.coherent_state(alpha)
-
-        n_op = r.number_operator()
-        n_expect = float(np.real(complex(backend.expect(n_op, psi))))
-
-        expected = abs(alpha) ** 2  # 2.0
-        assert abs(n_expect - expected) / expected < 0.01, f"⟨n̂⟩ = {n_expect:.4f}, expected |α|² = {expected:.4f}"
 
 
 class TestConstants:

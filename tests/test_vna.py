@@ -358,6 +358,7 @@ def test_coupling_free_output_takes_its_carrier_from_the_feeding_tone() -> None:
     assert quiet.signal_coherent_flux == pytest.approx(0.0)
 
 
+@pytest.mark.validation
 def test_distinct_tones_stay_valid_with_traced_network_scattering() -> None:
     """Reachability comes from the compiled structure, not from traced S values."""
     jax = pytest.importorskip("jax")
@@ -387,6 +388,7 @@ def test_distinct_tones_stay_valid_with_traced_network_scattering() -> None:
     assert jnp.isfinite(jax.jit(response)(jnp.asarray(0.5)))
 
 
+@pytest.mark.validation
 def test_cross_kerr_vna_keeps_zero_band_with_traced_local_frequency():
     import jax
     import jax.numpy as jnp
@@ -592,6 +594,7 @@ def test_finite_power_rejects_ambiguous_probes() -> None:
         other.finite_power(6.0, [0.01, 0.02], pump.vary("amplitude", [0.01, 0.02], name="amplitude"), input=input_port)
 
 
+@pytest.mark.validation
 def test_dynamiqs_finite_power_is_differentiable_in_amplitude() -> None:
     """The finite-power mean field stays differentiable through the stationary solve."""
     jax = pytest.importorskip("jax")
@@ -605,7 +608,7 @@ def test_dynamiqs_finite_power_is_differentiable_in_amplitude() -> None:
     def reflection(amplitude):
         return jnp.abs(VNA(chip, ports=[port]).finite_power(6.0, amplitude).ratio(port))
 
-    value, gradient = jax.value_and_grad(reflection)(jnp.asarray(0.05))
+    value, gradient = jax.jit(jax.value_and_grad(reflection))(jnp.asarray(0.05))
     assert jnp.isfinite(value) and jnp.isfinite(gradient)
     assert gradient != 0.0
 
@@ -982,6 +985,7 @@ def test_dynamiqs_linear_response_is_jittable_and_differentiable() -> None:
     assert jnp.isfinite(gradient)
 
 
+@pytest.mark.validation
 def test_dynamiqs_pumped_small_signal_response_is_jittable_and_differentiable() -> None:
     """Pumped Dynamiqs small-signal response is JIT-safe and differentiable."""
     pytest.importorskip("dynamiqs")
@@ -997,8 +1001,7 @@ def test_dynamiqs_pumped_small_signal_response_is_jittable_and_differentiable() 
         vna.pump(port, freq=6.0, amplitude=amplitude)
         return jnp.real(vna.sweep([6.0]).s11[0])
 
-    value = jax.jit(reflection)(jnp.asarray(0.01))
-    gradient = jax.grad(reflection)(jnp.asarray(0.01))
+    value, gradient = jax.jit(jax.value_and_grad(reflection))(jnp.asarray(0.01))
 
     assert jnp.isfinite(value)
     assert jnp.isfinite(gradient)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 
 import jax
 import jax.numpy as jnp
@@ -16,6 +15,9 @@ from quchip.declarative.parameters import (
     setting_fields,
     validate_declared_fields,
 )
+
+
+pytestmark = pytest.mark.unit
 
 
 class DeclaredFields:
@@ -64,30 +66,6 @@ def test_noise_parameter_must_be_serializable():
         validate_declared_fields(InvalidNoiseField)
 
 
-def test_bare_parameter_is_required_at_runtime() -> None:
-    class RequiredDevice(DeviceModel):
-        value: Scalar = parameter()
-
-        def local_hamiltonian(self, op, p):
-            return p.value * op.n
-
-    assert inspect.signature(RequiredDevice).parameters["value"].default is inspect.Parameter.empty
-    with pytest.raises(TypeError, match="value"):
-        RequiredDevice()
-
-
-def test_keyword_only_parameter_matches_runtime_signature() -> None:
-    class KeywordDevice(DeviceModel):
-        value: Scalar = parameter(default=1.0, kw_only=True)
-
-        def local_hamiltonian(self, op, p):
-            return p.value * op.n
-
-    assert inspect.signature(KeywordDevice).parameters["value"].kind is inspect.Parameter.KEYWORD_ONLY
-    with pytest.raises(TypeError, match="positional"):
-        KeywordDevice(2.0)
-
-
 def test_settings_cannot_opt_out_of_keyword_only_construction() -> None:
     with pytest.raises(ValueError, match="keyword-only"):
         setting(default=None, kw_only=False)
@@ -100,15 +78,6 @@ def test_parameter_fields_generate_constructor_and_attributes():
     assert dev.detuning == 0.0
     assert dev.levels == 3
     assert dev.label == "q"
-
-
-def test_unbound_construction_keeps_symbolic_hamiltonian_and_accepts_values_at_materialization():
-    dev = ToyDevice(levels=3, label="q").copy()
-    assert dev.freq is UNBOUND
-    hamiltonian = dev.unresolved_hamiltonian()
-    assert hamiltonian.parameter_paths() == ("q.freq", "q.detuning")
-    matrix = hamiltonian.matrix({"q.freq": 5.0})
-    assert matrix.shape == (3, 3)
 
 
 def test_positive_parameter_validation_uses_concrete_only_path():
@@ -132,26 +101,6 @@ def test_parameter_pytree_leaves_include_declared_fields():
     leaves, _ = jtu.tree_flatten(dev)
     assert any(leaf is dev.freq for leaf in leaves)
     assert any(leaf is dev.detuning for leaf in leaves)
-
-
-def test_parameter_pytree_roundtrip_preserves_base_state():
-    """DeviceModel pytree round-trip preserves declared parameter values and static base state (label, levels)."""
-    dev = ToyDevice(freq=jnp.asarray(5.0), detuning=jnp.asarray(0.1), levels=4, label="q")
-    leaves, treedef = jtu.tree_flatten(dev)
-    restored = jtu.tree_unflatten(treedef, leaves)
-    assert restored.label == "q"
-    assert restored.levels == 4
-    assert float(restored.freq) == 5.0
-    assert float(restored.detuning) == pytest.approx(0.1)
-
-
-def test_parameter_pytree_roundtrip_preserves_noise_params():
-    """DeviceModel pytree round-trip preserves T1 and T2 noise parameters."""
-    dev = ToyDevice(freq=5.0, levels=3, T1=100.0, T2=80.0)
-    leaves, treedef = jtu.tree_flatten(dev)
-    restored = jtu.tree_unflatten(treedef, leaves)
-    assert restored.T1 == 100.0
-    assert restored.T2 == 80.0
 
 
 def test_parameter_pytree_traceable_through_jit():

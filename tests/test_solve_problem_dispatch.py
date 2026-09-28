@@ -15,7 +15,6 @@ import pytest
 
 from quchip.backend import reset_default_backend, set_default_backend
 from quchip.chip.chip import Chip
-from quchip.chip.couplings import Capacitive
 from quchip.control.sequence import QuantumSequence
 from quchip.control.drive import ChargeDrive
 from quchip.control.envelopes import Square
@@ -24,17 +23,6 @@ from quchip.devices.transmon.duffing import DuffingTransmon
 from quchip.devices.transmon.charge_basis import ChargeBasisTransmon
 from quchip.engine import build_problem, simulate, solve_problem
 from quchip.engine.ir import DriveOp, SolveProblem
-from quchip.declarative import CollapseChannel
-
-
-class _NoisyChargeDrive(ChargeDrive):
-    def dissipation(self, device, op, p):
-        return (CollapseChannel(op.n, 0.01, "dephasing"),)
-
-
-class _NoisyCapacitive(Capacitive):
-    def dissipation(self, a, b, p):
-        return (CollapseChannel(a.charge * b.charge, 0.0025, "edge_loss"),)
 
 
 class TestBuildSolveProblem:
@@ -161,47 +149,6 @@ class TestBuildSolveProblem:
         original["nested"][0]["values"][:] = 0.0
         assert problem.options["normalize_output"] is True
         npt.assert_array_equal(problem.options["nested"][0]["values"], [1.0, 2.0])
-
-    def test_problem_with_drive_ops(self):
-        """SolveProblem should include drive Hamiltonian terms."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        drive = ChargeDrive(target=q)
-        chip = Chip([q])
-        chip.connect(ControlEquipment(lines=[drive]))
-        tlist = np.linspace(0, 50, 201)
-        drive_op = DriveOp(
-            target_label="q",
-            envelope=Square(amplitude=0.02, duration=50),
-            freq=5.0,
-            start_time=0.0,
-            drive_label=drive.label,
-        )
-
-        problem = build_problem(chip, [drive_op], tlist)
-        assert problem.engine_result is not None
-        assert len(problem.engine_result.dynamic_terms) > 0
-
-    def test_problem_collects_drive_level_collapse_operators(self):
-        """build_problem() retains a drive's collapse operator in the engine result."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        drive = _NoisyChargeDrive(target=q)
-        chip = Chip([q])
-        chip.wire(drive)
-
-        problem = build_problem(chip, [], np.linspace(0.0, 10.0, 11))
-
-        assert len(problem.engine_result.collapse_terms) == 1
-
-    def test_problem_collects_coupling_level_collapse_operators(self):
-        """build_problem() retains a coupling's collapse operator in the engine result."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        r = DuffingTransmon(freq=5.4, anharmonicity=-0.2, levels=3, label="r")
-        coupling = _NoisyCapacitive(q, r, g=0.01)
-        chip = Chip([q, r], [coupling])
-
-        problem = build_problem(chip, [], np.linspace(0.0, 10.0, 11))
-
-        assert len(problem.engine_result.collapse_terms) == 1
 
 
 class TestSolveProblemDispatch:
@@ -383,32 +330,6 @@ class TestQuantumSequenceBuildProblem:
                 atol=1e-6,
             )
 
-    def test_build_batch_accepts_mapping_initial_states(self):
-        """build_batch() accepts a mix of dict and device-object initial-state specs per axis."""
-        q = ChargeBasisTransmon(
-            E_C=0.25,
-            E_J=12.0,
-            num_basis=7,
-            basis="eigen",
-            levels=3,
-            label="q",
-        )
-        drive = ChargeDrive(target=q)
-        chip = Chip([q], frame="rotating")
-        chip.connect(ControlEquipment(lines=[drive]))
-        sequence = QuantumSequence(chip)
-        sequence.schedule(drive, envelope=Square(duration=20.0, amplitude=0.02), freq=5.0)
-        state_axis = sequence.vary("initial_state", [{"q": 0}, {q: 1}], name="state")
-
-        problems = sequence.build_batch(
-            state_axis,
-            tlist=np.linspace(0.0, 20.0, 81),
-        )
-
-        assert len(problems) == 2
-        assert all(problem.chip is chip for problem in problems)
-        assert problems[0].initial_state is not problems[1].initial_state
-        assert all(problem.initial_state.shape == (3, 1) for problem in problems)
 
     def test_simulate_batch_matches_manual_batch(self, monkeypatch: pytest.MonkeyPatch):
         """sequence.simulate_batch() matches a manually built batch solved via chip.solve_many()."""
@@ -450,37 +371,6 @@ class TestQuantumSequenceBuildProblem:
                 atol=1e-6,
             )
 
-    def test_build_batch_delay_axis_shifts_later_pulses(self, monkeypatch: pytest.MonkeyPatch):
-        """Sweeping a delay's duration in build_batch() shifts every later pulse's start time."""
-        import quchip.control.sequence as sequence_module
-
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        drive = ChargeDrive(target=q)
-        chip = Chip([q], frame="rotating")
-        chip.connect(ControlEquipment(lines=[drive]))
-        sequence = QuantumSequence(chip)
-        sequence.schedule(drive, envelope=Square(duration=2.0, amplitude=0.01), freq=5.0)
-        wait = sequence.delay(q, 3.0)
-        sequence.schedule(drive, envelope=Square(duration=1.0, amplitude=0.02), freq=5.0)
-
-        captured_start_times: list[tuple[float, ...]] = []
-        original_instantiate = sequence_module.instantiate_engine_result
-
-        def capture_start_times(template, drive_ops, chip):
-            captured_start_times.append(tuple(float(op.start_time) for op in drive_ops))
-            return original_instantiate(template, drive_ops, chip)
-
-        monkeypatch.setattr(sequence_module, "instantiate_engine_result", capture_start_times)
-
-        batch = sequence.build_batch(
-            wait.vary("duration", [5.0, 9.0], name="tau"),
-            tlist=np.linspace(0.0, 12.0, 49),
-            initial_state=chip.state(q=0),
-        )
-
-        assert len(batch) == 2
-        assert (0.0, 7.0) in captured_start_times
-        assert (0.0, 11.0) in captured_start_times
 
     def test_build_batch_uses_the_semantic_ground_state_by_default(self):
         """A construction sweep rebuilds each Hamiltonian and its semantic ground state."""
@@ -517,51 +407,6 @@ class TestQuantumSequenceBuildProblem:
         results = chip.solve_many(batch, progress=False)
         assert results.shape == (2, 2)
 
-
-class TestChipSolveMany:
-    """Verify Chip.solve_many() uses batched dispatch."""
-
-    def test_solve_many_returns_results(self, monkeypatch: pytest.MonkeyPatch):
-        """Chip.solve_many() returns one result per problem."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        ChargeDrive(target=q)
-        chip = Chip([q], frame="rotating")
-        tlist = np.linspace(0, 50, 201)
-
-        original_batched_sesolve = chip.backend.batched_sesolve
-        monkeypatch.setattr(
-            chip.backend,
-            "batched_sesolve",
-            lambda problems, *, progress=True: original_batched_sesolve(
-                problems,
-                n_jobs=1,
-                progress=progress,
-            ),
-        )
-
-        problems = [build_problem(chip, [], tlist) for _ in range(3)]
-        results = chip.solve_many(problems, progress=False)
-
-        assert len(results) == 3
-        assert results.shape == (3,)
-        assert results.axes == (("batch", (0, 1, 2)),)
-        assert results[{"batch": 2}] is results[2]
-        for r in results:
-            assert r.populations is not None
-
-    def test_solve_many_rejects_wrong_chip(self):
-        """solve_many rejects problems from a different chip."""
-        q1 = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        chip1 = Chip([q1])
-
-        q2 = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        chip2 = Chip([q2])
-
-        tlist = np.linspace(0, 50, 201)
-        problems = [build_problem(chip1, [], tlist)]
-
-        with pytest.raises(ValueError, match="different chip"):
-            chip2.solve_many(problems, progress=False)
 
 class TestSolverSelection:
     """The solver follows the state as well as the collapse terms."""

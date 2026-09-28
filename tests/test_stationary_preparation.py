@@ -20,6 +20,7 @@ def test_stationary_preparation_rejects_different_operating_points(backend):
         other.prepare_stationary(engine, prepared=prepared)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 @pytest.mark.parametrize("route", ["steady", "linear", "full"])
 def test_conditioning_is_requested_and_uses_captured_inputs(backend, route, monkeypatch):
@@ -88,6 +89,7 @@ def test_vna_positivity_is_only_computed_when_requested(backend, monkeypatch):
     assert evaluated == [(3, 3)]
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("route", ["steady", "linear", "full"])
 def test_requested_conditioning_survives_jit_then_eager_access(route):
     import jax

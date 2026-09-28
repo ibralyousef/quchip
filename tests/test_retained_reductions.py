@@ -24,6 +24,7 @@ def _leaf(backend, g=0.05, thermal=False):
     return Chip([q, r], [Capacitive(q, r, g=g, label="qr")], backend=backend, approximation=RWA())
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_sw_bus_keeps_collective_dark_and_bright_decay(backend):
     a = DuffingTransmon(freq=5.0, anharmonicity=-0.3, levels=2, label="a")
@@ -44,14 +45,16 @@ def test_sw_bus_keeps_collective_dark_and_bright_decay(backend):
     assert sum(np.linalg.norm(op @ bright) ** 2 for op in jumps) == pytest.approx(expected_bright_rate)
 
 
+@pytest.mark.validation
 def test_retained_high_level_shift_has_the_correct_jit_gradient():
     def value(g):
         reduced = eliminate(_leaf("dynamiqs", g=g), "r").chip
         return jnp.real(reduced.resolve(frame="lab").hamiltonian().matrix(backend=reduced.backend)[3, 3])
 
     g = 0.05
-    assert jax.jit(value)(g) == pytest.approx(3 * 5.0 - 0.3 * 3 + 3 * g**2 / (-2.0 - 2 * 0.3))
-    assert jax.jit(jax.grad(value))(g) == pytest.approx(6 * g / (-2.0 - 2 * 0.3), rel=1e-10)
+    actual, gradient = jax.jit(jax.value_and_grad(value))(g)
+    assert actual == pytest.approx(3 * 5.0 - 0.3 * 3 + 3 * g**2 / (-2.0 - 2 * 0.3))
+    assert gradient == pytest.approx(6 * g / (-2.0 - 2 * 0.3), rel=1e-10)
 
 
 @pytest.mark.parametrize("method", ["sw", "exact"])
@@ -81,6 +84,7 @@ def test_parallel_mode_legs_match_their_combined_interaction(method, bridge):
             float(expected.effective_params["a"]["chi"]), abs=1e-12)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("method", ["sw", "exact"])
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_removed_coupling_preserves_its_projected_collective_channel(method, backend):

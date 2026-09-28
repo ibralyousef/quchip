@@ -17,6 +17,7 @@ def _jumps(chip):
             chip.backend._collapse_operators(chip.resolve(frame="lab"))]
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_exact_edge_transforms_surviving_channels_with_the_public_map(backend):
     source = _source(backend)
@@ -84,6 +85,7 @@ def test_bath_channels_follow_reduction_and_keep_their_rate_parameter(method):
     np.testing.assert_allclose(_jumps(changed)[-1], 2 * after[-1], atol=1e-12)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("method", ["sw", "exact"])
 def test_reduced_channel_rate_and_operator_gradients_match_finite_difference(method):
     import jax
@@ -102,6 +104,7 @@ def test_reduced_channel_rate_and_operator_gradients_match_finite_difference(met
     assert float(dt) == pytest.approx(-float(amplitude(g, t1)) / (2 * t1), rel=1e-10)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("basis", ["native", "eigen"])
 def test_surviving_channel_projection_uses_authored_coordinates(basis):
     from quchip import CollapseChannel
@@ -143,6 +146,7 @@ def test_exact_surviving_noise_preserves_the_full_lindblad_generator():
     np.testing.assert_allclose(derivative(result.chip, rho), expected, atol=1e-12)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 @pytest.mark.parametrize("method", ["sw", "exact"])
 @pytest.mark.parametrize("target", ["edge", "r"])
