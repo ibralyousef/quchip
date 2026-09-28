@@ -4,6 +4,11 @@ This file records notable user-visible changes to quchip.
 
 ## Unreleased
 
+- Per-call backend overrides no longer re-project QuTiP `Qobj` or dynamiqs
+  `QArray` initial states returned by `chip.state()`, `chip.bare_state()`, or
+  `chip.superposition()` in `simulate()` or `simulate_batch()`. Hand-built
+  foreign-backend states now also use resolved solver coordinates. NumPy/JAX
+  arrays and symbolic or callable states remain authored-space kets.
 - The dynamiqs backend targets dynamiqs 0.3.6, whose qarray rewrite broke the
   previous import. The `dynamiqs` extra requires dynamiqs 0.3.6 or newer and
   caps jax below 0.11.1 until a dynamiqs release includes dynamiqs/dynamiqs#1145.

@@ -323,7 +323,12 @@ def materialize_state_spec(
     resolved_dims = tuple(record.resolved_dim for record in ordered)
     authored_dim = prod(authored_dims)
     resolved_dim = prod(resolved_dims)
-    resolved_native = backend.is_native_state(state_spec)
+    # QuTiP ``Qobj`` (``full``) and dynamiqs ``QArray`` (``to_jax``) states are in
+    # solver coordinates whichever backend solves; plain arrays and symbolic
+    # specifications are authored.
+    resolved_native = (
+        backend.is_native_state(state_spec) or hasattr(state_spec, "full") or hasattr(state_spec, "to_jax")
+    )
 
     shape = getattr(state_spec, "shape", None)
     if shape is None:

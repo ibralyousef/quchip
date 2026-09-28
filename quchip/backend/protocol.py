@@ -1279,7 +1279,7 @@ class Backend(ABC):
                 self._element_solver_kwargs(
                     solver_name,
                     rhs,
-                    problem.initial_state,
+                    self.coerce_state(problem.initial_state, dims=problem.engine_result.dims),
                     tlist_arr,
                     e_ops=problem.e_ops if isinstance(problem.e_ops, list) else None,
                     c_ops=c_ops,
