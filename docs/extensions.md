@@ -239,9 +239,9 @@ index used by frames is separate from these physical operators.
 
 For an intrinsically finite model, override `truncation_boundary()` to return
 `None`. For a numerical cutoff, supply a `TruncationBoundary`; an undeclared
-custom cutoff is reported unavailable. The {doc}`atom–cavity example
-<guides/atom-cavity>` follows a spin model through dynamics, response,
-reduction, differentiation and fitting.
+custom cutoff is reported unavailable. The {doc}`NV-centre guide
+<guides/nv-centre>` declares two spin-1 devices on a custom space, drives one
+of them, and projects it onto the two levels a microwave pulse addresses.
 
 Units remain GHz, ns and mK for every model: enter 1 MHz as `0.001` GHz and
 1 microsecond as `1000` ns. Frames provide one reference frequency per device;
