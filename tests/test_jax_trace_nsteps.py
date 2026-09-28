@@ -7,51 +7,45 @@ from quchip.approximations import RWA
 import pytest
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
-def test_jit_and_grad_through_sesolve():
-    """@jax.jit + jax.grad must work through a full seq.simulate() loss."""
+def test_sesolve_observables_and_gradients_agree():
+    """One driven solve exposes consistent, differentiable expectations, populations, and overlaps."""
     pytest.importorskip("dynamiqs")
     import jax
     import jax.numpy as jnp
+    import numpy as np
 
-    from quchip import (
-        ChargeDrive,
-        Chip,
-        DuffingTransmon,
-        Gaussian,
-        QuantumSequence,
-        set_default_backend,
-    )
+    from quchip import ChargeDrive, Chip, DuffingTransmon, Gaussian, QuantumSequence
 
-    set_default_backend("dynamiqs")
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3)
+    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
     drive = ChargeDrive(target=q)
-    chip = Chip(devices=[q], frame="rotating", approximation=RWA())
+    chip = Chip([q], frame="rotating", approximation=RWA(), backend="dynamiqs")
     chip.wire(drive)
-
     drive_freq = float(chip.freq(q))
-    duration = 40.0
-    tlist = jnp.linspace(0.0, duration, 100)
+    target = jnp.zeros((3, 1), dtype=jnp.complex128).at[1, 0].set(1.0)
+    tlist = jnp.linspace(0.0, 40.0, 100)
 
-    def loss_fn(params):
-        amp = params[0]
-        envelope = Gaussian(duration=duration, amplitude=amp, sigmas=4.0)
+    def observables(params):
         seq = QuantumSequence(chip)
-        seq.schedule(drive, envelope=envelope, freq=drive_freq)
-        result = seq.simulate(tlist=tlist, initial_state=chip.state({q: 0}), e_ops={q: q.number_operator()})
-        final_n = jnp.real(result.expect_values(q)[-1])
-        return (1.0 - final_n) ** 2
+        seq.schedule(drive, envelope=Gaussian(duration=40.0, amplitude=params[0], sigmas=4.0), freq=drive_freq)
+        result = seq.simulate(initial_state=chip.state({q: 0}).to_jax(), tlist=tlist, e_ops={q: q.number_operator()})
+        number = jnp.real(result.expect_values(q)[-1])
+        values = jnp.stack(((1.0 - number) ** 2, result.population(q, level=1)[-1], result.overlap(target)[-1]))
+        # Return the primal values with the Jacobian without a second solve.
+        return values, values
 
-    params0 = jnp.array([0.04])
-
-    # Must not raise TracerArrayConversionError.
-    loss_jit = jax.jit(loss_fn)
-    loss_val = loss_jit(params0)
-    assert float(loss_val) >= 0.0, "loss must be non-negative"
-
-    grad_val = jax.grad(loss_fn)(params0)
-    assert jnp.isfinite(grad_val).all(), f"gradient must be finite, got {grad_val}"
+    params = jnp.array([0.04])
+    gradients, values = jax.jit(jax.jacrev(observables, has_aux=True))(params)
+    assert float(values[0]) >= 0.0
+    assert np.isfinite(values).all() and np.isfinite(gradients).all()
+    np.testing.assert_allclose(values[1], values[2], atol=1e-12)
+    np.testing.assert_allclose(gradients[1], gradients[2], atol=1e-10)
+    # Independent central differences check each observable, not just finiteness.
+    step = 1e-5
+    evaluate = jax.jit(lambda p: observables(p)[0])
+    reference = (evaluate(params + step) - evaluate(params - step)) / (2 * step)
+    np.testing.assert_allclose(gradients[:, 0], reference, rtol=2e-3, atol=2e-4)
 
 
 @pytest.mark.optional_backend
@@ -160,53 +154,7 @@ def test_jit_and_grad_through_simulate_batch():
     assert jnp.isfinite(grad_val), f"gradient must be finite, got {grad_val}"
 
 
-@pytest.mark.optional_backend
-def test_jit_and_grad_through_overlap_population_wrappers():
-    """``result.population`` and ``result.overlap`` fall back to backend-native arrays under JIT."""
-    pytest.importorskip("dynamiqs")
-    import jax
-    import jax.numpy as jnp
-
-    from quchip import (
-        ChargeDrive,
-        Chip,
-        DuffingTransmon,
-        Gaussian,
-        QuantumSequence,
-        set_default_backend,
-    )
-
-    set_default_backend("dynamiqs")
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3)
-    drive = ChargeDrive(target=q)
-    chip = Chip(devices=[q], frame="rotating", approximation=RWA())
-    chip.wire(drive)
-
-    psi0 = jnp.zeros((3, 1), dtype=jnp.complex128).at[0, 0].set(1.0)
-    target_ket = jnp.zeros((3, 1), dtype=jnp.complex128).at[1, 0].set(1.0)
-    tlist = jnp.linspace(0.0, 40.0, 60)
-
-    @jax.jit
-    def loss_population(amp):
-        seq = QuantumSequence(chip)
-        seq.schedule(drive, envelope=Gaussian(duration=40.0, amplitude=amp, sigmas=4.0), freq=5.0)
-        result = seq.simulate(initial_state=psi0, tlist=tlist)
-        return result.population(q, level=1)[-1]
-
-    @jax.jit
-    def loss_overlap(amp):
-        seq = QuantumSequence(chip)
-        seq.schedule(drive, envelope=Gaussian(duration=40.0, amplitude=amp, sigmas=4.0), freq=5.0)
-        result = seq.simulate(initial_state=psi0, tlist=tlist)
-        return result.overlap(target_ket)[-1]
-
-    for fn in (loss_population, loss_overlap):
-        val = fn(jnp.array(0.04))
-        grad = jax.grad(fn)(jnp.array(0.04))
-        assert jnp.isfinite(val) and jnp.isfinite(grad)
-
-
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_jit_through_chip_analysis_methods():
     """chip.freq / chip.dressed_anharmonicity / chip.static_zz stay JIT-able as array-only kernels."""
@@ -231,8 +179,7 @@ def test_jit_through_chip_analysis_methods():
         chip = Chip([q1, q2], [Capacitive("q1", "q2", g=g)])
         return chip.freq("q2") ** 2 + chip.static_zz("q1", "q2") ** 2 + chip.dressed_anharmonicity("q1") ** 2
 
-    val = loss(jnp.array([5.1, 0.005]))
-    grad = jax.grad(loss)(jnp.array([5.1, 0.005]))
+    val, grad = jax.value_and_grad(loss)(jnp.array([5.1, 0.005]))
     assert jnp.isfinite(val) and jnp.isfinite(grad).all()
 
 
@@ -254,6 +201,7 @@ def test_dynamiqs_default_max_steps_skips_traced_tlist_span():
     assert float(traced_duration_pass_through(jnp.array(12.0))) == 12.0
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_jit_through_mesolve_with_collapse_op():
     """``simulate``/``seq.simulate`` must JIT-trace through Lindblad mesolve."""
@@ -291,11 +239,11 @@ def test_jit_through_mesolve_with_collapse_op():
         )
         return result.population(q, level=1)[-1]
 
-    val = loss(jnp.array(0.04))
-    grad = jax.grad(loss)(jnp.array(0.04))
+    val, grad = jax.value_and_grad(loss)(jnp.array(0.04))
     assert jnp.isfinite(val) and jnp.isfinite(grad)
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_vmap_through_chip_freq_and_static_zz():
     """``vmap`` over chip parameters must compose with ``chip.freq`` / ``static_zz``."""
@@ -321,6 +269,7 @@ def test_vmap_through_chip_freq_and_static_zz():
     assert jnp.isfinite(batched).all()
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_jit_with_traced_carrier_freq_from_chip():
     """A JIT loss may use ``chip.freq(...)`` directly as the drive carrier."""
@@ -357,6 +306,5 @@ def test_jit_with_traced_carrier_freq_from_chip():
         )
         return result.population(q, level=1)[-1]
 
-    val = loss(jnp.array(5.05))
-    grad = jax.grad(loss)(jnp.array(5.05))
+    val, grad = jax.value_and_grad(loss)(jnp.array(5.05))
     assert jnp.isfinite(val) and jnp.isfinite(grad)

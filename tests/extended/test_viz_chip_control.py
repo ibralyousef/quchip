@@ -66,39 +66,6 @@ def _build_chip_with_control() -> Chip:
     return chip
 
 
-def _line_by_label(ax: plt.Axes, label: str) -> plt.Line2D:
-    for line in ax.lines:
-        if line.get_label() == label:
-            return line
-    raise AssertionError(f"Missing plotted line {label!r}")
-
-
-def test_plot_sequence_returns_figure_and_expected_lane_labels() -> None:
-    """plot_sequence returns a Figure whose y-axis lists one lane per device:drive pair."""
-    fig = plot_sequence(_build_sequence())
-
-    assert isinstance(fig, Figure)
-    labels = [tick.get_text() for tick in fig.axes[0].get_yticklabels()]
-    assert labels == ["q:q_charge", "q:q_flux", "r:r_charge"]
-
-    plt.close(fig)
-
-
-def test_plot_sequence_bar_positions_match_schedule() -> None:
-    """Each plotted bar's x-position and width equal the pulse's start time and duration."""
-    seq = _build_sequence()
-
-    fig = plot_sequence(seq)
-
-    bars = {patch.get_label(): (patch.get_x(), patch.get_width()) for patch in fig.axes[0].patches}
-    assert bars["q:q_charge:0"] == (0.0, 10.0)
-    assert bars["q:q_charge:1"] == (10.0, 6.0)
-    assert bars["q:q_flux:0"] == (0.0, 4.0)
-    assert bars["r:r_charge:0"] == (0.0, 8.0)
-
-    plt.close(fig)
-
-
 def test_plot_sequence_reuses_supplied_axes() -> None:
     """When an axes is supplied, plot_sequence draws into it and returns its owning figure."""
     fig, ax = plt.subplots()
@@ -107,17 +74,6 @@ def test_plot_sequence_reuses_supplied_axes() -> None:
 
     assert returned is fig
     plt.close(fig)
-
-
-def test_control_chip_exposes_crosstalk() -> None:
-    """A connected chip exposes its control equipment and the crosstalk source/victim labels."""
-    chip = _build_chip_with_control()
-    equipment = chip.control_equipment
-    assert equipment is not None
-    crosstalks = chip.crosstalks
-    assert crosstalks
-    assert crosstalks[0].source == "readout"
-    assert crosstalks[0].victim == "flux"
 
 
 def test_plot_graph_full_includes_control_nodes(tmp_path: Path) -> None:

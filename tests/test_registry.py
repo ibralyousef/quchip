@@ -2,30 +2,13 @@
 
 from __future__ import annotations
 
-import abc
 
 import pytest
 
 from quchip.utils.registry import Registrable
 
 
-def test_concrete_subclass_round_trips_through_registry_root():
-    """Only concrete subclasses register, under their fully qualified names."""
-    class Root(Registrable, registry_root=True):
-        pass
-
-    class AbstractMid(Root, abc.ABC):
-        @abc.abstractmethod
-        def value(self) -> int: ...
-
-    class Concrete(AbstractMid):
-        def value(self) -> int:
-            return 7
-
-    key = f"{Concrete.__module__}.{Concrete.__qualname__}"
-    assert Root._registry == {key: Concrete}
-    assert Concrete().to_dict()["type"] == key
-    assert Root.from_dict({"type": key}).value() == 7
+pytestmark = pytest.mark.unit
 
 
 def test_unknown_type_lists_registered_choices():

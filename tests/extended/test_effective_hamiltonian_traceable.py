@@ -24,6 +24,7 @@ def _two_qubit_chip(g: jnp.ndarray | float) -> Chip:
     return Chip([q0, q1], couplings=[Capacitive(q0, q1, g=g)], backend=DynamiqsBackend())
 
 
+@pytest.mark.validation
 def test_grad_through_static_zz_matches_finite_difference():
     """jax.grad of analyze_static_zz's zz shift w.r.t. g matches a central finite-difference estimate."""
     def loss(g):
@@ -39,6 +40,7 @@ def test_grad_through_static_zz_matches_finite_difference():
     assert abs(float(grad) - float(finite_diff)) / abs(float(finite_diff)) < 1e-4
 
 
+@pytest.mark.validation
 def test_grad_through_effective_hamiltonian_is_finite():
     """Löwdin projection remains differentiable when the Gram spectrum is degenerate."""
     def exchange(g):
@@ -48,6 +50,9 @@ def test_grad_through_effective_hamiltonian_is_finite():
     derivative = jax.grad(exchange)(jnp.float64(0.01))
 
     assert jnp.isfinite(derivative)
+    step = 1e-5
+    reference = (exchange(0.01 + step) - exchange(0.01 - step)) / (2 * step)
+    assert float(derivative) == pytest.approx(float(reference), rel=1e-5, abs=1e-8)
 
 
 def test_inverse_sqrt_handles_an_ill_conditioned_repeated_gram_spectrum():

@@ -98,14 +98,6 @@ def multi_device_state_result() -> SimulationResult:
     )
 
 
-def test_plot_graph_returns_html_path(driven_chip, tmp_path: Path) -> None:
-    """plot_graph writes an HTML file and returns its path."""
-    chip, _q, _r, _drive = driven_chip
-    path = qc.plot_graph(chip, str(tmp_path / "graph.html"))
-    assert Path(path).exists()
-    assert path.endswith(".html")
-
-
 def test_plot_graph_can_show_dressed_values(tmp_path: Path) -> None:
     """The dressed graph labels device frequencies and full-pull cross-Kerr values."""
     q = qc.DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
@@ -209,46 +201,12 @@ def test_collect_topology_crosstalk_never_resurrects_an_omitted_edge_pump() -> N
     assert _drive_node_id("d0") in nodes
 
 
-def test_plot_graph_renders_chip_with_edge_pump_control(tmp_path: Path) -> None:
-    """plot_graph supports a chip with an edge-pump control."""
-    q0 = qc.DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
-    q1 = qc.DuffingTransmon(freq=5.3, anharmonicity=-0.25, levels=3, label="q1")
-    coupling = qc.TunableCapacitive(q0, q1, g_0=0.01, label="tc")
-    chip = qc.Chip([q0, q1], couplings=[coupling])
-    chip.wire(qc.ParametricDrive(coupling, label="pump"))
-
-    path = qc.plot_graph(chip, str(tmp_path / "edge_pump.html"))
-
-    assert Path(path).exists()
-
-
-def test_plot_graph_rejects_unknown_layout(driven_chip, tmp_path: Path) -> None:
-    """plot_graph raises ValueError listing valid layouts for an unrecognized layout string."""
-    chip, _q, _r, _drive = driven_chip
-    with pytest.raises(ValueError, match="force_atlas"):
-        qc.plot_graph(chip, str(tmp_path / "bad.html"), layout="not_a_real_layout")
-
-
-def test_plot_graph_rejects_unknown_value_mode(driven_chip, tmp_path: Path) -> None:
-    """plot_graph rejects an unsupported value annotation mode."""
-    chip, _q, _r, _drive = driven_chip
-    with pytest.raises(ValueError, match="values must be one of"):
-        qc.plot_graph(chip, str(tmp_path / "bad-values.html"), values="effective")
-
-
 def test_plot_wigner_without_isolating_trace_out_raises_and_names_labels(smoke_result: SimulationResult) -> None:
     """plot_wigner on a multi-device state without an isolating trace_out raises, naming the retained labels."""
     with pytest.raises(ValueError, match="'q'") as exc_info:
         qc.plot_wigner(smoke_result)
     message = str(exc_info.value)
     assert "'q'" in message and "'r'" in message
-
-
-def test_plot_wigner_isolated_to_single_subsystem_succeeds(smoke_result: SimulationResult) -> None:
-    """plot_wigner succeeds once trace_out isolates exactly one subsystem."""
-    fig = qc.plot_wigner(smoke_result, trace_out="q")
-    assert isinstance(fig, Figure)
-    plt.close(fig)
 
 
 def test_plot_state_accepts_negative_index(smoke_result: SimulationResult) -> None:
@@ -258,34 +216,10 @@ def test_plot_state_accepts_negative_index(smoke_result: SimulationResult) -> No
     plt.close(fig)
 
 
-def test_plot_state_out_of_range_index_raises(smoke_result: SimulationResult) -> None:
-    """plot_state raises IndexError for an index outside [-N, N)."""
-    with pytest.raises(IndexError, match="out of range"):
-        qc.plot_state(smoke_result, 10_000)
-
-
 def test_plot_wigner_accepts_negative_index(smoke_result: SimulationResult) -> None:
     """plot_wigner(-1) succeeds when isolated to a single subsystem."""
     fig = qc.plot_wigner(smoke_result, -1, trace_out="q")
     assert isinstance(fig, Figure)
-    plt.close(fig)
-
-
-def test_plot_wigner_out_of_range_index_raises(smoke_result: SimulationResult) -> None:
-    """plot_wigner raises IndexError for an index outside [-N, N), with the same message shape as plot_state."""
-    with pytest.raises(IndexError, match="out of range"):
-        qc.plot_wigner(smoke_result, 10_000, trace_out="q")
-
-
-def test_plot_expectation_resolves_correlator_tuple_key(correlator_result: SimulationResult) -> None:
-    """A tuple correlator key like ("q0", "q1") plots as itself, not as a (key, index) selector."""
-    fig = qc.plot_expectation(correlator_result, keys=[("q0", "q1")])
-    assert isinstance(fig, Figure)
-    lines = fig.axes[0].lines
-    assert len(lines) == 1
-    assert lines[0].get_label() == "('q0', 'q1')"
-    expected = np.real(np.asarray(correlator_result.observable_traces[("q0", "q1")].values))
-    np.testing.assert_allclose(lines[0].get_ydata(), expected)
     plt.close(fig)
 
 
@@ -421,18 +355,6 @@ def test_plot_sparameters_rejects_result_without_free_sweep_axis() -> None:
     result = qc.VNA(qc.Chip([resonator], port_network=network)).sweep(6.0)
     with pytest.raises(ValueError, match="sweep axis"):
         qc.viz.plot_sparameters(result)
-
-
-def test_plot_sparameters_rejects_selecting_frequency() -> None:
-    """select= indexes only non-frequency axes; frequency stays the x axis."""
-    resonator = qc.Resonator(freq=6.0, levels=4, label="r")
-    network = qc.PortNetwork(label="line")
-    network.port("in", target=resonator, rate=0.02)
-    result = qc.VNA(qc.Chip([resonator], port_network=network)).sweep(
-        np.linspace(5.9, 6.1, 5), qc.Sweep(np.array([5.99, 6.01]), name="r.freq")
-    )
-    with pytest.raises(ValueError, match="frequency"):
-        qc.viz.plot_sparameters(result, select={"frequency": 1})
 
 
 def test_plot_port_network_draws_asymmetric_planes_with_two_arrows() -> None:

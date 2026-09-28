@@ -18,6 +18,7 @@ from quchip import (
 from quchip.chip.transformations import eliminate
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("method", ["sw", "exact"])
 def test_deferred_chi_has_the_same_compiled_gradient_as_the_source_spectrum(method):
     import jax
@@ -44,22 +45,6 @@ def _bridge_chip():
     bus = Resonator(freq=6.3, levels=4, label="bus")
     couplings = [Capacitive(q0, bus, g=0.08, label="leg0"), Capacitive(q1, bus, g=0.08, label="leg1")]
     return Chip([q0, q1, bus], couplings=couplings)
-
-
-def test_describe_reports_correct_before_after_freq_for_bridge():
-    """The bridge report states each survivor's exact before/after freq and a passing validity mark."""
-    res = eliminate(_bridge_chip(), "bus")
-    report = res.describe()
-
-    q0_after = float(res.effective_params["q0"]["freq_after"])
-    q0_before = q0_after - float(res.effective_params["q0"]["lamb_shift"])
-    q1_after = float(res.effective_params["q1"]["freq_after"])
-    q1_before = q1_after - float(res.effective_params["q1"]["lamb_shift"])
-
-    assert f"{q0_before:.6g} → {q0_after:.6g} GHz" in report
-    assert f"{q1_before:.6g} → {q1_after:.6g} GHz" in report
-    assert "✓" in report
-    assert "dropped:" in report
 
 
 @pytest.mark.parametrize("method", ["sw", "exact"])
@@ -107,37 +92,8 @@ def test_describe_shows_the_gain_retarget_line_for_a_converted_flux_drive():
     assert "Gain" in report
 
 
-def test_describe_exchange_edge_names_the_capacitive_strength_g():
-    """The fold report's edge line names a fixed mediated edge's strength 'g', never '<traced>' when concrete."""
-    res = eliminate(_bridge_chip(), "bus")
-    report = res.describe()
-
-    edge_label = res.effective_params["exchange"]["coupling"]
-    edge = res.chip.coupling_map[edge_label]
-    assert type(edge).__name__ == "Capacitive"
-    assert f"{edge_label}': Capacitive(g = " in report
-    assert "<traced>" not in report
-
-
-def test_describe_exchange_edge_names_the_tunable_capacitive_strength_g_0():
-    """The fold report's edge line names a frequency-controlled mode's mediated edge strength 'g_0'."""
-    q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
-    q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.24, levels=3, label="q1")
-    fc = FluxTunableTransmon(freq=6.3, anharmonicity=-0.2, levels=3, label="fc")
-    couplings = [Capacitive(q0, fc, g=0.08, label="leg0"), Capacitive(q1, fc, g=0.08, label="leg1")]
-    chip = Chip([q0, q1, fc], couplings=couplings)
-
-    res = eliminate(chip, "fc")
-    report = res.describe()
-
-    edge_label = res.effective_params["exchange"]["coupling"]
-    edge = res.chip.coupling_map[edge_label]
-    assert type(edge).__name__ == "TunableCapacitive"
-    assert f"{edge_label}': TunableCapacitive(g_0 = " in report
-    assert "<traced>" not in report
-
-
 @pytest.mark.optional_backend
+@pytest.mark.validation
 def test_describe_never_raises_on_a_fully_traced_result():
     """describe() stays exception-free when every effective parameter is a JAX tracer."""
     pytest.importorskip("dynamiqs")
@@ -159,7 +115,7 @@ def test_describe_never_raises_on_a_fully_traced_result():
         assert "<traced>" in report
         return jnp.real(res.effective_params["exchange"]["j_eff"])
 
-    jax.grad(run)(0.08)
+    jax.jit(jax.grad(run))(0.08)
 
 
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])

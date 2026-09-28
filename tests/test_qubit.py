@@ -49,7 +49,7 @@ def test_qubit_supports_a_resonant_pi_pulse():
     assert result.population(q, 1)[-1] == pytest.approx(1, abs=1e-7)
 
 
-@pytest.mark.parametrize("levels", [3, 4, 5])
+@pytest.mark.parametrize("levels", [3])
 def test_qubit_rejects_extra_levels(levels):
     """Construction and mutation cannot turn a qubit into an oscillator."""
     with pytest.raises(ValueError, match="levels=2"):

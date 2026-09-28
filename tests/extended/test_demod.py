@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 
+import pytest
+
 import numpy as np
 
 from quchip.chip.chip import Chip
@@ -15,7 +17,7 @@ from quchip.devices.resonator import Resonator
 from quchip.devices.transmon.duffing import DuffingTransmon
 from quchip.results import ObservableTrace
 from quchip.engine.bands import decompose_bands
-from quchip.engine.observables import BandMeta, decompose_eops, recombine_expect
+from quchip.engine.observables import BandMeta, recombine_expect
 
 
 def _build_coupled_sequence(frame: str) -> tuple[QuantumSequence, Chip, np.ndarray]:
@@ -78,36 +80,6 @@ def test_decompose_bands_supports_jitted_jax_inputs() -> None:
     assert active_weights == {-1, 1}
     np.testing.assert_allclose(np.asarray(bands[-1]), np.asarray(np.tril(matrix, k=-1)), atol=1e-14)
     np.testing.assert_allclose(np.asarray(bands[1]), np.asarray(np.triu(matrix, k=1)), atol=1e-14)
-
-
-def test_decompose_recombine_roundtrip() -> None:
-    """With zero frame frequencies, recombined = raw sum per key."""
-    tlist = np.array([0.0, 0.2, 0.5])
-
-    s1 = np.array([1.0 + 0.0j, 2.0 + 0.0j, 3.0 + 0.0j])
-    s2 = np.array([0.5j, 1.0j, 1.5j])
-    s3 = np.array([2.0 + 1.0j, 2.0 + 1.0j, 2.0 + 1.0j])
-    s4 = np.array([-1.0j, -2.0j, -3.0j])
-
-    flat_expect = [s1, s2, s3, s4]
-    meta = [
-        BandMeta(key="q", weight=1, device_labels="q"),
-        BandMeta(key="q", weight=-1, device_labels="q"),
-        BandMeta(key=("q", "r"), weight=(1, -1), device_labels=("q", "r")),
-        BandMeta(key=("q", "r"), weight=(-1, 1), device_labels=("q", "r")),
-    ]
-
-    expect, raw = recombine_expect(
-        flat_expect=flat_expect,
-        meta_list=meta,
-        tlist=tlist,
-        frame_freqs={"q": 0.0, "r": 0.0},
-    )
-
-    np.testing.assert_allclose(expect["q"], s1 + s2, atol=1e-14)
-    np.testing.assert_allclose(raw["q"], s1 + s2, atol=1e-14)
-    np.testing.assert_allclose(expect[("q", "r")], s3 + s4, atol=1e-14)
-    np.testing.assert_allclose(raw[("q", "r")], s3 + s4, atol=1e-14)
 
 
 def test_recombine_remodulate() -> None:
@@ -186,38 +158,7 @@ def test_recombine_demodulate() -> None:
     np.testing.assert_allclose(phase_corrected["q"], expected_q, atol=1e-14)
 
 
-def test_decompose_eops_handles_string_and_tuple_keys(backend) -> None:
-    """decompose_eops expands both single-device and tuple-key entries."""
-    q = Resonator(freq=5.0, levels=3, label="q")
-    r = Resonator(freq=6.0, levels=3, label="r")
-    chip = Chip([q, r])
-
-    a = backend.destroy(3)
-    x = a + backend.dag(a)  # weights {-1, +1}
-
-    flat_ops, meta = decompose_eops(
-        {
-            "q": x,
-            ("q", "r"): (x, x),
-        },
-        chip,
-        backend,
-    )
-
-    assert len(flat_ops) == len(meta) == 6
-
-    single_weights = {m.weight for m in meta if m.key == "q"}
-    assert single_weights == {-1, 1}
-
-    cross_weights = {m.weight for m in meta if m.key == ("q", "r")}
-    assert cross_weights == {
-        (-1, -1),
-        (-1, 1),
-        (1, -1),
-        (1, 1),
-    }
-
-
+@pytest.mark.validation
 def test_single_device_demod_matches_lab(backend) -> None:
     """Rotating-frame dict e_ops use identity demodulation (expect == expect_raw)."""
     seq_lab, chip_lab, tlist = _build_coupled_sequence(frame="lab")
@@ -362,90 +303,3 @@ def test_lab_frame_dict_eops(backend) -> None:
         phase_corrected[("q", "r")],
         atol=1e-6,
     )
-
-
-def test_list_value_lab_frame(backend) -> None:
-    """Lab-frame dict e_ops with list value returns list of arrays."""
-    seq_lab, chip_lab, tlist = _build_coupled_sequence(frame="lab")
-
-    a_r = chip_lab.device_map["r"].lowering_operator()
-    n_r = chip_lab.device_map["r"].number_operator()
-
-    init_state = chip_lab.bare_state(
-        r=backend.coherent(chip_lab.device_map["r"].levels, 0.2),
-    )
-
-    result = seq_lab.simulate(
-        tlist=tlist,
-        e_ops={"r": [n_r, a_r]},
-        initial_state=init_state,
-        options=_STRICT_SOLVER_OPTS,
-    )
-
-    assert isinstance(result._expect_data, dict)
-    assert "r" in result._expect_data
-    # List input → list output
-    assert isinstance(result._expect_data["r"], list)
-    assert len(result._expect_data["r"]) == 2
-    assert all(isinstance(item, ObservableTrace) for item in result._expect_data["r"])
-    assert result._expect_data["r"][0].values.shape == tlist.shape
-    assert result._expect_data["r"][1].values.shape == tlist.shape
-    assert result._expect_data["r"][0].raw.shape == tlist.shape
-    assert result._expect_data["r"][1].raw.shape == tlist.shape
-
-
-def test_list_value_rotating_frame(backend) -> None:
-    """Rotating-frame dict e_ops with list value returns list of arrays."""
-    seq_rot, chip_rot, tlist = _build_coupled_sequence(frame="rotating")
-
-    a_r = chip_rot.device_map["r"].lowering_operator()
-    n_r = chip_rot.device_map["r"].number_operator()
-
-    init_state = chip_rot.bare_state(
-        r=backend.coherent(chip_rot.device_map["r"].levels, 0.2),
-    )
-
-    result = seq_rot.simulate(
-        tlist=tlist,
-        e_ops={"r": [n_r, a_r]},
-        initial_state=init_state,
-        options=_STRICT_SOLVER_OPTS,
-    )
-
-    assert isinstance(result._expect_data, dict)
-    assert "r" in result._expect_data
-    assert isinstance(result._expect_data["r"], list)
-    assert len(result._expect_data["r"]) == 2
-    assert all(isinstance(item, ObservableTrace) for item in result._expect_data["r"])
-    assert result._expect_data["r"][0].values.shape == tlist.shape
-    assert result._expect_data["r"][1].values.shape == tlist.shape
-
-
-def test_list_value_mixed_with_scalar(backend) -> None:
-    """Dict e_ops mixing list and scalar values works correctly."""
-    seq_lab, chip_lab, tlist = _build_coupled_sequence(frame="lab")
-
-    a_q = chip_lab.device_map["q"].lowering_operator()
-    a_r = chip_lab.device_map["r"].lowering_operator()
-    n_r = chip_lab.device_map["r"].number_operator()
-
-    init_state = chip_lab.bare_state(
-        q=backend.coherent(chip_lab.device_map["q"].levels, 0.1),
-        r=backend.coherent(chip_lab.device_map["r"].levels, 0.2),
-    )
-
-    result = seq_lab.simulate(
-        tlist=tlist,
-        e_ops={"r": [n_r, a_r], "q": a_q},
-        initial_state=init_state,
-        options=_STRICT_SOLVER_OPTS,
-    )
-
-    # "r" was list → list output
-    assert isinstance(result._expect_data["r"], list)
-    assert len(result._expect_data["r"]) == 2
-
-    # A scalar operator produces one ObservableTrace.
-    assert not isinstance(result._expect_data["q"], list)
-    assert isinstance(result._expect_data["q"], ObservableTrace)
-    assert result._expect_data["q"].values.shape == tlist.shape

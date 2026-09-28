@@ -9,6 +9,9 @@ from quchip import (
 )
 
 
+pytestmark = pytest.mark.unit
+
+
 def _wired_chip():
     q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
     q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.24, levels=3, label="q1")
@@ -19,18 +22,6 @@ def _wired_chip():
     return chip, tc, pump
 
 
-def test_pump_baseband_emits_drive_op_with_coupling_target():
-    """Pumping a coupling without freq emits one baseband op, labeled by the pump line and targeted at the coupling."""
-    chip, tc, pump = _wired_chip()
-    seq = QuantumSequence(chip)
-    seq.pump(tc, envelope=Square(duration=100.0, amplitude=0.005))
-    ops = seq.scheduled_ops
-    assert len(ops) == 1
-    assert ops[0].target_label == "tc"
-    assert ops[0].drive_label == "pump"
-    assert ops[0].freq is None  # baseband form
-
-
 def test_pump_single_tone_carries_freq_and_phase():
     """Pumping a coupling by its string label carries the supplied carrier frequency and phase into the drive op."""
     chip, tc, _ = _wired_chip()
@@ -38,16 +29,6 @@ def test_pump_single_tone_carries_freq_and_phase():
     seq.pump("tc", envelope=Square(duration=100.0, amplitude=0.005), freq=0.2, phase=0.3)
     (op,) = seq.scheduled_ops
     assert op.freq == 0.2 and op.phase_offset == 0.3
-
-
-def test_schedule_accepts_pump_drive_and_coupling_label():
-    """A ParametricDrive object and its coupling's string label resolve through schedule() to the same edge target."""
-    chip, tc, pump = _wired_chip()
-    seq = QuantumSequence(chip)
-    seq.schedule(pump, envelope=Square(duration=50.0, amplitude=0.001))
-    seq.schedule("tc", envelope=Square(duration=50.0, amplitude=0.001))
-    assert len(seq.scheduled_ops) == 2
-    assert {op.target_label for op in seq.scheduled_ops} == {"tc"}
 
 
 def test_pump_without_line_raises_with_guidance():

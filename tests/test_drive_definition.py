@@ -14,6 +14,9 @@ from quchip import (
 )
 
 
+pytestmark = pytest.mark.unit
+
+
 def test_custom_drive_compiles_from_physical_iq_quadratures() -> None:
     class QuadratureDrive(DeviceDrive):
         def hamiltonian(self, target, signal):

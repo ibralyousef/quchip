@@ -4,6 +4,9 @@ import pytest
 from quchip.interop.eigenbasis import EigenbasisDevice
 
 
+pytestmark = pytest.mark.unit
+
+
 def _dev(**kw):
     E = np.array([0.0, 5.0, 9.8])
     n = np.array([[0, 1.0, 0], [1.0, 0, 1.3], [0, 1.3, 0]], dtype=complex)

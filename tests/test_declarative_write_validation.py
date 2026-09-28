@@ -6,6 +6,9 @@ import pytest
 from quchip.declarative import CouplingModel, DeviceModel, Envelope, Scalar, parameter
 
 
+pytestmark = pytest.mark.unit
+
+
 class _Oscillator(DeviceModel):
     freq: Scalar = parameter(positive=True, unit="GHz")
 

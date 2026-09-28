@@ -171,6 +171,7 @@ def test_invalid_amplifier_declarations_fail(kwargs):
         PortNetwork().amplifier("amp", **kwargs)
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_linear_measurement_added_noise_gradient():
     """Added quanta differentiate through harmonic acquisition and receiver."""

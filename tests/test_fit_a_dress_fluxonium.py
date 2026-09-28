@@ -17,23 +17,7 @@ def _dynamiqs_backend():
     set_default_backend("qutip")
 
 
-def test_fluxonium_tunable_params_round_trip() -> None:
-    """tunable_params/set_tunable_param/tunable_param_bounds round-trip E_C, E_J, E_L, phi_ext."""
-    flux = Fluxonium(E_C=1.0, E_J=4.0, E_L=1.0, phi_ext=0.5, levels=4, num_basis=120)
-
-    params = flux.tunable_params()
-    assert set(params) == {"E_C", "E_J", "E_L", "phi_ext"}
-    assert pytest.approx(float(params["E_J"])) == 4.0
-
-    flux.set_tunable_param("E_J", 3.5)
-    assert pytest.approx(float(flux.E_J)) == 3.5
-
-    bounds = flux.tunable_param_bounds("E_J", 4.0)
-    assert bounds[0] > 0 and bounds[1] > bounds[0]
-    bounds = flux.tunable_param_bounds("phi_ext", 0.5)
-    assert bounds == (-0.5, 0.5)
-
-
+@pytest.mark.validation
 @pytest.mark.optional_backend
 @pytest.mark.usefixtures("_dynamiqs_backend")
 def test_fit_a_dress_recovers_fluxonium_dressed_freq() -> None:

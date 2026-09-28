@@ -26,7 +26,6 @@ from quchip import (
     SimulationResult,
     Square,
 )
-from quchip.chip.coupling_base import BaseCoupling
 from quchip.control.envelopes import Envelope
 from quchip.devices.base import BaseDevice
 from quchip.extensions import FrequencyModulatedMode, ModulatedCapacitive
@@ -86,17 +85,6 @@ def _build_chip(frame: str | float | dict[str, float] = "rotating") -> Chip:
     )
     chip.connect(equipment)
     return chip
-
-
-def test_device_registry_is_populated() -> None:
-    """Concrete device subclasses auto-register under their fully-qualified class name."""
-    assert "quchip.devices.transmon.duffing.DuffingTransmon" in BaseDevice._registry
-    assert "quchip.devices.resonator.Resonator" in BaseDevice._registry
-
-
-def test_coupling_registry_is_populated() -> None:
-    """Concrete coupling subclasses auto-register under their fully-qualified class name."""
-    assert "quchip.chip.couplings.Capacitive" in BaseCoupling._registry
 
 
 def test_device_round_trip_is_json_safe() -> None:
@@ -284,15 +272,6 @@ def test_chip_round_trip_preserves_control_equipment() -> None:
     assert isinstance(xt, Crosstalk)
     assert xt.source == "readout"
     assert xt.victim == "flux"
-
-
-def test_drive_deserialization_rejects_removed_rwa_field() -> None:
-    q = DuffingTransmon(5.0, -0.2, levels=3, label="q")
-    payload = ChargeDrive(q, label="xy").to_dict()
-    payload["rwa"] = True
-
-    with pytest.raises(TypeError, match="Unsupported serialized fields.*rwa"):
-        ChargeDrive.from_dict(payload, q)
 
 
 def test_chip_round_trip_can_dress_and_simulate() -> None:

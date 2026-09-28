@@ -9,6 +9,7 @@ from quchip import Chip, DuffingTransmon, QuantumSequence
 from quchip.engine.ir import SolveBatch
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("method_name", ["Euler", "Dopri5", "Dopri8", "Tsit5", "Kvaerno3", "Kvaerno5", "Expm",
                                          "Rouchon1", "Rouchon2", "Rouchon3"])
 def test_native_method_batch_matches_separate_master_equations(method_name):
@@ -28,6 +29,7 @@ def test_native_method_batch_matches_separate_master_equations(method_name):
                                    chip.backend.to_array(reference.final_state), atol=1e-12)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("gradient_name", ["BackwardCheckpointed", "Direct", "Forward"])
 def test_native_gradient_modes_keep_decay_derivative(gradient_name):
     import dynamiqs as dq
@@ -117,6 +119,7 @@ def test_stochastic_methods_have_an_explicit_support_boundary(method_name):
         solve_problem(problem)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("batched", [False, True])
 def test_expm_final_density_matrix_keeps_jit_gradient(batched):
     import dynamiqs as dq
@@ -141,6 +144,7 @@ def test_expm_final_density_matrix_keeps_jit_gradient(batched):
     assert derivative == pytest.approx(0.01 * np.exp(-0.1), abs=1e-10)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("batched", [False, True])
 def test_expm_nonfinite_check_survives_gradient_only(batched):
     import dynamiqs as dq

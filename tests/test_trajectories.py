@@ -28,6 +28,7 @@ def jump_problem(backend, *, storage=None, count=16):
                                   states=storage, initial_state={"r": 1}, e_ops=chip.e_ops(r="n"))
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_jumps_match_native_events_and_weighted_averages(backend):
     """The adapter preserves native seeds, events, and ensemble averaging."""
@@ -54,6 +55,7 @@ def test_jumps_match_native_events_and_weighted_averages(backend):
     assert result.average().final_state.shape == (2, 2)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_jump_decay_and_explicit_per_run_truncation(backend):
     """Jump ensembles follow exponential decay and diagnostics check individual runs."""
@@ -68,7 +70,7 @@ def test_jump_decay_and_explicit_per_run_truncation(backend):
     assert report["maximum"]["r"] == pytest.approx(1.)
 
 
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
+@pytest.mark.parametrize("backend", ["qutip", pytest.param("dynamiqs", marks=pytest.mark.validation)])
 @pytest.mark.parametrize("diffusive", [False, True])
 def test_parameter_batch_replays_assigned_point_noise(backend, diffusive):
     """Point keys/seeds are captured before grouping and each point replays alone."""
@@ -207,6 +209,7 @@ def test_monitored_generator_preserves_distinct_noncommuting_channels():
         assert np.linalg.eigvalsh(state.full()).min() >= -1e-12
 
 
+@pytest.mark.validation
 def test_diffusive_fixed_noise_gradient_matches_finite_difference():
     """The Euler diffusive SSE pathwise gradient matches the same-key finite difference."""
     import jax
@@ -246,6 +249,7 @@ def test_advanced_jump_sampling_retains_no_click_diagnostics(backend):
     assert diagnostics["deterministic"][0]["r"] == pytest.approx(1.)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_native_current_identity_offset_and_variance(backend):
     """An authored coherent identity offset survives monitor phase rotation and native shot noise."""
@@ -285,6 +289,7 @@ def test_native_current_identity_offset_and_variance(backend):
 
 
 
+@pytest.mark.validation
 def test_native_event_buffer_exhaustion_cannot_look_like_completed_evolution():
     """Native raw data survives while analysis rejects Event's silently unfinished capped solve."""
     import dynamiqs as dq

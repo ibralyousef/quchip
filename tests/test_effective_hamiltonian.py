@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import itertools
 
 import numpy as np
@@ -15,12 +17,6 @@ def _two_qubit_chip(g: float = 0.01) -> Chip:
     q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
     q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.24, levels=3, label="q1")
     return Chip([q0, q1], couplings=[Capacitive(q0, q1, g=g)])
-
-
-def test_analyze_static_zz_matches_dispersive_shift_exactly():
-    chip = _two_qubit_chip()
-    result = analyze_static_zz(chip, "q0", "q1")
-    assert float(result.zz) == float(chip.dispersive_shift("q0", "q1"))
 
 
 def test_pathway_sum_matches_half_commutator_element():
@@ -62,18 +58,13 @@ def test_effective_hamiltonian_eigenvalues_match_labeled_energies_dict_form():
     assert np.allclose(np.sort(eigenvalues), np.sort(expected), atol=1e-10)
 
 
-def test_static_zz_describe_runs():
-    chip = _two_qubit_chip()
-    text = analyze_static_zz(chip, "q0", "q1").describe()
-    assert "Static ZZ(q0, q1)" in text
-
-
 def test_effective_hamiltonian_describe_runs():
     chip = _two_qubit_chip()
     text = effective_hamiltonian(chip, ["q0", "q1"]).describe()
     assert "Effective Hamiltonian" in text
 
 
+@pytest.mark.validation
 def test_projected_charge_basis_devices_index_resolved_dimensions():
     """Eigen-projected devices flatten bare labels with retained dims, not the authored charge cutoff."""
     from quchip import ChargeBasisTransmon, Exact

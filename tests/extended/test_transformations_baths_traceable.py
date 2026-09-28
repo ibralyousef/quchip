@@ -48,6 +48,7 @@ def _dynamiqs_backend():
 
 # -- Bath ----------------------------------------------------------------------
 
+@pytest.mark.validation
 def test_thermal_bath_solve_is_jittable_and_grad_in_temperature():
     """A thermal-bath solve is jittable and its gradient in temperature is finite and positive."""
     def final_n(temp):
@@ -61,13 +62,13 @@ def test_thermal_bath_solve_is_jittable_and_grad_in_temperature():
             )
         return jnp.real(res.expect("m")[-1])
 
-    value = jax.jit(final_n)(jnp.float64(300.0))
-    grad = jax.grad(final_n)(jnp.float64(300.0))
+    value, grad = jax.jit(jax.value_and_grad(final_n))(jnp.float64(300.0))
     assert jnp.isfinite(value) and value > 0.0
     # Hotter bath -> higher steady-state occupation.
     assert jnp.isfinite(grad) and float(grad) > 0.0
 
 
+@pytest.mark.validation
 def test_collective_decay_bath_solve_is_jittable_and_grad_in_rate():
     """A collective-decay bath solve is jittable and its gradient in rate is finite and negative."""
     def final_excited(rate):
@@ -82,8 +83,7 @@ def test_collective_decay_bath_solve_is_jittable_and_grad_in_rate():
             )
         return jnp.real(res.expect("q0")[-1])
 
-    value = jax.jit(final_excited)(jnp.float64(0.02))
-    grad = jax.grad(final_excited)(jnp.float64(0.02))
+    value, grad = jax.jit(jax.value_and_grad(final_excited))(jnp.float64(0.02))
     assert jnp.isfinite(value)
     # Faster collective decay -> less surviving excitation.
     assert jnp.isfinite(grad) and float(grad) < 0.0
@@ -91,6 +91,7 @@ def test_collective_decay_bath_solve_is_jittable_and_grad_in_rate():
 
 # -- eliminate -----------------------------------------------------------------
 
+@pytest.mark.validation
 def test_eliminate_effective_params_are_jittable_and_grad_in_g():
     """eliminate()'s effective freq_after is jittable and its gradient in g matches the perturbative 2g/Δ."""
     def freq_after(g):
@@ -99,49 +100,41 @@ def test_eliminate_effective_params_are_jittable_and_grad_in_g():
         chip = Chip([q, r], couplings=[Capacitive(q, r, g=g)])
         return eliminate(chip, "r").effective_params["q"]["freq_after"]
 
-    value = jax.jit(freq_after)(jnp.float64(0.08))
-    grad = jax.grad(freq_after)(jnp.float64(0.08))
+    value, grad = jax.jit(jax.value_and_grad(freq_after))(jnp.float64(0.08))
     assert jnp.isfinite(value)
     # d/dg (g^2/Δ) = 2g/Δ, Δ = -2.0
     assert float(grad) == pytest.approx(2 * 0.08 / (5.0 - 7.0), rel=1e-4)
 
 
-def test_chi_is_traced_and_grad_matches_leading_order():
-    """eliminate()'s chi stays traced and dchi/dg matches the leading-order chi ∝ g² scaling."""
-    def chi_of_g(g):
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        r = Resonator(freq=6.5, internal_quality_factor=5000.0, levels=4, label="r")
-        chip = Chip([q, r], couplings=[Capacitive(q, r, g=g)])
-        return eliminate(chip, "r").effective_params["q"]["chi"]
-
-    chi, dchi_dg = jax.value_and_grad(chi_of_g)(jnp.float64(0.05))
-    assert jnp.isfinite(dchi_dg)
-    # χ ∝ g² at leading order, so dχ/dg ≈ 2χ/g.
-    assert float(dchi_dg) == pytest.approx(2 * float(chi) / 0.05, rel=0.02)
-
-
-def test_readout_snr_is_differentiable_through_the_full_pipeline():
-    """The eliminate -> analyze_dispersive_readout pipeline is differentiable in g and jit-consistent."""
-    # eliminate() -> analyze_dispersive_readout() composes into one traced
-    # graph: d(SNR)/d(g) is finite and nonzero, and the pipeline jits.
+@pytest.mark.validation
+def test_dispersive_readout_value_and_gradients():
+    """The same reduction yields chi's perturbative derivative and a consistent readout SNR gradient."""
     from quchip.analysis import analyze_dispersive_readout
 
-    def snr_of_g(g):
+    def observables(g):
         q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
         r = Resonator(freq=6.5, internal_quality_factor=5000.0, levels=4, label="r")
         chip = Chip([q, r], couplings=[Capacitive(q, r, g=g)])
         eff = eliminate(chip, "r").effective_params["q"]
-        ro = analyze_dispersive_readout(chi=eff["chi"], kappa=eff["kappa"], tau=500.0, n_photons=2.0)
-        return ro.snr
+        snr = analyze_dispersive_readout(chi=eff["chi"], kappa=eff["kappa"], tau=500.0, n_photons=2.0).snr
+        values = jnp.stack((eff["chi"], snr))
+        return values, values
 
     g0 = jnp.float64(0.05)
-    grad = jax.grad(snr_of_g)(g0)
-    assert jnp.isfinite(grad)
-    assert float(grad) != 0.0
-    jitted = float(jax.jit(snr_of_g)(g0))
-    assert jitted == pytest.approx(float(snr_of_g(g0)), rel=1e-9)
+    gradients, values = jax.jit(jax.jacrev(observables, has_aux=True))(g0)
+    chi, snr = values
+    dchi, dsnr = gradients
+    assert jnp.isfinite(gradients).all()
+    # chi is proportional to g squared in this dispersive regime.
+    assert float(dchi) == pytest.approx(2 * float(chi) / 0.05, rel=0.02)
+    assert float(dsnr) != 0.0
+    assert float(snr) == pytest.approx(float(observables(g0)[0][1]), rel=1e-9)
+    step = 1e-5
+    reference = (observables(g0 + step)[0][1] - observables(g0 - step)[0][1]) / (2 * step)
+    assert float(dsnr) == pytest.approx(float(reference), rel=1e-3)
 
 
+@pytest.mark.validation
 def test_eliminated_chip_solve_is_jittable_and_grad_in_g():
     """A solve on the eliminated (reduced) chip is jittable and its gradient in g is finite and negative."""
     def final_excited(g):
@@ -158,8 +151,7 @@ def test_eliminated_chip_solve_is_jittable_and_grad_in_g():
             )
         return jnp.real(res.expect("q")[-1])
 
-    value = jax.jit(final_excited)(jnp.float64(0.05))
-    grad = jax.grad(final_excited)(jnp.float64(0.05))
+    value, grad = jax.jit(jax.value_and_grad(final_excited))(jnp.float64(0.05))
     assert jnp.isfinite(value)
     # Larger g -> faster Purcell decay -> less surviving excitation.
     assert jnp.isfinite(grad) and float(grad) < 0.0

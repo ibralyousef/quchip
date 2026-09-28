@@ -20,6 +20,7 @@ def preparation(backend="qutip", *, mixed=False, states="final"):
     return chip, q, result
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 @pytest.mark.parametrize("mixed", [False, True])
 def test_born_probabilities_and_counts_preserve_ket_dm_semantics(backend, mixed):
@@ -169,6 +170,7 @@ def wired_result(*, backend="qutip", gain=100., noise=1., loss=.25, delay=0.):
     return chip, out, drive, result
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 @pytest.mark.parametrize("delay", [0., .123])
 def test_wiring_readout_matches_vna_noise_and_captures_model(backend, delay):
@@ -268,6 +270,7 @@ def test_thermal_evolution_and_downstream_noise_have_separate_owners():
     assert warm.measure(r).probabilities[1] > .05
 
 
+@pytest.mark.validation
 def test_wiring_noise_retains_differentiated_gain():
     """Amplifier noise and engineering cable phase retain their analytical derivatives."""
     import jax

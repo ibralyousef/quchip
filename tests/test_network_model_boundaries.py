@@ -7,6 +7,9 @@ from quchip import Chip, Exact, PortNetwork, Resonator
 from quchip.inverse_design.subsystems import build_local_subsystem
 
 
+pytestmark = pytest.mark.unit
+
+
 def _cascade_chip():
     first = Resonator(freq=5.0, levels=2, label="a")
     second = Resonator(freq=6.0, levels=2, label="b")

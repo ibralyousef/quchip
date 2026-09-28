@@ -13,6 +13,7 @@ def _result(backend, states="none"):
                              states=states, e_ops={"q": q.number_operator()})
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_observable_queries_use_saved_values_independently_of_states(backend):
     result = _result(backend)
@@ -86,6 +87,7 @@ def test_partitioned_observable_lookup_uses_the_shared_saved_grid():
     np.testing.assert_array_equal(result.observable_at([0.0, 3.0], result.expect("a")), [0.0, 0.0])
 
 
+@pytest.mark.validation
 def test_observable_lookup_inside_a_differentiated_solve():
     import jax
     import jax.numpy as jnp

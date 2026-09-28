@@ -8,6 +8,9 @@ import pytest
 from quchip import ChargeDrive, Chip, ControlEquipment, DuffingTransmon, QuantumSequence, Square
 
 
+pytestmark = pytest.mark.unit
+
+
 def _driven_engine():
     qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
     drive = ChargeDrive(qubit, label="charge")

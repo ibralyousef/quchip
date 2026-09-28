@@ -251,6 +251,7 @@ def test_output_field_batch_preserves_grid_and_post_solve_analysis() -> None:
     np.testing.assert_allclose(field.quadrature(), np.real(field.amplitude))
 
 
+@pytest.mark.validation
 def test_qutip_and_dynamiqs_complete_output_fields_agree() -> None:
     """QuTiP and Dynamiqs agree on amplitude and photon-flux traces."""
     pytest.importorskip("dynamiqs")
@@ -272,6 +273,7 @@ def test_qutip_and_dynamiqs_complete_output_fields_agree() -> None:
     np.testing.assert_allclose(dynamiqs[1], qutip[1], atol=2e-7)
 
 
+@pytest.mark.validation
 def test_dynamiqs_output_quadrature_is_differentiable_after_the_solve() -> None:
     """Post-solve field analysis stays differentiable through dynamiqs."""
     pytest.importorskip("dynamiqs")
@@ -348,6 +350,7 @@ def test_outbound_filter_needs_a_known_output_carrier() -> None:
         )
 
 
+@pytest.mark.validation
 def test_dynamiqs_transient_filter_parameter_is_differentiable() -> None:
     """A traced filter parameter flows through the inbound and outbound carrier factors."""
     pytest.importorskip("dynamiqs")
@@ -375,7 +378,7 @@ def test_dynamiqs_transient_filter_parameter_is_differentiable() -> None:
         ).output(plane)
         return field.quadrature()[-1]
 
-    value, gradient = jax.value_and_grad(final_quadrature)(jnp.asarray(1.3))
+    value, gradient = jax.jit(jax.value_and_grad(final_quadrature))(jnp.asarray(1.3))
     assert jnp.isfinite(value)
     assert jnp.isfinite(gradient)
     assert gradient != 0.0

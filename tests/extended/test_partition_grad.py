@@ -17,6 +17,7 @@ from quchip.backend.dynamiqs import DynamiqsBackend  # noqa: E402
 from quchip.results.partitioned import PartitionedSimulationResult  # noqa: E402
 
 
+@pytest.mark.validation
 def test_grad_flows_through_partitioned_solve():
     """The gradient of a partitioned-solve expectation value w.r.t. drive amplitude is finite and nonzero."""
 
@@ -41,5 +42,5 @@ def test_grad_flows_through_partitioned_solve():
         assert isinstance(result, PartitionedSimulationResult)
         return jax.numpy.real(result.expect("q0")[-1])
 
-    grad = jax.grad(loss)(0.02)
+    grad = jax.jit(jax.grad(loss))(0.02)
     assert np.isfinite(float(grad)) and abs(float(grad)) > 0.0

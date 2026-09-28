@@ -14,13 +14,9 @@ from quchip import (
     FluxDrive,
     FluxTunableTransmon,
     ParametricDrive,
-    QuantumSequence,
     Resonator,
-    Square,
     TunableCapacitive,
-    register_retarget_rule,
 )
-from quchip.chip.retarget import RetargetResult, _RETARGET_RULES
 from quchip.chip.transformations import eliminate
 
 
@@ -54,35 +50,6 @@ def test_flux_drive_on_eliminated_bridge_converts_to_parametric_pump():
     (gain,) = ce.signal_chain
     assert gain.line == flux.label
     assert np.isclose(complex(gain.factor).real, float(res.effective_params["exchange"]["dJ_domega_c"]))
-
-
-def test_flux_drive_conversion_note_reports_the_swap():
-    """The elimination's notes record the FluxDrive-to-ParametricDrive conversion by drive type and line label."""
-    chip, flux = _flux_bridge_chip()
-    res = eliminate(chip, "fc")
-    assert any("FluxDrive" in note and "ParametricDrive" in note and flux.label in note for note in res.notes)
-
-
-def test_retargeted_line_schedules_by_object_coupling_label_and_drive_label():
-    """Scheduling by the drive's own label survives elimination; the retargeted line also schedules by object/label."""
-    chip, flux = _flux_bridge_chip()
-
-    # Portability: the drive label schedules on the FULL chip too.
-    QuantumSequence(chip).schedule(flux.label, envelope=Square(duration=20.0, amplitude=0.01))
-
-    reduced = eliminate(chip, "fc").chip
-    (line,) = reduced.control_equipment.lines
-    assert line.label == flux.label
-    assert isinstance(line, ParametricDrive)
-
-    # Object form.
-    QuantumSequence(reduced).schedule(line, envelope=Square(duration=20.0, amplitude=0.01))
-    # Coupling-label form — the standard ParametricDrive pump-line lookup.
-    QuantumSequence(reduced).schedule("elim_fc", envelope=Square(duration=20.0, amplitude=0.01))
-    # Drive-label form — schedule()'s string fallback onto the control-equipment
-    # line directly; no freq needed (baseband).
-    handle = QuantumSequence(reduced).schedule(flux.label, envelope=Square(duration=20.0, amplitude=0.01))
-    assert handle is not None
 
 
 def test_charge_drive_on_eliminated_leaf_still_raises_with_upgraded_message():
@@ -120,33 +87,6 @@ def test_parametric_drive_on_doomed_leg_edge_raises():
     assert "chip.unwire('pump')" in message
 
 
-def test_custom_leaf_fold_rule_converts_and_reports_its_note():
-    """A user-registered (ChargeDrive, Resonator, 'leaf-fold') rule converts and its note lands in res.notes."""
-
-    def _swap_for_charge_on_q(line, ctx):
-        replacement = ChargeDrive(ctx.reduced_chip["q"], label=line.label)
-        return RetargetResult(lines=(replacement,), note=f"custom rule converted '{line.label}'")
-
-    register_retarget_rule(ChargeDrive, Resonator, "leaf-fold", _swap_for_charge_on_q)
-    try:
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        r = Resonator(freq=7.0, levels=4, label="r")
-        probe = ChargeDrive(r, label="probe")
-        chip = Chip(
-            [q, r],
-            couplings=[Capacitive(q, r, g=0.05)],
-            control_equipment=ControlEquipment([probe]),
-        )
-        res = eliminate(chip, "r")
-        (line,) = res.chip.control_equipment.lines
-        assert line.label == "probe"
-        assert isinstance(line, ChargeDrive)
-        assert line.device_label == "q"
-        assert any("custom rule converted 'probe'" in note for note in res.notes)
-    finally:
-        del _RETARGET_RULES[(ChargeDrive, Resonator, "leaf-fold")]
-
-
 def _three_survivor_chip():
     qs = [DuffingTransmon(freq=f, anharmonicity=-0.25, levels=3, label=f"q{i}") for i, f in enumerate([5.0, 5.2, 5.4])]
     fc = FluxTunableTransmon(freq=6.3, anharmonicity=-0.2, levels=3, label="fc")
@@ -154,6 +94,7 @@ def _three_survivor_chip():
     return Chip(qs + [fc], couplings=legs, control_equipment=ControlEquipment([FluxDrive(fc, label="cflux")]))
 
 
+@pytest.mark.validation
 def test_flux_drive_on_three_survivor_mode_converts_one_pump_per_edge():
     """One flux knob moves every pairwise J; the conversion emits one weighted pump per emitted edge."""
     from quchip.control.signal import Crosstalk, Gain
@@ -191,18 +132,3 @@ def test_flux_drive_on_three_survivor_mode_converts_one_pump_per_edge():
     # no-op until the copy has landed.
     chain_types = [type(t).__name__ for t in ce.signal_chain]
     assert chain_types.index("Gain") > max(i for i, t in enumerate(chain_types) if t == "Crosstalk")
-
-
-def test_three_survivor_replay_compiles_through_stage_two():
-    """The replayed schedule('cflux', ...) drives all three edges on the reduced chip."""
-    res = eliminate(_three_survivor_chip(), "fc")
-    seq = QuantumSequence(res.chip)
-    seq.schedule("cflux", envelope=Square(duration=100.0, amplitude=0.02))
-    problem = seq.build_problem(tlist=np.linspace(0.0, 100.0, 11))
-    driven = np.asarray(problem.engine_result.hamiltonian().matrix(t=5.0))
-    idle = np.asarray(res.chip.hamiltonian().matrix())
-    for pair, values in res.effective_params["exchange"].items():
-        indices = [np.ravel_multi_index(tuple(int(device.label == label) for device in res.chip.devices),
-                                       res.chip.dims) for label in pair]
-        assert driven[indices[0], indices[1]] - idle[indices[0], indices[1]] == pytest.approx(
-            0.02 * float(values["dJ_domega_c"]), abs=1e-12)

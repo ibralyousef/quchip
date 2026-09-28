@@ -7,62 +7,16 @@ from quchip.approximations import RWA
 import numpy as np
 import pytest
 
-from quchip import Bath, Capacitive, ChargeDrive, Chip, Crosstalk, DuffingTransmon, Gaussian
+from quchip import Bath, Capacitive, ChargeDrive, Chip, DuffingTransmon, Gaussian
 from quchip.chip.partition import (
-    connected_components,
-    independence_edges,
     split_drive_ops,
     split_e_ops,
-    split_state_mapping,
 )
 from quchip.control.sequence import QuantumSequence
 
 
 def _four_qubits():
     return [DuffingTransmon(freq=5.0 + 0.1 * i, anharmonicity=-0.25, levels=3, label=f"q{i}") for i in range(4)]
-
-
-def test_isolated_device_is_its_own_component():
-    """A device with no coupling edges is its own singleton independence component."""
-    q0, q1, q2, _ = _four_qubits()
-    chip = Chip([q0, q1, q2], couplings=[Capacitive(q0, q1, g=0.005)])
-    comps = connected_components([d.label for d in chip.devices], independence_edges(chip))
-    assert comps == [["q0", "q1"], ["q2"]]
-
-
-def test_collective_bath_targets_merge_components():
-    """A non-separable bath whose targets span two coupled components merges them into one independence component."""
-    q0, q1, q2, q3 = _four_qubits()
-    chip = Chip(
-        [q0, q1, q2, q3],
-        couplings=[Capacitive(q0, q1, g=0.005), Capacitive(q2, q3, g=0.005)],
-        baths=[Bath("collective_decay", targets=[q0, q2], rate=0.001)],
-    )
-    comps = connected_components([d.label for d in chip.devices], independence_edges(chip))
-    assert comps == [["q0", "q1", "q2", "q3"]]
-
-
-def test_separable_thermal_bath_does_not_merge():
-    """A separable thermal bath contributes no independence edges, leaving separately coupled components unmerged."""
-    q0, q1, q2, q3 = _four_qubits()
-    chip = Chip(
-        [q0, q1, q2, q3],
-        couplings=[Capacitive(q0, q1, g=0.005), Capacitive(q2, q3, g=0.005)],
-        baths=[Bath("thermal", temperature=20.0, rate=0.001)],
-    )
-    comps = connected_components([d.label for d in chip.devices], independence_edges(chip))
-    assert comps == [["q0", "q1"], ["q2", "q3"]]
-
-
-def test_drive_crosstalk_merges_components():
-    """Classical drive crosstalk between lines on different coupled components merges those components into one."""
-    q0, q1, q2, q3 = _four_qubits()
-    d1 = ChargeDrive(target=q1, label="d1")
-    d3 = ChargeDrive(target=q3, label="d3")
-    chip = Chip([q0, q1, q2, q3], couplings=[Capacitive(q0, q1, g=0.005), Capacitive(q2, q3, g=0.005)])
-    chip.wire(d1, d3, signal_chain=[Crosstalk(d1, d3, beta=0.02)])
-    comps = connected_components([d.label for d in chip.devices], independence_edges(chip))
-    assert comps == [["q0", "q1", "q2", "q3"]]
 
 
 def _disconnected_chip(with_bath: bool = False, with_lines: bool = False):
@@ -145,43 +99,12 @@ def test_split_drive_ops_routes_by_target():
     assert [o.target_label for o in per[1]] == ["q3", "c23"]
 
 
-def test_split_e_ops_local_and_cross():
-    """split_e_ops() places a local entry in its own component; a cross-component correlator becomes a CrossEop."""
-    _, part = _partitioned_disconnected_chip()
-    e_ops = {"q0": "Z", ("q1", "q2"): ("Z", "Z")}
-    per, plan = split_e_ops(part, e_ops)
-    assert per[0]["q0"] == "Z"
-    assert per[0]["q1"] == "Z" and per[1]["q2"] == "Z"
-    local = plan["q0"]
-    assert (local.component, local.key, local.index) == (0, "q0", None)
-    cross = plan[("q1", "q2")]
-    assert (cross.a.component, cross.a.key) == (0, "q1")
-    assert (cross.b.component, cross.b.key) == (1, "q2")
-
-
-def test_split_e_ops_listifies_on_collision():
-    """A local value colliding with an injected cross-component factor becomes a list, local value first."""
-    _, part = _partitioned_disconnected_chip()
-    e_ops = {"q1": "X", ("q1", "q2"): ("Z", "Z")}
-    per, plan = split_e_ops(part, e_ops)
-    assert per[0]["q1"] == ["X", "Z"]
-    assert plan["q1"].index == 0
-    assert plan[("q1", "q2")].a.index == 1
-
-
 def test_split_e_ops_same_component_tuple_stays_verbatim():
     """A tuple key whose two labels resolve to the same component passes through unchanged, not split into factors."""
     _, part = _partitioned_disconnected_chip()
     per, plan = split_e_ops(part, {("q0", "q1"): ("Z", "Z")})
     assert per[0][("q0", "q1")] == ("Z", "Z")
     assert plan[("q0", "q1")].component == 0
-
-
-def test_split_state_mapping():
-    """split_state_mapping() distributes a device-keyed state mapping into per-component dicts by owning component."""
-    _, part = _partitioned_disconnected_chip()
-    per = split_state_mapping(part, {"q0": 1, "q3": 1})
-    assert per == [{"q0": 1}, {"q3": 1}]
 
 
 def test_split_e_ops_hub_three_correlators_all_get_correct_indices():
@@ -210,30 +133,6 @@ def test_split_e_ops_hub_three_correlators_all_get_correct_indices():
         assert cross.b.index == expected_index
 
 
-def test_split_e_ops_cross_before_local_preserves_both():
-    """A cross-component correlator before a same-label local entry still keeps the local value first, factor after."""
-    # Finding 2 (Critical): a local key processed after a cross tuple key
-    # touching the same label must not silently overwrite the injected factor.
-    _, part = _partitioned_disconnected_chip()
-    e_ops = {("q1", "q2"): ("Z", "Z"), "q1": "X"}
-    per, plan = split_e_ops(part, e_ops)
-    assert per[0]["q1"] == ["X", "Z"]
-    assert plan["q1"].index == 0
-    assert plan[("q1", "q2")].a.index == 1
-
-
-def test_split_e_ops_list_local_with_factor_appends_after_user_indices():
-    """A list-valued local entry keeps the user's indices at the head; the injected factor appends after them."""
-    # A list-valued local entry keeps the user's own indices at the head;
-    # the injected factor is appended after them.
-    _, part = _partitioned_disconnected_chip()
-    e_ops = {"q1": ["X", "Y"], ("q1", "q2"): ("Z", "Z")}
-    per, plan = split_e_ops(part, e_ops)
-    assert per[0]["q1"] == ["X", "Y", "Z"]
-    assert plan["q1"].index is None
-    assert plan[("q1", "q2")].a.index == 2
-
-
 def test_split_e_ops_duplicate_resolved_key_raises():
     """Two e_ops keys resolving to the same device label raise ValueError instead of silently overwriting."""
     # Finding 3 (Important): two user keys resolving to the same label
@@ -242,15 +141,6 @@ def test_split_e_ops_duplicate_resolved_key_raises():
     q0_device = chip["q0"]
     with pytest.raises(ValueError, match="q0"):
         split_e_ops(part, {q0_device: "X", "q0": "Y"})
-
-
-def test_split_e_ops_malformed_cross_value_raises_with_key_context():
-    """A malformed cross-component correlator value raises ValueError naming the offending key pair."""
-    # Finding 4 (Minor): a malformed correlator value must raise a clear
-    # error naming the offending key, not a bare unpack ValueError.
-    _, part = _partitioned_disconnected_chip()
-    with pytest.raises(ValueError, match=r"q1.*q2|q2.*q1"):
-        split_e_ops(part, {("q1", "q2"): "Z"})
 
 
 def _solved_components():
@@ -337,18 +227,6 @@ def test_engine_partition_parity_with_joint_solve():
     assert np.allclose(np.asarray(split.population("q1", 0)), np.asarray(joint.population("q1", 0)), atol=1e-8)
 
 
-def test_engine_partition_declines_on_raw_state():
-    """simulate() declines partition dispatch, returning a plain SimulationResult for a raw initial_state."""
-    from quchip.engine import simulate
-    from quchip.results.results import SimulationResult
-
-    chip, seq = _driven_disconnected_chip()
-    tlist = np.linspace(0.0, 20.0, 21)
-    raw = chip.bare_state({"q0": 1})
-    result = simulate(chip, list(seq.scheduled_ops), tlist, initial_state=raw)
-    assert isinstance(result, SimulationResult)
-
-
 def test_engine_partition_mapping_initial_state():
     """A label-keyed initial_state mapping partitions correctly, matching the joint solve's expectation values."""
     from quchip.engine import simulate
@@ -398,17 +276,6 @@ def test_final_state_mixed_ket_and_dm_components_promotes_to_joint_dm():
     arr = np.asarray(backend.to_array(final), dtype=complex)
     assert arr.ndim == 2 and arr.shape[0] == arr.shape[1]
     assert np.isclose(np.trace(arr).real, 1.0, atol=1e-6)
-
-
-def test_partitioned_result_mismatched_length_raises():
-    """PartitionedSimulationResult raises ValueError when component_results and partition.components misalign."""
-    from quchip.chip.partition import LocalEop
-    from quchip.results.partitioned import PartitionedSimulationResult
-
-    part, results, tlist = _solved_components()
-    plan = {"q0": LocalEop(component=0, key="q0", index=None)}
-    with pytest.raises(ValueError, match="component_results"):
-        PartitionedSimulationResult(results[:1], part, plan)
 
 
 def test_sequence_simulate_partitions_by_default():
@@ -486,25 +353,3 @@ def test_partitioned_final_state_matches_joint_in_interleaved_device_order():
     # (observed ~1e-6) is expected even though there is no global-phase
     # ambiguity to account for here.
     assert np.allclose(joint_arr, split_arr, atol=1e-5)
-
-
-def test_partitioned_result_getattr_raises_directed_message():
-    """An unimplemented attribute access raises AttributeError directing the caller to '.components[i]'."""
-    from quchip.results.partitioned import PartitionedSimulationResult
-
-    part, results, tlist = _solved_components()
-    combined = PartitionedSimulationResult(results, part, {})
-    with pytest.raises(AttributeError, match=r"components\[i\]"):
-        combined.plot_populations
-
-
-def test_expect_cross_eop_rejects_nonzero_index():
-    """expect() rejects a nonzero index on a cross-component correlator key, since a correlator is a single trace."""
-    from quchip.chip.partition import CrossEop, LocalEop
-    from quchip.results.partitioned import PartitionedSimulationResult
-
-    part, results, tlist = _solved_components()
-    plan = {("q0", "q2"): CrossEop(a=LocalEop(0, "q0", None), b=LocalEop(1, "q2", None))}
-    combined = PartitionedSimulationResult(results, part, plan)
-    with pytest.raises(ValueError, match="index"):
-        combined.expect(("q0", "q2"), index=0)

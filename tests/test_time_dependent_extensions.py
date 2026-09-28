@@ -13,6 +13,11 @@ from quchip.engine.ir import evaluate_signal_program
 from quchip.extensions import FrequencyModulatedMode, ModulatedCapacitive
 from quchip.utils.constants import TWO_PI
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 
 def test_frequency_modulated_mode_resolves_device_time_term() -> None:
     mode = FrequencyModulatedMode(

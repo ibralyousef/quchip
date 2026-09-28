@@ -11,6 +11,9 @@ import quchip.backend as backend_module
 from quchip.chip.chip import Chip
 
 
+pytestmark = pytest.mark.unit
+
+
 INSTALL_HINT = "DynamiqsBackend requires dynamiqs and JAX. Install with: pip install quchip[dynamiqs]"
 
 

@@ -22,6 +22,7 @@ class FiniteQubit(DrivenLadder):
         return None
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 @pytest.mark.parametrize("storage", ["all", "final", "none"])
 def test_boundary_excursion_is_checked_before_return_to_ground(backend, storage):
@@ -43,6 +44,7 @@ def test_boundary_excursion_is_checked_before_return_to_ground(backend, storage)
     assert result.observable_traces.keys() == {"q"}
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_intrinsically_finite_qubit_has_no_cutoff_warning(backend):
     chip = Chip([FiniteQubit(label="q")], backend=backend, frame="lab")
@@ -213,6 +215,7 @@ def test_boundary_indices_capture_source_sequence_and_reject_double_counting():
         TruncationBoundary((1, 1), "custom cutoff", "Compare larger cutoffs.")
 
 
+@pytest.mark.validation
 def test_sampled_boundary_maximum_has_the_correct_gradient():
     import jax
     from quchip.engine import solve_problem
@@ -231,6 +234,7 @@ def test_sampled_boundary_maximum_has_the_correct_gradient():
     assert derivative == pytest.approx(2 * np.pi * np.sin(4 * np.pi * 0.21), abs=2e-5)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_saved_samples_and_prepared_diagnostics_agree_on_frozen_grid(backend):
     """Explicit preparation preserves the grid and final-only checks state their coverage."""

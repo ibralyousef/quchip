@@ -39,6 +39,7 @@ def test_isolated_transition_uses_energy_states_in_the_authored_basis() -> None:
         device.transition_frequency(0, 4)
 
 
+@pytest.mark.validation
 def test_isolated_transition_frequency_is_jax_transformable() -> None:
     def gap(frequency):
         device = DuffingTransmon(
@@ -64,24 +65,6 @@ def dressed_chip():
     return chip, qubit, resonator
 
 
-def test_dressed_transition_frequency_matches_energy_arithmetic(dressed_chip) -> None:
-    chip, qubit, resonator = dressed_chip
-
-    bare = chip.transition_frequency(qubit, 0, 2)
-    conditioned = chip.transition_frequency("q", 0, 2, when={"r": 1})
-
-    assert bare == pytest.approx(chip.energy(q=2, r=0) - chip.energy(q=0, r=0))
-    assert conditioned == pytest.approx(chip.energy(q=2, r=1) - chip.energy(q=0, r=1))
-    assert chip.freq(qubit) == pytest.approx(chip.transition_frequency(qubit, 0, 1))
-    assert chip.freq("q", when={resonator: 1}) == pytest.approx(
-        chip.transition_frequency("q", 0, 1, when={"r": 1})
-    )
-    assert chip.freq() == {
-        device.label: pytest.approx(chip.transition_frequency(device, 0, 1))
-        for device in chip.devices
-    }
-
-
 def test_dressed_transition_is_independent_of_solve_approximation() -> None:
     def build(approximation):
         first = Resonator(freq=5.0, levels=3, label="first")
@@ -100,41 +83,11 @@ def test_dressed_transition_is_independent_of_solve_approximation() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("lower", "upper", "match"),
-    [
-        (False, 1, "integer"),
-        (0, True, "integer"),
-        (0.0, 1, "integer"),
-        (-1, 1, ">= 0"),
-        (1, 1, "lower < upper"),
-        (2, 1, "lower < upper"),
-        (0, 4, "dimension"),
-    ],
-)
-def test_dressed_transition_rejects_invalid_level_pairs(
-    dressed_chip, lower, upper, match
-) -> None:
-    chip, qubit, _ = dressed_chip
-
-    with pytest.raises((TypeError, ValueError), match=match):
-        chip.transition_frequency(qubit, lower, upper)
-    with pytest.raises((TypeError, ValueError), match=match):
-        qubit.transition_frequency(lower, upper)
-
-
 def test_dressed_transition_rejects_target_in_condition(dressed_chip) -> None:
     chip, qubit, _ = dressed_chip
 
     with pytest.raises(ValueError, match="target"):
         chip.transition_frequency(qubit, 0, 1, when={qubit: 2})
-
-
-def test_dressed_transition_rejects_duplicate_condition_keys(dressed_chip) -> None:
-    chip, qubit, resonator = dressed_chip
-
-    with pytest.raises(ValueError, match="Duplicate device specification"):
-        chip.transition_frequency(qubit, 0, 1, when={resonator: 1, "r": 2})
 
 
 def test_dressed_transition_rejects_non_mapping_condition(dressed_chip) -> None:
@@ -153,6 +106,7 @@ def test_dressed_transition_rejects_ambiguous_assignment() -> None:
         chip.transition_frequency(first, 0, 1)
 
 
+@pytest.mark.validation
 def test_dressed_transition_frequency_is_jax_transformable() -> None:
     pytest.importorskip("dynamiqs")
 

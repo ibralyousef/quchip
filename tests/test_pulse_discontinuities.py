@@ -37,6 +37,7 @@ def test_short_square_pulse_is_resolved_on_two_point_grid(backend_name):
     np.testing.assert_array_equal(result.times, [0.0, 308.0])
 
 
+@pytest.mark.validation
 def test_short_pulse_width_and_amplitude_gradients_survive_jit():
     import jax
     import jax.numpy as jnp
@@ -56,6 +57,7 @@ def test_short_pulse_width_and_amplitude_gradients_survive_jit():
     np.testing.assert_allclose(gradient, np.sin(1.0) * np.array([0.1, 5.0]), atol=2e-6)
 
 
+@pytest.mark.validation
 def test_native_batch_preserves_distinct_pulse_edges_and_gradients():
     import jax
     import jax.numpy as jnp
@@ -91,6 +93,7 @@ def test_qutip_square_pulse_has_no_interpolation_area_outside_support():
     assert area == pytest.approx(width, abs=1e-4)
 
 
+@pytest.mark.validation
 def test_native_batch_can_mix_absent_and_dense_static_terms():
     from dataclasses import replace
     from quchip.backend.dynamiqs import DynamiqsBackend

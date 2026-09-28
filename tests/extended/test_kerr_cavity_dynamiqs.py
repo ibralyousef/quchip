@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 pytestmark = [pytest.mark.extended, pytest.mark.optional_backend]
@@ -16,6 +17,7 @@ from quchip.devices.kerr_cavity import KerrCavity  # noqa: E402
 from quchip.engine.ir import Constant  # noqa: E402
 
 
+@pytest.mark.validation
 def test_kerr_cavity_and_two_photon_drive_build_with_dynamiqs_backend() -> None:
     """Operator products must use backend matrix multiplication, not elementwise multiplication."""
     set_default_backend("dynamiqs")
@@ -26,5 +28,7 @@ def test_kerr_cavity_and_two_photon_drive_build_with_dynamiqs_backend() -> None:
     hamiltonian = cav.hamiltonian()
     operator = drive.hamiltonian(cav, AnalyticSignal(Constant(1.0)))
 
-    assert hamiltonian.matrix().shape == (5, 5)
-    assert operator.matrix(t=0.0).shape == (5, 5)
+    a = np.diag(np.sqrt(np.arange(1, 5)), 1)
+    n = np.diag(np.arange(5))
+    np.testing.assert_allclose(hamiltonian.matrix(), 5.0 * n - 0.25 * n @ (n - np.eye(5)))
+    np.testing.assert_allclose(operator.matrix(t=0.0), a @ a + a.T @ a.T)

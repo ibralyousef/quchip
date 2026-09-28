@@ -40,10 +40,11 @@ def test_forward_and_reverse_derivatives_agree_with_finite_differences() -> None
     assert abs(reference) > 1e-4
 
 
+@pytest.mark.validation
 def test_hessian_is_finite_away_from_degeneracies() -> None:
     """Second derivatives are finite and match a second difference at a nondegenerate operating point."""
     chip = _dispersive_chip()
-    curvature = float(jax.hessian(lambda f: _resonator_frame(chip, f))(5.0))
+    curvature = float(jax.jit(jax.hessian(lambda f: _resonator_frame(chip, f)))(5.0))
     step = 1e-3
     reference = (
         _resonator_frame(chip, 5.0 + step) - 2 * _resonator_frame(chip, 5.0) + _resonator_frame(chip, 5.0 - step)
@@ -81,6 +82,7 @@ def test_eigenprojector_derivative_is_independent_of_energy_origin(origin: float
     np.testing.assert_allclose(tangent, finite_difference, rtol=1e-6, atol=1e-6)
 
 
+@pytest.mark.validation
 def test_canonical_energy_vector_phase_and_derivative_agree():
     """The largest authored component is positive and its local phase derivative is correct."""
     from quchip.engine.basis import resolve_local_basis

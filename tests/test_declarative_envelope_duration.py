@@ -5,6 +5,9 @@ import pytest
 from quchip.declarative import Envelope, Scalar, parameter
 
 
+pytestmark = pytest.mark.unit
+
+
 class _NoDuration(Envelope):
     amplitude: Scalar = parameter(default=1.0)
 

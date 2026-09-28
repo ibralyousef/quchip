@@ -6,6 +6,9 @@ import pytest
 from quchip import Capacitive, ChargeDrive, Chip, DuffingTransmon, QuantumSequence, Resonator, Square
 
 
+pytestmark = pytest.mark.unit
+
+
 def test_local_hamiltonian_is_independent_of_chip_membership() -> None:
     """Sharing a device between differently framed chips never changes its local Hamiltonian."""
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")

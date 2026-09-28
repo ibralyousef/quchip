@@ -33,6 +33,7 @@ def test_dark_transition_is_rejected() -> None:
         device.collapse_operators()
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_projected_fluxonium_two_backends_agree() -> None:
     """QuTiP and Dynamiqs agree on the same engine-materialized Hamiltonian."""
