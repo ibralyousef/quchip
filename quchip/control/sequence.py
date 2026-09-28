@@ -867,9 +867,8 @@ class QuantumSequence:
             operator (or a pair of local operators). Decomposed into
             per-band terms before reaching the solver.
         initial_state : Any, optional
-            A ket, density matrix, or mapping for
-            :meth:`~quchip.chip.chip.Chip.state`. Defaults to the chip's
-            default initial state when omitted.
+            Initial state; see :meth:`simulate` for accepted forms, coordinate
+            conventions, and the meaning of ``None``.
         approximation : Approximation, optional
             Engine approximation override. ``None`` uses the chip default.
         frame : FrameSpec, optional
@@ -1068,7 +1067,9 @@ class QuantumSequence:
         e_ops : dict or None, default=None
             Local expectation-operator specifications.
         initial_state : Any or None, default=None
-            Initial ket, density matrix, or state mapping.
+            State reused at every batch point; see :meth:`simulate` for accepted
+            forms and coordinate conventions. An ``initial_state`` axis supplies
+            one state per point.
         approximation : Approximation or None, default=None
             Engine approximation override.
         states : {"all", "final", "none"} or None, default=None
@@ -1272,8 +1273,12 @@ class QuantumSequence:
         e_ops : dict, optional
             Named observables to evaluate.
         initial_state : object or mapping, optional
-            Initial state in the chip basis. ``None`` uses the joint ground state;
-            mappings may supply one state per partitioned component.
+            Initial state; ``None`` starts every device in its local ground state as a
+            bare product state. Mappings and configured string shorthand give product
+            states in the resolved local bases. QuTiP ``Qobj`` and dynamiqs ``QArray``
+            kets or density matrices use resolved solver coordinates; arrays, symbolic
+            expressions, and callables are authored-space kets projected onto retained
+            levels.
         backend : object or {"qutip", "dynamiqs"}, optional
             Per-call backend override.
         partition : bool, default=True
