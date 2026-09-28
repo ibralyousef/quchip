@@ -328,11 +328,17 @@ def simulate(
         Observables keyed by device label (or a 2-tuple of labels for a
         two-body observable).
     initial_state : optional
-        Initial state. ``None`` defaults to the chip ground state. A
-        ``Mapping`` (device label/object -> energy level, e.g.
-        ``{"q0": 1}``) becomes a product state in the engine's resolved
-        local bases on both the joint and partitioned paths. An authored
-        full-space ket is projected into that same solver space.
+        Initial state. ``None`` starts every device in its local ground state as a
+        bare product state. A ``Mapping`` gives a product state from per-device
+        energy levels or authored local kets; configured string shorthand gives
+        per-device energy levels. Both are built in the resolved local bases. QuTiP
+        ``Qobj`` and dynamiqs ``QArray`` kets or density matrices use resolved
+        solver coordinates; their first dimension must match the retained
+        dimension. NumPy and JAX arrays, symbolic state expressions, and callables
+        are authored-space kets with the full authored dimension; they are
+        projected onto the retained local levels and warn if projection discards
+        norm. Authored density-matrix arrays are rejected. Authored and solver
+        coordinates coincide on devices with ``basis="native"``.
     approximation : Approximation or None, optional
         Approximation strategy captured during assembly; ``None`` uses the
         chip declaration.
