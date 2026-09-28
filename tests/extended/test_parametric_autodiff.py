@@ -24,6 +24,7 @@ from quchip import (  # noqa: E402
 )
 
 
+@pytest.mark.validation
 def test_grad_through_pump_amplitude():
     """The gradient of the final q1 population w.r.t. pump amplitude is finite and non-negligible."""
 
@@ -45,4 +46,6 @@ def test_grad_through_pump_amplitude():
 
     g = jax.grad(loss)(0.004)
     assert np.isfinite(float(g))
-    assert abs(float(g)) > 1e-3  # transfer is amplitude-sensitive below the swap point
+    # In the one-excitation RWA manifold, P01 = sin(2*pi*amplitude*T)^2.
+    assert abs(float(g)) > 1e-3
+    np.testing.assert_allclose(g, 2 * np.pi * 50 * np.sin(4 * np.pi * 0.004 * 50), rtol=2e-5)

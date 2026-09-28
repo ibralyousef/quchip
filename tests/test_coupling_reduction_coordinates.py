@@ -26,6 +26,7 @@ def _matrix(chip):
     return np.asarray(chip.resolve(frame="lab").hamiltonian().matrix(backend=chip.backend))
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 @pytest.mark.parametrize("method", ["sw", "exact"])
 @pytest.mark.parametrize("topology", ["parallel", "spectator"])
@@ -39,6 +40,7 @@ def test_zero_edge_is_identity_in_presence_of_other_interactions(backend, method
     assert "selected" not in result.chip.coupling_map
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 @pytest.mark.parametrize("topology", ["parallel", "spectator"])
 def test_exact_edge_rotation_preserves_entire_hamiltonian_and_dynamics(backend, topology):
@@ -72,6 +74,7 @@ def test_sw_retains_second_order_cross_terms(topology):
     assert 7.8 < errors[1] / errors[2] < 8.2
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("method", ["sw", "exact"])
 def test_edge_reduction_jit_gradient_matches_finite_difference(method):
     def observable(g):
@@ -130,6 +133,7 @@ def test_repeated_exact_edge_reductions_compose_without_losing_prior_corrections
                                _matrix(second.chip), atol=1e-11)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("method", ["sw", "exact"])
 def test_retained_edge_matrix_gradient_matches_finite_difference(method):
     def entry(g):
@@ -156,6 +160,7 @@ def test_intrinsic_dynamic_edge_cannot_be_silently_discarded():
         eliminate(source, "edge")
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("method", ["sw", "exact"])
 def test_zero_edge_does_not_rotate_degenerate_native_charge_levels(method):
     from quchip import ChargeBasisTransmon

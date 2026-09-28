@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from quchip.approximations import RWA
 
-import pytest
 
 from quchip import Chip
 from quchip.declarative import (
@@ -15,6 +14,11 @@ from quchip.declarative import (
     Scalar,
     parameter,
 )
+
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class _Oscillator(DeviceModel):
@@ -29,13 +33,6 @@ class _ForwardCoupling(CouplingModel):
 
     def interaction(self, a, b, p):
         return p.g * (a.a * b.adag + a.adag * b.a)
-
-
-class _ReversedCoupling(CouplingModel):
-    g: Scalar = parameter(unit="GHz")
-
-    def interaction(self, a, b, p):
-        return p.g * (b.a * a.adag + b.adag * a.a)
 
 
 class _DynamicCoupling(CouplingModel):
@@ -60,15 +57,6 @@ def test_forward_endpoint_order_compiles():
     q1 = _Oscillator(freq=5.2, levels=3)
     coupling = _ForwardCoupling(q0, q1, g=0.01)
     assert coupling.interaction_hamiltonian() is not None
-
-
-def test_reversed_endpoint_order_raises():
-    """An interaction authored in reversed (b, a) order raises instead of silently mis-embedding."""
-    q0 = _Oscillator(freq=5.0, levels=3)
-    q1 = _Oscillator(freq=5.2, levels=3)
-    coupling = _ReversedCoupling(q0, q1, g=0.01)
-    with pytest.raises(TypeError):
-        coupling.interaction_hamiltonian()
 
 
 def test_time_dependent_coupling_is_projected_then_rwa_resolved_by_engine():

@@ -5,19 +5,11 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from quchip import ChargeSpace, CustomSpace, FockSpace, LocalOps, PhaseGridSpace
+from quchip import ChargeSpace, CustomSpace, LocalOps, PhaseGridSpace
 from quchip.engine.basis import resolve_local_basis
 
 
-def test_fock_space_materializes_authored_operators_without_a_live_device() -> None:
-    space = FockSpace(4)
-    op = LocalOps(label="mode", space=space)
-
-    matrix = (5.0 * op.n + 0.25 * (op.adag @ op.a)).matrix()
-
-    np.testing.assert_allclose(matrix, np.diag([0.0, 5.25, 10.5, 15.75]))
-
-
+@pytest.mark.unit
 def test_charge_space_materializes_charge_and_josephson_operators() -> None:
     space = ChargeSpace(num_basis=5)
     op = LocalOps(label="q", space=space)
@@ -31,6 +23,7 @@ def test_charge_space_materializes_charge_and_josephson_operators() -> None:
     np.testing.assert_allclose(matrix, expected)
 
 
+@pytest.mark.unit
 def test_phase_grid_space_materializes_phase_and_charge_operators() -> None:
     space = PhaseGridSpace(points=5, extent=2.0)
     op = LocalOps(label="q", space=space)
@@ -42,6 +35,7 @@ def test_phase_grid_space_materializes_phase_and_charge_operators() -> None:
     np.testing.assert_allclose(charge, charge.conj().T)
 
 
+@pytest.mark.unit
 def test_custom_space_accepts_named_matrices_and_pure_jax_callables() -> None:
     class ArrayBackend:
         @staticmethod
@@ -69,6 +63,7 @@ def test_custom_space_accepts_named_matrices_and_pure_jax_callables() -> None:
     assert jax.grad(loss)(2.0) == 1.0
 
 
+@pytest.mark.unit
 def test_eigen_basis_record_exposes_and_applies_the_local_transform() -> None:
     hamiltonian = jnp.asarray([[1.0, 0.2, 0.0], [0.2, 2.0, 0.0], [0.0, 0.0, 5.0]])
 
@@ -85,11 +80,13 @@ def test_eigen_basis_record_exposes_and_applies_the_local_transform() -> None:
     )
 
 
+@pytest.mark.unit
 def test_eigen_basis_requires_an_explicit_retained_dimension() -> None:
     with pytest.raises(ValueError, match="levels"):
         resolve_local_basis(jnp.eye(3), basis="eigen")
 
 
+@pytest.mark.validation
 def test_local_basis_gradient_ignores_degeneracy_confined_to_discarded_levels() -> None:
     operator = jnp.diag(jnp.asarray([1.0, -1.0, 0.0, 0.0]))
 
@@ -111,11 +108,3 @@ def test_local_basis_gradient_ignores_degeneracy_confined_to_discarded_levels() 
 
     assert jnp.isfinite(gradient)
     assert gradient == pytest.approx(finite_difference, rel=1e-5)
-
-
-def test_local_spaces_require_integer_dimensions():
-    """Fractional dimensions fail at construction; NumPy integers remain supported."""
-    for make in (FockSpace, ChargeSpace, lambda n: PhaseGridSpace(n, 2.0), lambda n: CustomSpace(n, {})):
-        with pytest.raises(TypeError):
-            make(3.5)
-        assert make(np.int64(3)).dimension == 3

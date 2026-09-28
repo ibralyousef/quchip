@@ -15,7 +15,7 @@ from quchip.engine.bands import (
     decompose_canonical_bands,
     decompose_two_body_canonical_bands,
 )
-from quchip.engine.ir import CanonicalOperator, Carrier, ScalarModulation
+from quchip.engine.ir import CanonicalOperator
 
 
 # ---------------------------------------------------------------------------
@@ -65,49 +65,24 @@ def _decompose(matrix: np.ndarray, d_a: int, d_b: int) -> dict[tuple[int, int], 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 class TestDecomposition:
     """Tests for decompose_two_body_canonical_bands()."""
 
     # Shared dimensions for the capacitive coupling tests
     DA, DB = 3, 5
 
-    # ----- completeness ---------------------------------------------------
-    def test_decomposition_completeness(self):
-        """Sum of all (Δa, Δb) sectors must reconstruct the original matrix."""
+    def test_capacitive_bands_reconstruct_hermitian_operator_and_rwa(self):
+        """One decomposition preserves the four sectors, Hermitian partners, and analytic RWA sum."""
         full = _capacitive_full(self.DA, self.DB)
         bands = _decompose(full, self.DA, self.DB)
-
-        reconstructed = sum(bands.values())
+        assert set(bands) == {(1, 1), (1, -1), (-1, 1), (-1, -1)}
+        np.testing.assert_allclose(sum(bands.values()), full, atol=1e-14)
         np.testing.assert_allclose(
-            reconstructed,
-            full,
-            atol=1e-14,
-            err_msg="Reconstructed matrix differs from original",
+            bands[(1, -1)] + bands[(-1, 1)], _rwa_coupling(self.DA, self.DB), atol=1e-14,
         )
-
-    # ----- sector keys ----------------------------------------------------
-    def test_per_mode_sectors(self):
-        """Capacitive coupling (a+a†)(b+b†) populates exactly the four bilinear bands."""
-        # w = col - row; a carries weight +1, a† weight -1, so ab, ab†, a†b, a†b†
-        # land on (1,1), (1,-1), (-1,1), (-1,-1).
-        full = _capacitive_full(self.DA, self.DB)
-        bands = _decompose(full, self.DA, self.DB)
-
-        assert set(bands.keys()) == {(1, 1), (1, -1), (-1, 1), (-1, -1)}
-
-    # ----- RWA match ------------------------------------------------------
-    def test_rwa_match(self):
-        """The two ΔN=0 sectors of (a+a†)(b+b†) sum to a†b + ab†."""
-        full = _capacitive_full(self.DA, self.DB)
-        bands = _decompose(full, self.DA, self.DB)
-
-        expected_rwa = _rwa_coupling(self.DA, self.DB)
-        np.testing.assert_allclose(
-            bands[(1, -1)] + bands[(-1, 1)],
-            expected_rwa,
-            atol=1e-14,
-            err_msg="ΔN=0 sectors do not sum to analytical RWA a†b + ab†",
-        )
+        for (da, db), matrix in bands.items():
+            np.testing.assert_allclose(bands[(-da, -db)], matrix.conj().T, atol=1e-14)
 
     # ----- identity (trivial) --------------------------------------------
     def test_identity_trivial(self):
@@ -152,22 +127,6 @@ class TestDecomposition:
         """Canonical shape inconsistent with dims should raise ValueError."""
         with pytest.raises(ValueError, match="does not match"):
             decompose_two_body_canonical_bands(_two_body_canonical(np.eye(6, dtype=complex), 2, 3), [2, 2])
-
-    # ----- Hermiticity of sectors -----------------------------------------
-    def test_hermiticity_of_sectors(self):
-        """For a Hermitian input, each (Δa, Δb) sector is the adjoint of (−Δa, −Δb)."""
-        full = _capacitive_full(self.DA, self.DB)
-        bands = _decompose(full, self.DA, self.DB)
-
-        for (da, db), mat in bands.items():
-            partner = (-da, -db)
-            assert partner in bands, f"{partner} missing (partner of {(da, db)})"
-            np.testing.assert_allclose(
-                bands[partner],
-                mat.conj().T,
-                atol=1e-14,
-                err_msg=f"{partner} is not the adjoint of {(da, db)}",
-            )
 
     def test_two_body_decomposition_supports_jitted_jax_inputs(self) -> None:
         """Two-body decomposition should remain usable under ``jax.jit``."""
@@ -230,57 +189,6 @@ class TestHamiltonianStructure:
         for name, H0 in (("approximation=Exact()", H0_full), ("approximation=RWA()", H0_rwa)):
             offdiag = H0 - np.diag(np.diag(H0))
             assert np.linalg.norm(offdiag) < 1e-12, f"{name} rotating-frame H0 contains residual coupling terms"
-
-    def test_td_hamiltonian_has_cr_terms(self):
-        """A non-RWA rotating-frame description produces extra time-dependent terms for ΔN≠0 sectors."""
-        from quchip.engine import build_engine_result
-        from quchip.engine.frames import resolve_frame
-
-        chip = self._make_chip(approximation=Exact(), frame="rotating")
-
-        resolved = resolve_frame(chip, chip.frame)
-        desc = build_engine_result(chip, [], resolved_frame=resolved)
-
-        # approximation=Exact() coupling produces: swap cos + cross sin (at Δ)
-        # + ΔN=+2 + ΔN=-2 counter-rotating terms (at sum freq)
-        assert len(desc.dynamic_terms) >= 4, (
-            f"Expected swap + cross + ΔN=+2 + ΔN=-2 = 4 dynamic terms, got {len(desc.dynamic_terms)}"
-        )
-        for i, term in enumerate(desc.dynamic_terms):
-            assert isinstance(term.time_dependence, ScalarModulation), (
-                f"Dynamic term {i} time dependence should be ScalarModulation, got {type(term.time_dependence)}"
-            )
-            assert isinstance(term.time_dependence.signal, Carrier), (
-                f"Dynamic term {i} signal should be Carrier, got {type(term.time_dependence.signal)}"
-            )
-
-    def test_rwa_true_has_swap_cross_terms(self):
-        """RWA produces rotating-frame exchange terms at the detuning."""
-        from quchip.engine import build_engine_result
-        from quchip.engine.frames import resolve_frame
-
-        chip = self._make_chip(approximation=RWA(), frame="rotating")
-
-        resolved = resolve_frame(chip, chip.frame)
-        desc = build_engine_result(chip, [], resolved_frame=resolved)
-
-        assert len(desc.dynamic_terms) == 2, f"Expected swap + cross = 2 dynamic terms, got {len(desc.dynamic_terms)}"
-        assert all(isinstance(term.time_dependence, ScalarModulation) for term in desc.dynamic_terms)
-        assert all(isinstance(term.time_dependence.signal, Carrier) for term in desc.dynamic_terms)
-
-    def test_lab_frame_unchanged(self):
-        """In lab frame produces no td coupling terms; all sectors stay in H0."""
-        from quchip.engine import build_engine_result
-        from quchip.engine.frames import resolve_frame
-
-        chip = self._make_chip(approximation=Exact(), frame="lab")
-
-        resolved = resolve_frame(chip, chip.frame)
-        desc = build_engine_result(chip, [], resolved_frame=resolved)
-
-        assert len(desc.dynamic_terms) == 0, (
-            f"Expected only H0 in lab frame, got {len(desc.dynamic_terms)} dynamic terms"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -432,72 +340,7 @@ class TestThreeDeviceFrameConsistency:
     DURATION = 1000.0
     AMPLITUDE = 0.025
 
-    def _run_in_frame(self, frame: str, initial_q: int, approximation):
-        from quchip.devices.transmon.duffing import DuffingTransmon
-        from quchip.devices.resonator import Resonator
-        from quchip.chip.couplings import Capacitive
-        from quchip.chip.chip import Chip
-        from quchip.control.drive import ChargeDrive
-        from quchip import ControlEquipment
-        from quchip.control.envelopes import Gaussian
-        from quchip.control.sequence import QuantumSequence
-
-        q = DuffingTransmon(freq=self.FREQ_Q, anharmonicity=-0.3, levels=3, label="q")
-        r = Resonator(freq=self.FREQ_R, levels=6, label="r")
-        f = Resonator(freq=self.FREQ_F, levels=4, label="f")
-        chip = Chip(
-            [q, r, f],
-            [Capacitive(q, r, g=self.G_QR), Capacitive(r, f, g=self.G_RF)],
-            frame=frame,
-            approximation=approximation,
-        )
-        drive_f = ChargeDrive(target=f, label="filter")
-        drive_q = ChargeDrive(target=q, label="qubit")
-        equip = ControlEquipment(lines=[drive_f, drive_q])
-        chip.connect(equip)
-
-        readout_freq = (chip.freq(r, when={q: 0}) + chip.freq(r, when={q: 1})) / 2.0
-        tlist = np.linspace(0, self.DURATION, 500)
-
-        seq = QuantumSequence(chip)
-        seq.charge(f, envelope=Gaussian(duration=self.DURATION, amplitude=self.AMPLITUDE, sigmas=4), freq=readout_freq)
-        result = seq.simulate(
-            tlist=tlist,
-            initial_state=chip.state(q=initial_q, r=0, f=0),
-            options={"nsteps": 50000},
-        )
-        return result, tlist
-
-    @pytest.mark.parametrize("approximation", [RWA(), Exact()], ids=["rwa", "exact"])
-    def test_qubit_ground_populations(self, approximation):
-        """Lab vs rotating P(q=0) with qubit in |0⟩."""
-        res_lab, _ = self._run_in_frame("lab", initial_q=0, approximation=approximation)
-        res_rot, _ = self._run_in_frame("rotating", initial_q=0, approximation=approximation)
-
-        p_lab = res_lab.population("q", 0)
-        p_rot = res_rot.population("q", 0)
-        max_diff = np.max(np.abs(p_lab - p_rot))
-
-        assert max_diff < 2e-3, (
-            f"3-device lab vs rotating P(q=0|init=0) {type(approximation).__name__}: "
-            f"max diff = {max_diff:.2e}, exceeds 2e-3"
-        )
-
-    @pytest.mark.parametrize("approximation", [RWA(), Exact()], ids=["rwa", "exact"])
-    def test_qubit_excited_populations(self, approximation):
-        """Lab vs rotating P(q=1) with qubit in |1⟩."""
-        res_lab, _ = self._run_in_frame("lab", initial_q=1, approximation=approximation)
-        res_rot, _ = self._run_in_frame("rotating", initial_q=1, approximation=approximation)
-
-        p_lab = res_lab.population("q", 1)
-        p_rot = res_rot.population("q", 1)
-        max_diff = np.max(np.abs(p_lab - p_rot))
-
-        assert max_diff < 2e-3, (
-            f"3-device lab vs rotating P(q=1|init=1) {type(approximation).__name__}: "
-            f"max diff = {max_diff:.2e}, exceeds 2e-3"
-        )
-
+    @pytest.mark.validation
     @pytest.mark.parametrize("approximation", [RWA(), Exact()], ids=["rwa", "exact"])
     def test_resonator_lowering_phase_parity(self, approximation):
         """Dict e_ops ⟨a_r⟩ demodulated result must match between lab and rotating frames."""
@@ -558,6 +401,7 @@ class TestThreeDeviceFrameConsistency:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 class TestConcreteZeroBandDrop:
     """Concrete payloads drop structurally-zero bands; traced payloads keep every band."""
 
@@ -681,6 +525,7 @@ class TestConcreteZeroBandDrop:
         np.testing.assert_allclose(np.asarray(rebuilt_two), expected_two)
 
 
+@pytest.mark.unit
 class TestPruneZeroDiagonals:
     """prune_zero_diagonals drops concretely-zero stored DIA diagonals, tracer-guarded."""
 

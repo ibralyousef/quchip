@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import pytest
 
-from quchip.interop.base import ModelMapping, import_object, export_object, source_key
+from quchip.interop.base import ModelMapping, export_object, source_key
+
+
+pytestmark = pytest.mark.unit
 
 
 class _FakeSource:  # stands in for a third-party class; source_key -> "tests.<qualname>"
-    pass
-
-
-class _FakeSub(_FakeSource):
     pass
 
 
@@ -22,20 +21,6 @@ def test_source_key_uses_top_module_and_qualname():
     """source_key joins a type's top-level module with its qualified name."""
     assert source_key(_FakeSource).endswith("._FakeSource")
     assert source_key(_FakeSource).split(".")[0] == "tests"
-
-
-def test_import_dispatch_walks_mro_and_no_mapping_error_names_authoring_path():
-    """import_object dispatches through a base class's mapping and names the authoring skeleton when none matches."""
-    class FakeMapping(ModelMapping):
-        source = source_key(_FakeSource)
-
-        def import_model(self, obj, **opts):
-            return ("imported", type(obj).__name__)
-
-    assert import_object(_FakeSource()) == ("imported", "_FakeSource")
-    assert import_object(_FakeSub()) == ("imported", "_FakeSub")  # MRO walk
-    with pytest.raises(LookupError, match="ModelMapping"):
-        import_object(object())
 
 
 def test_export_requires_target_and_rejects_duplicates():

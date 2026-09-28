@@ -32,6 +32,7 @@ def test_batch_trace_stacking_rejects_different_time_coordinates(backend, second
         np.testing.assert_allclose(batch.expect("q", reduce=reduction), expected)
 
 
+@pytest.mark.validation
 def test_jit_batch_time_alignment_is_checked_when_values_are_stacked():
     import jax
     import jax.numpy as jnp
@@ -46,6 +47,7 @@ def test_jit_batch_time_alignment_is_checked_when_values_are_stacked():
         traces(jnp.asarray(3.0)).block_until_ready()
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_output_field_stacking_rejects_different_time_coordinates(backend):
     from quchip import PortNetwork, Resonator

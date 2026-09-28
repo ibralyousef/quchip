@@ -135,6 +135,7 @@ def test_default_paulis_follow_parameter_changes_without_stale_caches(name):
     np.testing.assert_allclose(after, getattr(fresh, name).full(), atol=1e-12)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("basis", ["native", "eigen"])
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 @pytest.mark.parametrize("mixed", [False, True])
@@ -209,6 +210,7 @@ def test_energy_population_is_independent_of_integration_frame(basis):
         np.testing.assert_allclose(result.expect(q), -1.0, atol=1e-9)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("warm", [False, True])
 def test_pauli_cache_keeps_jit_gradients_and_backend_selection(warm):
     """Cached energy operators retain gradients, native types, and independent copies."""

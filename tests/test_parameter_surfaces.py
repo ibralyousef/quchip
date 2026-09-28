@@ -259,6 +259,7 @@ def test_sequence_hamiltonian_is_the_resolved_result_view() -> None:
     )
 
 
+@pytest.mark.validation
 def test_chip_with_params_is_differentiable_on_dynamiqs() -> None:
     pytest.importorskip("dynamiqs")
     import jax

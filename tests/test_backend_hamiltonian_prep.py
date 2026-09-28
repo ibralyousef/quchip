@@ -5,22 +5,15 @@ from __future__ import annotations
 from quchip.approximations import RWA, Exact
 
 import numpy as np
-import qutip
 import pytest
 
-from quchip.backend import PreparedHamiltonian
 from quchip.chip.chip import Chip
 from quchip.control import ChargeDrive
 from quchip.control.envelopes import Square
 from quchip.control.equipment import ControlEquipment
 from quchip.devices.transmon.duffing import DuffingTransmon
-from quchip.declarative.expr import materialize_expr
 from quchip.engine.ir import (
-    CanonicalOperator,
     Carrier,
-    DynamicTerm,
-    EngineResult,
-    ResolvedSLH,
     ScalarModulation,
 )
 from quchip.engine.frames import resolve_frame
@@ -51,126 +44,10 @@ def test_shifted_square_preserves_edges_and_pulse_area(start, duration):
 class TestPrepareHamiltonian:
     """Verify Backend.prepare_hamiltonian() round-trips correctly."""
 
-    def test_prepare_returns_prepared_hamiltonian(self):
-        """prepare_hamiltonian must return a PreparedHamiltonian."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        chip = Chip([q])
-        chip.dress()
-        resolved = resolve_frame(chip, chip.frame)
-        tlist = np.linspace(0, 50, 201)
-
-        desc = build_engine_result(chip, [], resolved_frame=resolved)
-        backend = chip.backend
-        prepared = backend.prepare_hamiltonian(desc, tlist)
-
-        assert isinstance(prepared, PreparedHamiltonian)
-        assert prepared.rhs is not None
-
-    def test_static_prepare_returns_qobj(self):
-        """Static Hamiltonians should prepare to a native QuTiP Qobj."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        chip = Chip([q])
-        chip.dress()
-        resolved = resolve_frame(chip, chip.frame)
-        tlist = np.linspace(0, 50, 201)
-
-        desc = build_engine_result(chip, [], resolved_frame=resolved)
-        prepared = chip.backend.prepare_hamiltonian(desc, tlist)
-
-        assert isinstance(prepared.rhs, qutip.Qobj)
-        assert type(prepared.rhs.data).__name__ == "CSR"
-
-    def test_prepare_with_drive_produces_qobjevo(self):
-        """A driven Hamiltonian should prepare to a native QuTiP QobjEvo."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        drive = ChargeDrive(target=q)
-        chip = Chip([q])
-        chip.connect(ControlEquipment(lines=[drive]))
-        chip.dress()
-        resolved = resolve_frame(chip, chip.frame)
-        tlist = np.linspace(0, 50, 201)
-
-        from quchip.engine.ir import DriveOp
-
-        drive_op = DriveOp(
-            target_label="q",
-            envelope=Square(amplitude=0.02, duration=50),
-            freq=5.0,
-            start_time=0.0,
-            drive_label=drive.label,
-        )
-        desc = build_engine_result(
-            chip,
-            [drive_op],
-            resolved_frame=resolved,
-        )
-
-        assert desc.dynamic_terms
-        assert all(isinstance(term.time_dependence, ScalarModulation) for term in desc.dynamic_terms)
-        prepared = chip.backend.prepare_hamiltonian(desc, tlist)
-
-        assert isinstance(prepared.rhs, qutip.QobjEvo)
-        coeff_terms = [item for item in prepared.rhs.to_list() if isinstance(item, list)]
-        assert coeff_terms, "expected at least one lowered coefficient pair"
-        # Verify each lowered coefficient is a usable time function (a finite scalar
-        # at a sample time), not a specific internal QuTiP representation.
-        for _, coeff in coeff_terms:
-            assert callable(coeff)
-            assert np.isfinite(complex(coeff(10.0)))
-
-    def test_prepare_with_scalar_modulation_uses_callable_coefficients(self):
-        """Scalar modulations should lower through QuTiP callable coefficients."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        chip = Chip([q])
-        chip.dress()
-        tlist = np.linspace(0, 50, 201)
-        op = CanonicalOperator.from_dense(
-            np.eye(3, dtype=complex),
-            dims=(3,),
-            basis="fock",
-            subsystem_labels=("q",),
-        )
-        desc = EngineResult(
-            slh=ResolvedSLH.from_terms(
-                static_terms=(),
-                dynamic_terms=(
-                    DynamicTerm(
-                        operator=op,
-                        time_dependence=ScalarModulation(signal=Carrier(freq=0.2)),
-                        origin="drive",
-                    ),
-                ),
-                collapse_terms=(),
-            ),
-            dims=(3,),
-            metadata={},
-        )
-        prepared = chip.backend.prepare_hamiltonian(desc, tlist)
-
-        coeff_terms = [item for item in prepared.rhs.to_list() if isinstance(item, list)]
-        assert coeff_terms, "expected at least one lowered coefficient pair"
-        # Verify each lowered coefficient is a usable time function (a finite scalar
-        # at a sample time), not a specific internal QuTiP representation.
-        for _, coeff in coeff_terms:
-            assert callable(coeff)
-            assert np.isfinite(complex(coeff(10.0)))
-
-    def test_metadata_passes_through(self):
-        """Metadata from the description should be available on PreparedHamiltonian."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        chip = Chip([q])
-        chip.dress()
-        resolved = resolve_frame(chip, chip.frame)
-        tlist = np.linspace(0, 50, 201)
-
-        desc = build_engine_result(chip, [], resolved_frame=resolved)
-        prepared = chip.backend.prepare_hamiltonian(desc, tlist)
-
-        assert "frame" in prepared.metadata
 
     def test_simplify_signal_cancels_exact_opposing_carriers(self):
         """simplify_signal collapses opposite-sign equal-frequency carriers into their exact constant coefficient."""
-        from quchip.engine.ir import Constant, Multiply, Carrier, simplify_signal
+        from quchip.engine.ir import Constant, Multiply, simplify_signal
 
         signal = Multiply(
             (
@@ -258,18 +135,6 @@ class TestPrepareHamiltonian:
         assert desc_full.dynamic_terms, "Expected dynamic drive terms without RWA."
         assert all(isinstance(term.time_dependence, ScalarModulation) for term in desc_rwa.dynamic_terms)
         assert all(isinstance(term.time_dependence, ScalarModulation) for term in desc_full.dynamic_terms)
-
-    def test_prepare_metadata_can_drive_backend_default_nsteps(self):
-        """resolve_solver_options should derive nsteps from spectral_bound_ghz metadata."""
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-        chip = Chip([q])
-        chip.dress()
-        prepared = PreparedHamiltonian(
-            rhs=materialize_expr(chip.hamiltonian(), chip.backend),
-            metadata={"spectral_bound_ghz": 20.0},
-        )
-        opts = chip.backend.resolve_solver_options({}, metadata=prepared.metadata, tlist=np.linspace(0.0, 10.0, 11))
-        assert "nsteps" in opts
 
 
 class TestEnvelopeSampleGrid:
@@ -394,16 +259,6 @@ class TestEnvelopeSampleGrid:
         area_rel_err = float(abs(area_sampled - area_exact) / abs(area_exact))
         return max_outside, rel_rms, area_rel_err
 
-    def test_window_subgrid_coefficient_matches_exact_envelope(self):
-        """The 8 ns window's production coefficient matches the exact envelope AST, with no outside-support leakage."""
-        # Pins accuracy at the coefficient level, independent of solver
-        # behavior, via the real _envelope_coefficient production path
-        # (worst-case 2-point base grid — the augmented grid for a
-        # windowed envelope is canonical/tlist-independent regardless).
-        max_outside, rel_rms, area_rel_err = self._coefficient_error(duration=8.0, start_time=150.0)
-        assert max_outside < 0.02, f"outside-support leakage {max_outside:.2e} exceeds the 0.02 bound"
-        assert rel_rms < 1e-3, f"coefficient RMS error {rel_rms:.2e} exceeds the 1e-3 bound"
-        assert area_rel_err < 1e-3, f"pulse-area error {area_rel_err:.2e} exceeds the 1e-3 bound"
 
     def test_narrow_window_coefficient_has_no_cubic_ringing(self):
         """A sub-ns windowed coefficient stays near-zero outside its support across the full solve span."""

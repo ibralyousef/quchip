@@ -6,6 +6,11 @@ import numpy as np
 
 from quchip.utils.jax_utils import contains_tracer
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 
 def test_returns_false_for_pure_python_scalars():
     """A tuple of plain Python scalars has no tracer leaf."""

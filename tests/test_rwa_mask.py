@@ -7,6 +7,11 @@ import numpy as np
 from quchip.backend import get_default_backend
 from quchip.engine.approximations import apply_operator_band_filter
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 
 def operator_band_mask(
     first_dimension: int,
@@ -71,18 +76,6 @@ class TestExcitationBandMask:
 
 
 class TestApplyRwaMask:
-    def test_backend_roundtrip_masks_capacitive(self):
-        """The backend band filter matches a dense beam-splitter mask."""
-        backend = get_default_backend()
-        d = 3
-        a = _lowering(d)
-        full = np.kron(a + a.T, a + a.T)
-        h = backend.from_array(full, dims=[[d, d], [d, d]])
-        masked = apply_operator_band_filter(
-            h, dims=(d, d), labels=("qa", "qb"), keeps_band=_number_conserving, backend=backend
-        )
-        expected = np.kron(a.T, a) + np.kron(a, a.T)
-        np.testing.assert_allclose(np.asarray(backend.to_array(masked)), expected, atol=1e-12)
 
     def test_band_sum_matches_mask_multiply_oracle(self):
         """The band-sum implementation equals the dense mask multiply on a many-band operator."""

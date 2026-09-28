@@ -17,6 +17,7 @@ from quchip import Capacitive, Chip, DuffingTransmon  # noqa: E402
 from quchip.backend.dynamiqs import DynamiqsBackend  # noqa: E402
 
 
+@pytest.mark.validation
 def test_grad_of_dressed_gap_through_rwa_mask():
     """The gradient of the RWA-masked dressed-state gap w.r.t. coupling g is finite and nonzero."""
 
@@ -29,8 +30,9 @@ def test_grad_of_dressed_gap_through_rwa_mask():
         evals = jnp.linalg.eigvalsh(h)
         return evals[2] - evals[1]
 
-    value = gap(0.05)
-    grad = jax.grad(gap)(0.05)
+    value, grad = jax.jit(jax.value_and_grad(gap))(0.05)
     assert np.isfinite(float(value))
     assert np.isfinite(float(grad))
-    assert abs(float(grad)) > 1e-6  # the masked exchange band still carries g-dependence
+    splitting = np.sqrt(0.3**2 + 4 * 0.05**2)
+    np.testing.assert_allclose(value, splitting, atol=1e-12)
+    np.testing.assert_allclose(grad, 4 * 0.05 / splitting, rtol=1e-10)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import cache
+
 from quchip.approximations import RWA, Exact
 
 import numpy as np
@@ -53,12 +55,25 @@ def _run_readout(*, frame: str, approximation, qubit_level: int) -> tuple[np.nda
     return tlist, expect
 
 
+@pytest.fixture(scope="module")
+def readout_response():
+    """Reuse each fixed frame/approximation/state solve across numerical assertions."""
+    @cache
+    def response(frame, approximation_type, qubit_level):
+        arrays = _run_readout(frame=frame, approximation=approximation_type(), qubit_level=qubit_level)
+        for array in arrays:
+            array.setflags(write=False)
+        return arrays
+
+    return response
+
+
 @pytest.mark.parametrize("approximation", [RWA(), Exact()], ids=["rwa", "exact"])
 @pytest.mark.parametrize("frame", ["lab", "rotating"], ids=["lab", "rotating"])
-def test_dispersive_readout_matrix_has_state_dependent_response(frame: str, approximation) -> None:
+def test_dispersive_readout_matrix_has_state_dependent_response(frame: str, approximation, readout_response) -> None:
     """Dispersive readout response is strong and qubit-state dependent across all frame/RWA configs."""
-    _, response_g = _run_readout(frame=frame, approximation=approximation, qubit_level=0)
-    _, response_e = _run_readout(frame=frame, approximation=approximation, qubit_level=1)
+    _, response_g = readout_response(frame, type(approximation), 0)
+    _, response_e = readout_response(frame, type(approximation), 1)
 
     final_separation = abs(response_g[-1] - response_e[-1])
     # Measured across all four frame/RWA configs: max|response| ~= 0.785-0.787 (>0.2 keeps a
@@ -68,16 +83,16 @@ def test_dispersive_readout_matrix_has_state_dependent_response(frame: str, appr
     assert final_separation > 0.02
 
 
-def test_dispersive_readout_matrix_configs_agree() -> None:
+def test_dispersive_readout_matrix_configs_agree(readout_response) -> None:
     """Readout state separation agrees across all frame/RWA configs against the rotating+RWA reference."""
-    _, reference_g = _run_readout(frame="rotating", approximation=RWA(), qubit_level=0)
-    _, reference_e = _run_readout(frame="rotating", approximation=RWA(), qubit_level=1)
+    _, reference_g = readout_response("rotating", RWA, 0)
+    _, reference_e = readout_response("rotating", RWA, 1)
     reference_sep = abs(reference_g[-1] - reference_e[-1])
 
     for approximation in (RWA(), Exact()):
         for frame in ("lab", "rotating"):
-            _, response_g = _run_readout(frame=frame, approximation=approximation, qubit_level=0)
-            _, response_e = _run_readout(frame=frame, approximation=approximation, qubit_level=1)
+            _, response_g = readout_response(frame, type(approximation), 0)
+            _, response_e = readout_response(frame, type(approximation), 1)
             separation = abs(response_g[-1] - response_e[-1])
             # Measured: the largest cross-config drift is approximation=Exact() vs the rotating/approximation=RWA()
             # reference (~3.0% relative, ~1.45e-3 absolute, dominated by the counter-rotating

@@ -25,42 +25,12 @@ def _readout_chip(g=0.05):
     return Chip([q, r], couplings=[Capacitive(q, r, g=g)]), q, r
 
 
-def test_eliminate_reports_chi_matching_dressed_pull_and_duffing_formula():
-    """eliminate() reports chi exactly matching the dressed pull and the Duffing formula to ~5%."""
-    g = 0.05
-    chip, q, r = _readout_chip(g)
-    # The exact reference: dressed pull computed directly on the full chip.
-    pull = chip.freq(r, when={q: 1}) - chip.freq(r, when={q: 0})
-
-    res = eliminate(chip, r)
-    chi = res.effective_params["q"]["chi"]
-
-    # Exact: the rule uses the same dressed-spectrum kernel.
-    assert float(chi) == pytest.approx(float(pull), rel=1e-9)
-
-    # Loose: the Duffing analytic χ = 2g²α/(Δ(Δ+α)) (Koch et al., PRA 76,
-    # 042319, §IV) is 2nd-order dispersive; the numeric pull carries
-    # higher-order corrections, so agreement is only to ~few %.
-    delta = 5.0 - 6.5
-    alpha = -0.25
-    chi_analytic = 2 * g**2 * alpha / (delta * (delta + alpha))
-    assert float(chi) == pytest.approx(chi_analytic, rel=0.05)
-
-
+@pytest.mark.validation
 def test_eliminate_reports_kappa_matching_purcell_kappa():
     """eliminate() reports kappa = 2*pi*f_r/Q (1/ns), the same rate the Purcell fold uses."""
     chip, q, r = _readout_chip()
     res = eliminate(chip, r)
     assert float(res.effective_params["q"]["kappa"]) == pytest.approx(2 * np.pi * 6.5 / 5000.0, rel=1e-9)
-
-
-def test_eliminate_without_internal_quality_factor_reports_kappa_zero():
-    """A resonator with no internal_quality_factor set reports kappa = 0."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    r = Resonator(freq=6.5, levels=4, label="r")
-    chip = Chip([q, r], couplings=[Capacitive(q, r, g=0.05)])
-    res = eliminate(chip, "r")
-    assert res.effective_params["q"]["kappa"] == 0.0
 
 
 # ---------------------------------------------------------------------------

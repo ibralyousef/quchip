@@ -80,6 +80,7 @@ def test_dissipation_exclusion_retains_network_hamiltonian():
     assert normal.engine_result.port_terms
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_batch_retains_dissipation_choice_and_native_method(backend):
     """Batch construction and dispatch preserve exclusion and an explicit native method."""
@@ -131,6 +132,7 @@ def test_results_report_effective_numerical_settings(backend):
         assert effective["nsteps"] > 0
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_dynamiqs_default_tolerances_converge_pulse_gradients():
     """A pulse-duration derivative at default options matches a central difference."""

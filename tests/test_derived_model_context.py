@@ -6,6 +6,9 @@ import pytest
 from quchip import Capacitive, Chip, DuffingTransmon, Resonator, eliminate
 
 
+pytestmark = pytest.mark.unit
+
+
 def _model(*, coupled):
     q = DuffingTransmon(freq=5, anharmonicity=-0.25, levels=3, label="q")
     r = Resonator(freq=7, levels=4, label="r")

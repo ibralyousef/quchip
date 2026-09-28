@@ -13,6 +13,7 @@ def _problem(backend, levels, t1, *, states="all", times=(0.0, 1.0, 3.0)):
                                                e_ops={"q": q.number_operator()}, states=states)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_independent_models_preserve_dimensions_physics_and_order(backend):
     problems = [_problem(backend, levels, t1) for levels, t1 in [(4, 20.0), (2, 10.0), (3, 30.0)]]
@@ -46,6 +47,7 @@ def test_independent_requests_keep_storage_and_solver_options():
     assert len(results[2].states) == 3
 
 
+@pytest.mark.validation
 def test_heterogeneous_model_values_remain_differentiable():
     import jax
     import jax.numpy as jnp
@@ -62,6 +64,7 @@ def test_heterogeneous_model_values_remain_differentiable():
     assert derivative == pytest.approx(0.03 * np.exp(-0.3) + 0.015 * np.exp(-0.15), abs=2e-6)
 
 
+@pytest.mark.validation
 def test_independent_driven_models_preserve_pulse_values_and_gradients():
     import jax
     import jax.numpy as jnp

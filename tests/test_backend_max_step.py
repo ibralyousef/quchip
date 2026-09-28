@@ -9,6 +9,9 @@ from quchip.chip.chip import Chip
 from quchip.devices.transmon.duffing import DuffingTransmon
 
 
+pytestmark = pytest.mark.unit
+
+
 class TestMaxStepGuardPolicy:
     """resolve_solver_options' max_step insertion/authority policy, tested directly on the dict contract."""
 

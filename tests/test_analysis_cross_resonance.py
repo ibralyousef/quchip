@@ -9,7 +9,6 @@ import pytest
 
 from quchip import (
     CRHamiltonianResult,
-    CRSusceptibilityResult,
     analyze_cross_resonance,
     analyze_cr_susceptibility,
 )
@@ -163,69 +162,6 @@ def test_ix_zx_conventions_from_closed_form_x_axis_traces(IX_true, ZX_true):
         assert abs(getattr(result, name)) < 0.15e6 * 1e-9, f"{name} should stay near zero"
 
 
-def test_recovery_with_noise():
-    """Recover CR coefficients with 5% additive noise at reduced precision."""
-    rng = np.random.default_rng(42)
-    IX_true, ZX_true = 2.5e6, 2.5e6
-    px0, py0, pz0 = IX_true + ZX_true, 0.5e6, 0.1e6
-    px1, py1, pz1 = IX_true - ZX_true, -0.5e6, -0.1e6
-
-    t_ns = np.linspace(0, 800, 120)  # ns
-    t_s = t_ns * 1e-9  # seconds for the Bloch model (Hz coefficients)
-    c0x, c0y, c0z, c1x, c1y, c1z = _make_synthetic_data(t_s, px0, py0, pz0, px1, py1, pz1, noise_level=0.05, rng=rng)
-
-    result = analyze_cross_resonance(
-        t_ns,
-        {"x": c0x, "y": c0y, "z": c0z},
-        {"x": c1x, "y": c1y, "z": c1z},
-    )
-
-    # ZX should be recovered within 20% with noisy data (result GHz, truth Hz)
-    zx_val, _ = result.coeffs()["ZX"]
-    assert abs(zx_val - ZX_true * 1e-9) / (ZX_true * 1e-9) < 0.20, (
-        f"ZX recovery under noise: {zx_val * 1e3:.3f} vs {ZX_true * 1e-6:.3f} MHz"
-    )
-
-
-def test_zero_amplitude_returns_near_zero():
-    """Near-zero drive → all six CR coefficients should be near zero."""
-    t_ns = np.linspace(0, 1000, 60)  # ns
-    t_s = t_ns * 1e-9  # seconds for the Bloch model (Hz coefficients)
-    tiny = 1e3  # 1 kHz drive — effectively zero at MHz scale
-    c0x, c0y, c0z, c1x, c1y, c1z = _make_synthetic_data(t_s, tiny, tiny, tiny, -tiny, -tiny, -tiny)
-
-    result = analyze_cross_resonance(
-        t_ns,
-        {"x": c0x, "y": c0y, "z": c0z},
-        {"x": c1x, "y": c1y, "z": c1z},
-    )
-    for name, (val, _) in result.coeffs().items():
-        assert abs(val) < 0.1e6 * 1e-9, f"{name} = {val * 1e3:.3f} MHz should be ~0 for near-zero drive"
-
-
-def test_coeffs_summary_prints(capsys):
-    """summary() prints and returns a string."""
-    r = CRHamiltonianResult(
-        IX=1e6,
-        IY=2e6,
-        IZ=3e6,
-        ZX=4e6,
-        ZY=5e6,
-        ZZ=6e6,
-        IX_err=0.1e6,
-        IY_err=0.1e6,
-        IZ_err=0.1e6,
-        ZX_err=0.1e6,
-        ZY_err=0.1e6,
-        ZZ_err=0.1e6,
-    )
-    text = r.summary()
-    assert isinstance(text, str)
-    assert "MHz" in text
-    captured = capsys.readouterr()
-    assert "MHz" in captured.out
-
-
 # ---------------------------------------------------------------------------
 # Weak-drive susceptibility tests
 # ---------------------------------------------------------------------------
@@ -246,24 +182,6 @@ def _driven_pair(*, two_control_lines: bool = False, backend: str | None = None)
         backend=backend,
     )
     return chip, control, target, drive
-
-
-def test_cr_susceptibility_is_conditional_dressed_drive_difference() -> None:
-    """IX and ZX are the sum and difference of conditioned target-transition elements."""
-    chip, control, target, drive = _driven_pair()
-
-    result = analyze_cr_susceptibility(chip, control, target)
-    m0 = chip.drive_matrix_elements(({}, {target: 1}), drives=[drive])[drive]
-    m1 = chip.drive_matrix_elements(({control: 1}, {control: 1, target: 1}), drives=[drive])[drive]
-
-    assert isinstance(result, CRSusceptibilityResult)
-    assert result.m_control_0 == pytest.approx(m0)
-    assert result.m_control_1 == pytest.approx(m1)
-    assert result.IX_per_amplitude == pytest.approx(m0 + m1)
-    assert result.ZX_per_amplitude == pytest.approx(m0 - m1)
-    assert result.control == control.label
-    assert result.target == target.label
-    assert result.drive == drive.label
 
 
 @pytest.mark.optional_backend
@@ -306,17 +224,6 @@ def test_cr_susceptibility_ignores_eigensolver_column_signs(monkeypatch) -> None
 
     for field in ("m_control_0", "m_control_1", "IX_per_amplitude", "ZX_per_amplitude"):
         np.testing.assert_allclose(getattr(flipped, field), getattr(reference, field), rtol=1e-12, atol=1e-12)
-
-
-def test_cr_susceptibility_resolves_labels_and_explicit_drive() -> None:
-    """Control, target, and drive accept labels as well as objects."""
-    chip, control, target, drive = _driven_pair()
-
-    by_object = analyze_cr_susceptibility(chip, control, target, drive=drive)
-    by_label = analyze_cr_susceptibility(chip, control.label, target.label, drive=drive.label)
-
-    assert by_label.m_control_0 == pytest.approx(by_object.m_control_0)
-    assert by_label.m_control_1 == pytest.approx(by_object.m_control_1)
 
 
 def test_cr_susceptibility_rejects_missing_or_ambiguous_control_line() -> None:

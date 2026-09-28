@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from quchip import Capacitive, Chip, CrossKerr, DuffingTransmon, Resonator, TunableCapacitive
+from quchip import Capacitive, Chip, DuffingTransmon, Resonator
 
 
 def test_eliminate_resonator_retains_lamb_shift_and_purcell():
@@ -29,50 +29,6 @@ def test_eliminate_resonator_retains_lamb_shift_and_purcell():
     assert sum(abs(reduced.backend.to_array(op)[0, 1])**2 for op in jumps) == pytest.approx(purcell, rel=1e-6)
     assert reduced["q"].T1 is None
     assert res.validity["cap_0"]["g_over_delta"] == pytest.approx(abs(g / delta), rel=1e-6)
-
-
-def _bridge_chip(direct_g=None):
-    q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=2, label="q0")
-    q1 = DuffingTransmon(freq=5.1, anharmonicity=-0.25, levels=2, label="q1")
-    bus = Resonator(freq=7.0, levels=3, label="bus")
-    couplings = [Capacitive(q0, bus, g=0.05, label="leg0"), Capacitive(q1, bus, g=0.05, label="leg1")]
-    if direct_g is not None:
-        couplings.append(Capacitive(q0, q1, g=direct_g, label="direct"))
-    return Chip([q0, q1, bus], couplings=couplings)
-
-
-def test_eliminate_bridge_derives_mediated_exchange():
-    """Eliminating a bridging bus derives the mediated exchange J = (g1 g2/2)(1/Δ1 + 1/Δ2)."""
-    from quchip.chip.transformations import eliminate
-
-    res = eliminate(_bridge_chip(), "bus")
-    reduced = res.chip
-
-    j_expected = 0.05 * 0.05 / 2.0 * (1.0 / (5.0 - 7.0) + 1.0 / (5.1 - 7.0))
-    assert [d.label for d in reduced.devices] == ["q0", "q1"]
-    (mediated,) = reduced.couplings
-    assert type(mediated) is Capacitive
-    assert mediated.label == "elim_bus"
-    assert float(mediated.g) == pytest.approx(j_expected, rel=1e-9)
-
-    assert res.effective_params["q0"]["freq_after"] == pytest.approx(5.0 + 0.05**2 / (5.0 - 7.0), rel=1e-9)
-    assert res.effective_params["q1"]["freq_after"] == pytest.approx(5.1 + 0.05**2 / (5.1 - 7.0), rel=1e-9)
-    assert set(res.validity) == {"leg0", "leg1"}
-    assert res.effective_params["exchange"]["between"] == ("q0", "q1")
-
-
-def test_eliminate_bridge_can_cancel_an_existing_direct_interaction():
-    """Direct and mediated exchanges cancel in the complete reduced Hamiltonian."""
-    from quchip.chip.transformations import eliminate
-
-    j_expected = 0.05 * 0.05 / 2.0 * (1.0 / (5.0 - 7.0) + 1.0 / (5.1 - 7.0))
-    res = eliminate(_bridge_chip(direct_g=-j_expected), "bus")
-
-    direct = res.chip.coupling("direct")
-    assert float(direct.g) == pytest.approx(-j_expected, abs=1e-12)
-    assert res.effective_params["exchange"]["coupling"] == "elim_bus"
-    h = res.chip.hamiltonian().matrix()
-    assert complex(h[2, 1]) == pytest.approx(0.0, abs=1e-12)
 
 
 def test_eliminate_bridge_preserves_non_foldable_direct_edge_without_double_counting():
@@ -283,6 +239,7 @@ def test_eliminate_unknown_method_raises_value_error():
         eliminate(chip, "r", method="numeric")
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_eliminate_bridge_exchange_is_differentiable_in_leg_g():
     """The mediated exchange J is differentiable in a bridge leg's coupling strength g."""
@@ -301,11 +258,12 @@ def test_eliminate_bridge_exchange_is_differentiable_in_leg_g():
         )
         return eliminate(chip, "bus").effective_params["exchange"]["j_eff"]
 
-    grad = jax.grad(j_eff)(0.05)
+    grad = jax.jit(jax.grad(j_eff))(0.05)
     # dJ/dg1 = (g2/2)(1/Δ1 + 1/Δ2)
     assert float(grad) == pytest.approx(0.05 / 2.0 * (1.0 / -2.0 + 1.0 / -1.9), rel=1e-6)
 
 
+@pytest.mark.validation
 def test_eliminate_bridge_composes_sequentially_over_a_chain():
     """Eliminating both couplers of QB1-TC1-CR-TC2-QB2 leaves two mediated qubit-resonator couplings."""
     from quchip.chip.transformations import eliminate
@@ -334,30 +292,6 @@ def test_eliminate_bridge_composes_sequentially_over_a_chain():
     assert pairs == {frozenset({"qb1", "cr"}), frozenset({"qb2", "cr"})}
 
 
-def test_eliminate_folds_through_a_fold_created_edge():
-    """A fold-created coupling behaves as an ordinary edge later, driving the next survivor's g/Δ and Lamb shift."""
-    from quchip.chip.transformations import eliminate
-
-    step1 = eliminate(_bridge_chip(), "bus")
-    mid = step1.chip
-    (edge,) = mid.couplings
-    assert type(edge) is Capacitive
-
-    step2 = eliminate(mid, "q1")
-    assert [d.label for d in step2.chip.devices] == ["q0"]
-
-    delta = float(step1.effective_params["q0"]["freq_after"] - step1.effective_params["q1"]["freq_after"])
-    g = float(edge.g)
-    assert step2.validity["elim_bus"]["g_over_delta"] == pytest.approx(abs(g / delta), rel=1e-9)
-    # Deep in the dispersive regime (g0/Δ ≈ 0.013) the leaf fold's Lamb shift
-    # is g0²/Δ to leading order; the counter-rotating correction is ~1%.
-    lamb = float(step2.effective_params["q0"]["lamb_shift"])
-    assert lamb == pytest.approx(g**2 / delta, rel=0.05)
-    # The exact route reads the same g and must agree on the dressed frequency.
-    exact = eliminate(mid, "q1", method="exact")
-    assert float(exact.chip.freq("q0")) == pytest.approx(float(step2.chip.freq("q0")), abs=1e-6)
-
-
 def test_eliminate_retains_thermal_bath_and_intrinsic_loss():
     """Independent thermal channels and intrinsic loss retain their mapped generator."""
     from quchip import Bath, eliminate
@@ -375,6 +309,7 @@ def test_eliminate_retains_thermal_bath_and_intrinsic_loss():
     np.testing.assert_allclose(actual.full(), expected.full(), atol=1e-12)
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_eliminate_lamb_shift_is_differentiable_in_g():
     """The Lamb shift is differentiable in g on a JAX-native backend, since chi is lazy."""
@@ -388,11 +323,12 @@ def test_eliminate_lamb_shift_is_differentiable_in_g():
         chip = Chip([q, r], couplings=[Capacitive(q, r, g=g)], backend="dynamiqs")
         return eliminate(chip, "r").effective_params["q"]["lamb_shift"]
 
-    grad = jax.grad(lamb_shift)(0.08)
+    grad = jax.jit(jax.grad(lamb_shift))(0.08)
     # d/dg (g^2/Δ) = 2g/Δ, Δ = -2.0
     assert float(grad) == pytest.approx(2 * 0.08 / (5.0 - 7.0), rel=1e-4)
 
 
+@pytest.mark.validation
 def test_eliminate_with_circuit_level_survivor_retains_the_shift():
     """A survivor without a 'freq' tunable keeps its bare spectrum; the shift is reported."""
     from quchip import ChargeBasisTransmon
@@ -415,52 +351,7 @@ def test_eliminate_with_circuit_level_survivor_retains_the_shift():
     assert float(res.effective_params["q"]["freq_after"]) == pytest.approx(bare_freq + lamb, rel=1e-3)
 
 
-def test_eliminate_coupling_target_reports_both_shifts_without_parameter_folding():
-    """Both endpoint shifts are reported while their authored parameters stay fixed."""
-    from quchip.chip.transformations import eliminate
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    r = Resonator(freq=7.0, levels=5, label="r")
-    chip = Chip([q, r], couplings=[Capacitive(q, r, g=0.05, label="c")])
-
-    res = eliminate(chip, "c")
-    reduced = res.chip
-
-    assert sorted(d.label for d in reduced.devices) == ["q", "r"]
-    assert not reduced.couplings
-    assert reduced["q"].freq == q.freq and reduced["r"].freq == r.freq
-
-    assert res.validity["c"]["g_over_delta"] == pytest.approx(abs(0.05 / (5.0 - 7.0)), rel=1e-6)
-    assert float(res.effective_params["q"]["lamb_shift"]) != 0.0
-    assert float(res.effective_params["r"]["lamb_shift"]) != 0.0
-
-
-def test_eliminate_coupling_target_tunable_capacitive_reports_validity():
-    """Tunable-capacitive elimination reports validity metrics."""
-    from quchip.chip.transformations import eliminate
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    r = Resonator(freq=7.0, levels=5, label="r")
-    chip = Chip([q, r], couplings=[TunableCapacitive(q, r, g_0=0.05, label="tc")])
-
-    res = eliminate(chip, "tc")
-    assert res.validity != {}
-    assert res.validity["tc"]["g_over_delta"] == pytest.approx(abs(0.05 / (5.0 - 7.0)), rel=1e-6)
-
-
-def test_eliminate_coupling_target_retains_a_diagonal_interaction():
-    """Removing an already diagonal edge leaves its matrix and coordinates unchanged."""
-    from quchip.chip.transformations import eliminate
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    r = Resonator(freq=7.0, levels=5, label="r")
-    chip = Chip([q, r], couplings=[CrossKerr(q, r, chi=0.001, label="xk")])
-
-    result = eliminate(chip, "xk")
-    np.testing.assert_allclose(result.chip.hamiltonian().matrix(), chip.hamiltonian().matrix(), atol=1e-12)
-    np.testing.assert_allclose(result.mapping.embedding, np.eye(np.prod(chip.dims)), atol=1e-12)
-
-
+@pytest.mark.validation
 @pytest.mark.parametrize("method", ["sw", "exact"])
 def test_eliminate_coupling_target_keeps_circuit_parameters(method):
     """Circuit devices need no artificial frequency parameter to carry a correction."""

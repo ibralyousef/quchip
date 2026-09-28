@@ -7,6 +7,9 @@ import pytest
 from quchip.utils.state_versioning import StateVersioned
 
 
+pytestmark = pytest.mark.unit
+
+
 class _Simple(StateVersioned):
     """Tracks one public attribute; ``label`` is declared untracked."""
 

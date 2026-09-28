@@ -29,6 +29,7 @@ def _oracle(chip):
     return embedding.conj().T @ h @ embedding, embedding, energies, vectors, bare, selected
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize('backend', ['qutip', 'dynamiqs'])
 def test_exact_model_retains_full_matrix_and_thermal_jump_coordinates(backend):
     full = _chip(backend)
@@ -57,6 +58,7 @@ def test_exact_retained_map_is_isometric_and_independent_of_eigenvector_phases()
     np.testing.assert_allclose(np.linalg.eigvalsh(first.hamiltonian), sorted(energies[selected]), atol=1e-12)
 
 
+@pytest.mark.validation
 def test_exact_retained_matrix_jit_gradient_matches_independent_finite_difference():
     def value(g):
         reduced = eliminate(_chip('dynamiqs', g), 'r', method='exact').chip
@@ -65,10 +67,12 @@ def test_exact_retained_matrix_jit_gradient_matches_independent_finite_differenc
     expected = _oracle(_chip('qutip', g))[0][3, 3].real
     derivative = (_oracle(_chip('qutip', g + step))[0][3, 3].real
                   - _oracle(_chip('qutip', g - step))[0][3, 3].real) / (2 * step)
-    assert jax.jit(value)(g) == pytest.approx(expected, abs=1e-11)
-    assert jax.jit(jax.grad(value))(g) == pytest.approx(derivative, rel=1e-6, abs=1e-8)
+    actual, gradient = jax.jit(jax.value_and_grad(value))(g)
+    assert actual == pytest.approx(expected, abs=1e-11)
+    assert gradient == pytest.approx(derivative, rel=1e-6, abs=1e-8)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("execution", ["eager", "jit", "gradient"])
 @pytest.mark.parametrize("invalidity", ["singular", "labels"])
 def test_exact_projection_guards_survive_compiled_and_gradient_only_calls(execution, invalidity):

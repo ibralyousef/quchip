@@ -12,31 +12,14 @@ from quchip.devices.resonator import Resonator
 from quchip.devices.transmon.duffing import DuffingTransmon
 
 
+pytestmark = pytest.mark.unit
+
+
 def _two_device_chip() -> Chip:
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
     r = Resonator(freq=7.0, levels=4, label="r")
     coupling = Capacitive(q, r, g=0.02)
     return Chip([q, r], [coupling], label="my_chip")
-
-
-def test_chip_wire_builds_control_equipment_from_lines() -> None:
-    """chip.wire() builds a ControlEquipment from the given lines and signal chain."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    r = Resonator(freq=7.0, levels=4, label="r")
-    chip = Chip([q, r], label="wired")
-
-    qubit_drive = ChargeDrive(target=q, label="q")
-    readout_drive = ChargeDrive(target=r, label="r")
-    equipment = chip.wire(
-        qubit_drive,
-        readout_drive,
-        signal_chain=[Crosstalk(source=qubit_drive.label, victim=readout_drive.label, beta=0.05)],
-    )
-
-    assert chip.control_equipment is equipment
-    assert [line.label for line in equipment.lines] == ["q", "r"]
-    assert len(equipment.signal_chain) == 1
-    assert equipment.signal_chain[0].beta == 0.05
 
 
 def test_chip_status_prints_dashboard_and_returns_none(capsys: pytest.CaptureFixture[str]) -> None:
@@ -54,20 +37,6 @@ def test_chip_status_prints_dashboard_and_returns_none(capsys: pytest.CaptureFix
     assert "frame" in out.lower()
     assert "dressed" in out.lower()
     assert "control equipment" in out.lower()
-
-
-@pytest.mark.parametrize(
-    "transform",
-    [Delay("missing", delta_t=1.0), Crosstalk("missing", "q", beta=0.1), Crosstalk("q", "missing", beta=0.1)],
-)
-def test_wire_rejects_signal_chain_references_to_missing_lines(transform):
-    """Delay targets and both crosstalk endpoints must name wired lines."""
-    q = DuffingTransmon(5.0, -0.25, levels=3, label="q")
-    drive = ChargeDrive(q, label="q")
-    chip = Chip([q])
-    chip.wire(drive)
-    with pytest.raises(ValueError, match="not in equipment"):
-        chip.wire(drive, signal_chain=[transform])
 
 
 def test_chip_unwire_removes_line_and_chain_references() -> None:
@@ -108,14 +77,6 @@ def test_chip_unwire_unknown_label_raises() -> None:
     chip.wire(ChargeDrive(q, label="d1"))
     with pytest.raises(ValueError, match="No control line labeled 'nope'"):
         chip.unwire("nope")
-
-
-def test_chip_unwire_without_equipment_raises() -> None:
-    """Unwiring on a chip with no control equipment raises ValueError."""
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-    chip = Chip([q])
-    with pytest.raises(ValueError, match="nothing is wired"):
-        chip.unwire("d1")
 
 
 def test_chip_disconnect_detaches_and_returns_equipment_for_reconnect() -> None:

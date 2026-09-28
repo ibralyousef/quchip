@@ -11,6 +11,7 @@ def _sequence(backend):
     return QuantumSequence(Chip([q], backend=backend, frame="rotating")), q
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 @pytest.mark.parametrize("storage", ["all", "final", "none"])
 @pytest.mark.parametrize("batch", [False, True])
@@ -56,6 +57,7 @@ def test_public_storage_flags_have_one_replacement(flag):
         seq.build_problem([0.0, 1.0], options={flag: False})
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_final_state_lookup_requires_a_retained_time(backend):
     seq, _ = _sequence(backend)

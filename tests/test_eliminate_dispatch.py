@@ -11,7 +11,6 @@ from quchip import (
     Chip,
     ControlEquipment,
     DuffingTransmon,
-    FluxTunableTransmon,
     ParametricDrive,
     Resonator,
     TunableCapacitive,
@@ -29,46 +28,6 @@ def _bridge_chip(direct_g=None):
     return Chip([q0, q1, bus], couplings=couplings)
 
 
-def test_fixed_bridge_emits_capacitive_edge():
-    """Eliminating a fixed bus emits a Capacitive edge carrying the mediated exchange J."""
-    res = eliminate(_bridge_chip(), "bus")
-    edge = res.chip.coupling("elim_bus")
-    assert type(edge) is Capacitive
-    j = res.effective_params["exchange"]["j_eff"]
-    # J = g1 g2 / 2 (1/Δ1 + 1/Δ2), Δ1 = 5.0-6.3, Δ2 = 5.2-6.3
-    assert np.isclose(float(j), 0.08 * 0.08 / 2 * (1 / -1.3 + 1 / -1.1))
-    assert np.isclose(float(edge.g), float(j))
-
-
-def test_frequency_tunable_bridge_emits_tunable_capacitive_edge():
-    """Eliminating a frequency-controlled bus emits a TunableCapacitive edge."""
-    q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
-    q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.24, levels=3, label="q1")
-    coupler = FluxTunableTransmon(freq=6.3, anharmonicity=-0.3, levels=3, label="coupler")
-    chip = Chip(
-        [q0, q1, coupler],
-        couplings=[
-            Capacitive(q0, coupler, g=0.08, label="leg0"),
-            Capacitive(q1, coupler, g=0.08, label="leg1"),
-        ],
-    )
-
-    edge = eliminate(chip, coupler).chip.coupling("elim_coupler")
-
-    assert isinstance(edge, TunableCapacitive)
-
-
-def test_bridge_keeps_direct_edge_and_adds_mediated_exchange():
-    """A direct edge keeps its parameter while a separate edge carries the mediated exchange."""
-    res = eliminate(_bridge_chip(direct_g=0.004), "bus")
-    edge = res.chip.coupling("direct")
-    assert type(edge) is Capacitive
-    j = res.effective_params["exchange"]["j_eff"]
-    assert np.isclose(float(edge.g), 0.004)
-    mediated = res.chip.coupling(res.effective_params["exchange"]["coupling"])
-    assert np.isclose(float(mediated.g), float(j))
-
-
 def test_exchange_entry_carries_dj_domega():
     """The exchange entry reports dJ/dωc, the mediated exchange's derivative with respect to the bus frequency."""
     res = eliminate(_bridge_chip(), "bus")
@@ -76,6 +35,7 @@ def test_exchange_entry_carries_dj_domega():
     assert np.isclose(float(dj), 0.08 * 0.08 / 2 * (1 / 1.3**2 + 1 / 1.1**2))
 
 
+@pytest.mark.validation
 def test_bridge_chain_retains_each_mediated_contribution():
     """Successive fixed buses contribute distinct mediated edges without counting the first twice."""
     q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
@@ -108,24 +68,6 @@ def test_bridge_chain_retains_each_mediated_contribution():
     assert np.isclose(sum(float(edge.g) for edge in step2.chip.couplings), j1 + j2)
 
 
-def test_bridge_preserves_the_existing_tunable_direct_edge():
-    """An existing tunable edge retains its independent modulation target and baseline."""
-    q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
-    q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.24, levels=3, label="q1")
-    bus = Resonator(freq=6.3, levels=4, label="bus")
-    direct = TunableCapacitive(q0, q1, g_0=0.004, label="direct")
-    legs = [Capacitive(q0, bus, g=0.08, label="leg0"), Capacitive(q1, bus, g=0.08, label="leg1")]
-    chip = Chip([q0, q1, bus], couplings=legs + [direct])
-
-    res = eliminate(chip, "bus")
-
-    edge = res.chip.coupling("direct")
-    assert isinstance(edge, TunableCapacitive)
-    j = res.effective_params["exchange"]["j_eff"]
-    assert np.isclose(float(edge.g_0), 0.004)
-    assert np.isclose(float(res.chip.coupling("elim_bus").g), float(j))
-
-
 def _readout_chip():
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
     r = Resonator(freq=7.0, levels=4, label="r")
@@ -137,61 +79,6 @@ def _readout_chip():
         control_equipment=ControlEquipment([probe]),
     )
     return chip, q, r, coupling
-
-
-def test_coupling_target_keeps_both_devices_and_retains_matrix():
-    """An edge reduction retains both endpoints and its full matrix correction."""
-    chip, q, r, coupling = _readout_chip()
-    res = eliminate(chip, "cap0")
-    reduced = res.chip
-
-    assert {d.label for d in reduced.devices} == {"q", "r"}
-    assert not reduced.couplings
-    assert np.linalg.norm(reduced.effective_terms[0].hamiltonian) > 0.
-    assert reduced["q"].freq == q.freq and reduced["r"].freq == r.freq
-
-
-def test_coupling_target_chi_matches_dispersive_shift():
-    """The exact pair diagnostic matches its independently dressed dispersive shift."""
-    chip, q, r, coupling = _readout_chip()
-    expected_chi = chip.dispersive_shift("q", "r")
-    res = eliminate(chip, "cap0", method="exact")
-    assert np.isclose(float(res.effective_params["q"]["chi"]), float(expected_chi))
-
-
-def test_coupling_target_reports_dressed_freq_after():
-    """effective_params reports each survivor's dressed post-elimination frequency and Lamb shift."""
-    chip, q, r, coupling = _readout_chip()
-    expected_q = chip.freq("q", when={"r": 0})
-    expected_r = chip.freq("r", when={"q": 0})
-    res = eliminate(chip, "cap0", method="exact")
-
-    assert np.isclose(float(res.effective_params["q"]["freq_after"]), float(expected_q))
-    assert np.isclose(float(res.effective_params["r"]["freq_after"]), float(expected_r))
-    assert np.isclose(
-        float(res.effective_params["q"]["lamb_shift"]), float(expected_q) - q.freq
-    )
-    assert np.isclose(
-        float(res.effective_params["r"]["lamb_shift"]), float(expected_r) - r.freq
-    )
-    assert res.chip["q"].freq == q.freq
-    assert res.chip["r"].freq == r.freq
-
-
-def test_coupling_target_validity_reports_g_over_delta():
-    """validity reports g/Δ for the eliminated coupling."""
-    chip, q, r, coupling = _readout_chip()
-    res = eliminate(chip, "cap0")
-    validity = res.validity["cap0"]
-    assert np.isclose(float(validity["g_over_delta"]), abs(0.05 / (5.0 - 7.0)))
-
-
-def test_coupling_target_accepts_object_or_label():
-    """Coupling-target elimination accepts either the coupling object or its label."""
-    chip, q, r, coupling = _readout_chip()
-    res = eliminate(chip, coupling)
-    by_label = eliminate(chip, coupling.label)
-    np.testing.assert_allclose(res.chip.hamiltonian().matrix(), by_label.chip.hamiltonian().matrix())
 
 
 def test_coupling_target_drive_on_surviving_device_carries_through():

@@ -5,6 +5,9 @@ import pytest
 from quchip.backend._dims import normalize_dims_from_list
 
 
+pytestmark = pytest.mark.unit
+
+
 @pytest.mark.parametrize(
     "dims,fallback,expected",
     [
