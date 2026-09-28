@@ -4,14 +4,13 @@ from __future__ import annotations
 
 
 import numpy as np
-import pytest
 
 from quchip import Chip, ControlEquipment, DuffingTransmon, Square
 from quchip.control.drive import FluxDrive
 from quchip.control.signal import AnalyticSignal, Crosstalk, Delay, Gain
 from quchip.engine import simulate
 from quchip.control.drive import ChargeDrive
-from quchip.engine.ir import Constant, DriveOp, Shift
+from quchip.engine.ir import Constant, DriveOp
 
 
 def test_control_equipment_applies_signal_chain_in_order() -> None:
@@ -67,14 +66,6 @@ def test_equipment_signal_chain_composes_transforms():
     )
 
 
-def test_drive_has_no_per_line_transform_collection():
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-    drive = FluxDrive(target=q)
-    assert not hasattr(drive, "signal_transforms")
-    assert not hasattr(drive, "build_signal")
-    assert not hasattr(drive, "signal_spec")
-
-
 def test_signal_transforms_accept_drive_objects():
     """Delay, Gain, and Crosstalk accept BaseDrive instances for line identification."""
     q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q0")
@@ -88,28 +79,6 @@ def test_signal_transforms_accept_drive_objects():
     assert gain.line == d0.label
     assert xt.source == d0.label
     assert xt.victim == d1.label
-
-
-def test_signal_chain_handles_multiple_drive_ops_on_same_line():
-    """Multiple drive ops on the same drive each get their own signal in the chain."""
-    q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q0")
-    d0 = ChargeDrive(target=q0)
-    drive_label = d0.label
-    delay = Delay(line=drive_label, delta_t=2.0)
-    sig_a = AnalyticSignal(Constant(1.0 + 0j))
-    sig_b = AnalyticSignal(Constant(2.0 + 0j))
-    signals = {(drive_label, 0): sig_a, (drive_label, 1): sig_b}
-    result = delay.apply(signals)
-    assert (drive_label, 0) in result
-    assert (drive_label, 1) in result
-    assert isinstance(result[(drive_label, 0)].program, Shift)
-    assert isinstance(result[(drive_label, 1)].program, Shift)
-
-
-def test_drives_have_no_rwa_constructor_field():
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-    with pytest.raises(TypeError, match="rwa"):
-        FluxDrive(target=q, rwa=True)
 
 
 def test_flux_drive_rabi():

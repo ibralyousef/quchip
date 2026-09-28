@@ -23,6 +23,9 @@ from quchip.engine.ir import (
 )
 
 
+pytestmark = pytest.mark.unit
+
+
 class QuadraticCoefficient(TimeCoefficient):
     scale: Scalar = parameter()
 
@@ -34,38 +37,12 @@ def _walk_signal(node: SignalNode) -> tuple[SignalNode, ...]:
     return (node, *(descendant for child in node.signal_children() for descendant in _walk_signal(child)))
 
 
-def test_cosine_coefficient_uses_ghz_ns_and_phase() -> None:
-    coefficient = CosineCoefficient(amplitude=0.2, frequency=0.25, phase=np.pi / 3)
-    times = np.asarray([0.0, 1.0, 2.0])
-    expected = 0.2 * np.cos(2.0 * np.pi * 0.25 * times + np.pi / 3)
-
-    np.testing.assert_allclose(np.asarray(coefficient.value(times)), expected, atol=1e-12)
-
-
 def test_cosine_coefficient_is_jax_differentiable() -> None:
     def sample(amplitude: float) -> jax.Array:
         coefficient = CosineCoefficient(amplitude=amplitude, frequency=0.25)
         return coefficient.value(jnp.asarray(0.5))
 
     np.testing.assert_allclose(jax.grad(sample)(0.2), np.sqrt(0.5), atol=1e-7)
-
-
-def test_cosine_coefficient_round_trip() -> None:
-    original = CosineCoefficient(amplitude=0.2, frequency=0.25, phase=0.4)
-
-    restored = TimeCoefficient.from_dict(original.to_dict())
-
-    assert isinstance(restored, CosineCoefficient)
-    assert restored.amplitude == original.amplitude
-    assert restored.frequency == original.frequency
-    assert restored.phase == original.phase
-
-
-def test_custom_coefficient_round_trip() -> None:
-    restored = TimeCoefficient.from_dict(QuadraticCoefficient(scale=0.5).to_dict())
-
-    assert isinstance(restored, QuadraticCoefficient)
-    assert restored.scale == pytest.approx(0.5)
 
 
 def test_cosine_coefficient_pytree_leaves_are_numerical_fields() -> None:

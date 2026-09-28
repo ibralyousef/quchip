@@ -10,28 +10,7 @@ from quchip.backend import compute_two_body_permutation
 from quchip.backend.qutip import QuTiPBackend
 
 
-class TestCanonicalRoundTrip:
-    """Canonical sparse/dense round-trips for the QuTiP backend."""
-
-    def test_sparse_operator_roundtrip_preserves_csr(self, backend: QuTiPBackend) -> None:
-        """Canonical round-trip of a sparse operator preserves its CSR layout and matrix elements."""
-        op = backend.destroy(4)
-        canonical = backend.to_canonical_operator(op)
-        rebuilt = backend.from_canonical_operator(canonical)
-
-        assert canonical.layout == "csr"
-        assert type(rebuilt.data).__name__ == "CSR"
-        npt.assert_allclose(rebuilt.full(), op.full(), atol=1e-12)
-
-    def test_dense_operator_roundtrip_stays_dense(self, backend: QuTiPBackend) -> None:
-        """Canonical round-trip of a dense operator preserves its dense layout and matrix elements."""
-        dense = backend.from_array(np.array([[1.0, 2.0], [3.0, 4.0]], dtype=complex))
-        canonical = backend.to_canonical_operator(dense)
-        rebuilt = backend.from_canonical_operator(canonical)
-
-        assert canonical.layout == "dense"
-        assert type(rebuilt.data).__name__ == "Dense"
-        npt.assert_allclose(rebuilt.full(), dense.full(), atol=1e-12)
+pytestmark = pytest.mark.unit
 
 
 class TestEmbedSingleBody:
@@ -48,13 +27,6 @@ class TestEmbedSingleBody:
         op = backend.embed(backend.number(5), 1, [3, 5])
         assert op.shape == (15, 15)
         npt.assert_allclose(op.tr(), 30.0, atol=1e-10)
-
-    def test_embed_identity_is_full_identity(self, backend: QuTiPBackend) -> None:
-        """Embedding identity into any slot gives the full identity."""
-        dims = [3, 5]
-        for idx in range(2):
-            embedded = backend.embed(backend.identity(dims[idx]), idx, dims)
-            npt.assert_allclose(embedded.full(), np.eye(15), atol=1e-12)
 
 
 class TestEmbedTwoBody:

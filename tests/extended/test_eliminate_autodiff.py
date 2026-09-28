@@ -60,6 +60,7 @@ def _bridge_chip_dynamiqs() -> Chip:
     )
 
 
+@pytest.mark.validation
 def test_grad_through_reduced_chip_pump_amplitude():
     """jax.grad of the reduced-chip transfer w.r.t. pump amplitude matches a central finite difference."""
     full = _bridge_chip_dynamiqs()

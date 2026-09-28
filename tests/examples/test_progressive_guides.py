@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import io
 import re
+import shutil
 import subprocess
 import sys
 import warnings
@@ -32,6 +33,15 @@ GUIDE_OUTPUT_RTOL = 1e-10
 GUIDE_OUTPUT_ATOL = 2e-9
 
 
+@pytest.fixture
+def guide_workspace(tmp_path):
+    """Keep rendered guide figures outside the checkout with the same relative paths."""
+    for directory in ("examples", "docs/images", "docs/_static"):
+        (tmp_path / directory).mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT / "docs/_static/quchip.mplstyle", tmp_path / "docs/_static/quchip.mplstyle")
+    return tmp_path
+
+
 def _assert_output_matches(actual: str, expected: str | None) -> None:
     """Compare guide output exactly except for numerical solver roundoff."""
     actual = actual.strip()
@@ -48,12 +58,12 @@ def _assert_output_matches(actual: str, expected: str | None) -> None:
     )
 
 
-def _run_opening_example(path: str) -> dict[str, object]:
+def _run_opening_example(path: str, workspace: Path) -> dict[str, object]:
     notebook = jupytext.read(ROOT / path)
     namespace: dict[str, object] = {"__name__": "__guide_example__"}
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
-        with contextlib.chdir(ROOT / "examples"):
+        with contextlib.chdir(workspace / "examples"):
             started = False
             for cell in notebook.cells:
                 if cell.cell_type == "code":
@@ -65,27 +75,28 @@ def _run_opening_example(path: str) -> dict[str, object]:
 
 
 @pytest.mark.examples
-def test_statics_guide_starts_with_a_small_declaration() -> None:
+def test_statics_guide_starts_with_a_small_declaration(guide_workspace) -> None:
     """The opening statics example reads one declared chip before sweeping it."""
-    example = _run_opening_example("examples/01_resolve_and_sweep.md")
+    example = _run_opening_example("examples/01_resolve_and_sweep.md", guide_workspace)
     assert tuple(device.label for device in example["chip"].devices) == ("q1", "q2", "bus")
     assert float(example["chip"].freq("q1")) > 5.0
 
 
+@pytest.mark.validation
 @pytest.mark.examples
 @pytest.mark.optional_backend
-def test_differentiability_guide_starts_with_static_shapes() -> None:
+def test_differentiability_guide_starts_with_static_shapes(guide_workspace) -> None:
     """The opening differentiability cell returns one gradient and one Jacobian."""
     pytest.importorskip("dynamiqs")
-    example = _run_opening_example("examples/03_differentiate_a_driven_chip.md")
+    example = _run_opening_example("examples/03_differentiate_a_driven_chip.md", guide_workspace)
     assert example["static_gradient"].shape == (3,)
     assert example["static_jacobian"].shape == (2, 3)
 
 
 @pytest.mark.examples
-def test_measurement_guide_matches_the_linear_cavity_response() -> None:
+def test_measurement_guide_matches_the_linear_cavity_response(guide_workspace) -> None:
     """The declared readout reproduces the coherent-state occupation and measurement dephasing."""
-    example = _run_opening_example("examples/04_continuous_measurement.md")
+    example = _run_opening_example("examples/04_continuous_measurement.md", guide_workspace)
     kappa, detuning = example["kappa"], 2 * np.pi * 0.002
     denominator = (kappa / 2) ** 2 + detuning ** 2
     photons = (np.pi * example["amplitude"]) ** 2 / denominator
@@ -111,7 +122,8 @@ def test_committed_markdown_contains_current_notebook_outputs() -> None:
 @pytest.mark.examples
 @pytest.mark.parametrize("guide", ["defining-and-inspecting-a-chip", "steady-state-and-vna", "slh-networks",
                                   pytest.param("atom-cavity", marks=pytest.mark.optional_backend)])
-def test_guide_outputs_match_a_fresh_execution(guide: str) -> None:
+@pytest.mark.validation
+def test_guide_outputs_match_a_fresh_execution(guide: str, guide_workspace) -> None:
     """Standalone guides execute their physical checks and reproduce shown output."""
     if guide == "atom-cavity":
         pytest.importorskip("dynamiqs")
@@ -121,7 +133,7 @@ def test_guide_outputs_match_a_fresh_execution(guide: str) -> None:
     assert blocks, "the guide must contain executable examples with displayed output"
 
     namespace: dict[str, object] = {"__name__": "__defining_guide__"}
-    with contextlib.chdir(ROOT / "docs" / "images"):
+    with contextlib.chdir(guide_workspace / "docs" / "images"):
         for index, (code, expected) in enumerate(blocks, start=1):
             captured = io.StringIO()
             with warnings.catch_warnings():
@@ -133,6 +145,7 @@ def test_guide_outputs_match_a_fresh_execution(guide: str) -> None:
 
 @pytest.mark.examples
 @pytest.mark.optional_backend
+@pytest.mark.validation
 def test_sqa_snippets_execute_independently() -> None:
     """Every SQA snippet runs alone and produces its displayed output."""
     pytest.importorskip("dynamiqs")

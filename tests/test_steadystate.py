@@ -28,6 +28,7 @@ def test_damped_mode_has_vacuum_steady_state() -> None:
     assert result.is_unique
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_state_positivity_is_computed_on_request_from_captured_state(backend, monkeypatch):
     mode = Resonator(freq=6.0, levels=2, T1=20.0, thermal_occupation=0.1, label="r")
@@ -52,6 +53,7 @@ def test_state_positivity_is_computed_on_request_from_captured_state(backend, mo
     assert result.hermiticity_error < 1e-12
 
 
+@pytest.mark.validation
 def test_requested_stationary_diagnostic_keeps_native_gradient():
     import jax
     import jax.numpy as jnp
@@ -108,6 +110,7 @@ def test_qutip_skips_dense_rank_diagnostics_above_default_cap() -> None:
     assert result.stats["uniqueness_checked"] is False
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_dynamiqs_steady_state_is_jittable_and_differentiable() -> None:
     """The constrained dynamiqs solve preserves JIT and gradients through dissipative parameters."""
@@ -125,8 +128,7 @@ def test_dynamiqs_steady_state_is_jittable_and_differentiable() -> None:
         result = shifted.steadystate(e_ops={"r": number})
         return jnp.real(result.expect("r"))
 
-    value = occupation(jnp.asarray(0.1))
-    gradient = jax.grad(occupation)(jnp.asarray(0.1))
+    value, gradient = jax.value_and_grad(occupation)(jnp.asarray(0.1))
 
     assert float(value) == pytest.approx(0.09993, rel=2e-3)
     assert float(gradient) == pytest.approx(0.996, rel=1e-2)

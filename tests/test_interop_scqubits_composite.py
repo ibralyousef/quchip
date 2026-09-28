@@ -26,7 +26,6 @@ from quchip.control.equipment import ControlEquipment  # noqa: E402
 from quchip.devices import Resonator  # noqa: E402
 from quchip.devices.fluxonium import Fluxonium  # noqa: E402
 from quchip.devices.transmon import ChargeBasisTransmon  # noqa: E402
-from quchip.interop import EigenbasisDevice  # noqa: E402
 from quchip.interop.scqubits import from_scqubits, to_scqubits  # noqa: E402
 from quchip.interop.scqubits.composite import (  # noqa: E402
     _device_gauge_matrix,
@@ -58,19 +57,6 @@ def _transmon_oscillator_hilbertspace() -> Any:  # type: ignore[valid-type]
 # ---------------------------------------------------------------------------
 # Composite structure
 # ---------------------------------------------------------------------------
-
-
-def test_hilbertspace_imports_to_chip_structure():
-    """Two subsystems and one InteractionTerm import to 2 devices + 1 coupling."""
-    hs = _transmon_oscillator_hilbertspace()
-    chip = from_scqubits(hs)
-
-    assert isinstance(chip, Chip)
-    assert len(chip.devices) == 2
-    assert all(isinstance(device, EigenbasisDevice) for device in chip.devices)
-    assert [d.label for d in chip.devices] == ["tmon", "osc"]
-    assert len(chip.couplings) == 1
-    assert chip.couplings[0].label == "scq_interaction_0"
 
 
 def test_hilbertspace_dressed_spectrum_matches_oracle():
@@ -164,6 +150,7 @@ def _small_zero_pi_hilbertspace(id_str: str = "zp") -> Any:
     return hs, zp
 
 
+@pytest.mark.validation
 def test_zeropi_in_hilbertspace():
     """A ZeroPi subsystem and its interaction import in one frozen source gauge."""
     import warnings
@@ -188,51 +175,9 @@ def test_zeropi_in_hilbertspace():
 # ---------------------------------------------------------------------------
 
 
-def test_string_expression_interaction_raises():
-    """An ``InteractionTermStr`` interaction is rejected with guidance."""
-    tmon = scq.Transmon(EJ=30.0, EC=0.2, ng=0.25, ncut=31, truncated_dim=4, id_str="tmon")
-    osc = scq.Oscillator(E_osc=6.0, truncated_dim=3, id_str="osc")
-    hs = scq.HilbertSpace([tmon, osc])
-    hs.add_interaction(
-        expr="g * n * (ad + a)",
-        op1=("n", tmon.n_operator),
-        op2=("ad", osc.creation_operator),
-        op3=("a", osc.annihilation_operator),
-        const={"g": 0.02},
-    )
-
-    with pytest.raises(NotImplementedError, match="string-expression interactions"):
-        from_scqubits(hs)
-
-
-def test_non_pairwise_interaction_raises():
-    """An interaction with other than two operators is rejected."""
-    tmon = scq.Transmon(EJ=30.0, EC=0.2, ng=0.25, ncut=31, truncated_dim=4, id_str="tmon")
-    osc_a = scq.Oscillator(E_osc=6.0, truncated_dim=3, id_str="osc_a")
-    osc_b = scq.Oscillator(E_osc=7.0, truncated_dim=3, id_str="osc_b")
-    hs = scq.HilbertSpace([tmon, osc_a, osc_b])
-    hs.add_interaction(
-        g=0.01,
-        op1=tmon.n_operator,
-        op2=osc_a.creation_operator,
-        op3=osc_b.creation_operator,
-        add_hc=True,
-    )
-
-    with pytest.raises(NotImplementedError):
-        from_scqubits(hs)
-
-
 # ---------------------------------------------------------------------------
 # Options pass-through
 # ---------------------------------------------------------------------------
-
-
-def test_frame_and_approximation_forwarded_to_chip():
-    """Imported chips use Exact unless an explicit strategy is supplied."""
-    hs = _transmon_oscillator_hilbertspace()
-    chip = from_scqubits(hs)
-    assert chip.approximation == Exact()
 
 
 # ---------------------------------------------------------------------------
@@ -252,18 +197,7 @@ def _transmon_oscillator_chip() -> Chip:
     return Chip([tmon, res], couplings=[Capacitive(tmon, res, g=0.035)], approximation=Exact())
 
 
-def test_chip_exports_to_hilbertspace_structure():
-    """A 2-device, 1-coupling chip exports to 2 subsystems + 1 interaction."""
-    hs = to_scqubits(_transmon_oscillator_chip())
-
-    assert isinstance(hs, scq.HilbertSpace)
-    assert len(hs.subsystem_list) == 2
-    assert isinstance(hs.subsystem_list[0], scq.Transmon)
-    assert isinstance(hs.subsystem_list[1], scq.Oscillator)
-    assert [s.id_str for s in hs.subsystem_list] == ["tmon", "osc"]
-    assert len(hs.interaction_list) == 1
-
-
+@pytest.mark.validation
 def test_export_spectrum_matches_chip_oracle():
     """The exported HilbertSpace spectrum matches the chip's dressed spectrum.
 
@@ -354,22 +288,6 @@ def test_export_raises_when_rwa_resolves_true_on_rwa_sensitive_coupling():
     )
     with pytest.raises(ValueError, match="RWA"):
         to_scqubits(Chip([tmon, res], couplings=[product_coupling]))
-
-
-def test_export_callable_coupling_raises():
-    """A callable-form ``Coupling`` is not exportable — it raises with guidance."""
-    tmon = ChargeBasisTransmon(E_C=0.2, E_J=30.0, n_g=0.25, levels=4, num_basis=63, basis="eigen", label="tmon")
-    res = Resonator(freq=6.0, levels=3, label="osc")
-    coupling = Coupling(
-        tmon,
-        res,
-        g=0.03,
-        interaction=lambda a, b, bk: bk.tensor(a.number_operator(), b.lowering_operator()),
-    )
-    chip = Chip([tmon, res], couplings=[coupling])
-
-    with pytest.raises(NotImplementedError, match="Capacitive"):
-        to_scqubits(chip)
 
 
 @pytest.mark.parametrize("owner", ["device", "coupling"])

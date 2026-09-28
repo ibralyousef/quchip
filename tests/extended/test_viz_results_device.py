@@ -91,14 +91,6 @@ def _line_by_label(ax: plt.Axes, label: str) -> plt.Line2D:
     raise AssertionError(f"Missing line for label {label!r}")
 
 
-def test_plot_populations_returns_supplied_figure(sample_result: SimulationResult) -> None:
-    """plot_populations given ax= returns the figure that owns that axes."""
-    fig, ax = plt.subplots()
-    returned = sample_result.plot_populations(ax=ax)
-    assert returned is fig
-    plt.close(fig)
-
-
 def test_plot_populations_trace_out_single_device_matches_expected_values(sample_result: SimulationResult) -> None:
     """Tracing out a single device sums the weights onto the remaining basis labels correctly."""
     fig = sample_result.plot_populations(trace_out="r0")

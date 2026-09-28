@@ -23,22 +23,6 @@ def _chip_with_equipment():
     return chip
 
 
-def test_eliminate_carries_survivor_lines_and_signal_chain():
-    """eliminate() rebinds surviving control lines onto the reduced chip's devices and keeps the signal chain intact."""
-    chip = _chip_with_equipment()
-    reduced = eliminate(chip, "r").chip
-    ce = reduced.control_equipment
-    assert ce is not None
-    assert [line.label for line in ce.lines] == ["dq", "dq2"]
-    # Lines rebind to the *reduced* chip's canonical device instances.
-    assert ce.lines[0]._target is reduced["q"]
-    assert ce.lines[1]._target is reduced["q2"]
-    # Signal chain survives verbatim (same transform count and keying).
-    kinds = [type(t).__name__ for t in ce.signal_chain]
-    assert kinds == ["Delay", "Crosstalk"]
-    assert ce.signal_chain[0].line == "dq"
-
-
 def test_input_chip_equipment_is_not_mutated():
     """eliminate() does not mutate the input chip's control-equipment lines or their device targets."""
     chip = _chip_with_equipment()

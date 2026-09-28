@@ -1,8 +1,9 @@
 name: deps-canary
 
 # Weekly early-warning check: install with a fresh, unconstrained dependency
-# resolution (ignoring the ci-constraints-*.txt lockfiles) and run the full
-# suite. A failure here means upstream drift, not a quchip regression, so it
+# resolution (ignoring the ci-constraints-*.txt lockfiles) and run unit and E2E
+# tests. Expensive validation is reserved for explicit pre-merge runs.
+# A failure here can indicate upstream drift, so it
 # files/updates a tracking issue instead of failing the ci workflow.
 
 on:
@@ -28,7 +29,8 @@ jobs:
       - run: uv pip install -e '.[dev,test,dynamiqs]'
       - name: Report resolved versions
         run: uv pip freeze
-      - run: uv run --no-sync pytest
+      - name: Unit and end-to-end dependency checks
+        run: uv run --no-sync pytest -m 'unit or e2e' --durations=20
 
   file-issue:
     needs: fresh-resolve
@@ -44,7 +46,7 @@ jobs:
           gh label create deps-canary --force \
             --description "Fresh dependency resolution broke the test suite" \
             --color D93F0B
-          body="The [weekly deps-canary run]($RUN_URL) failed: a fresh (unconstrained) dependency resolution no longer passes the test suite.
+          body="The [weekly deps-canary run]($RUN_URL) failed: a fresh (unconstrained) dependency resolution no longer passes the unit and E2E suites.
 
           This points at an upstream release, not a quchip regression — the \`ci\` workflow still installs from \`ci-constraints-*.txt\` and stays green. Compare the job's \`uv pip freeze\` output against the constraint files to find the changed package, then either add an exclusion to \`ci-constraints.in\` or fix the incompatibility, and regenerate with \`tools/compile_ci_constraints.sh\`."
           existing=$(gh issue list --label deps-canary --state open --json number --jq '.[0].number // empty')

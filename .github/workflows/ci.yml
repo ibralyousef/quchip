@@ -95,4 +95,9 @@ jobs:
             ci-constraints-*.txt
       - run: uv venv --python ${{ matrix.python }}
       - run: uv pip install -e '.[test,dynamiqs]' -c ci-constraints-${{ matrix.python }}.txt
-      - run: uv run --no-sync pytest -m "core or physics_sentinel"
+      - name: Unit tests
+        timeout-minutes: 2
+        run: uv run --no-sync pytest -m unit --durations=10
+      - name: End-to-end and physics tests
+        timeout-minutes: 10
+        run: uv run --no-sync pytest -m e2e --durations=10

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from quchip.approximations import RWA
 
 import numpy as np
@@ -44,6 +46,7 @@ def _build_dispersive_system(
     return chip, q, r, drive_q, drive_r
 
 
+@pytest.mark.validation
 def test_cross_mode_populations_match():
     """All frame modes produce identical qubit populations."""
     p0_results: dict[str, np.ndarray] = {}
@@ -82,6 +85,7 @@ def test_cross_mode_populations_match():
         )
 
 
+@pytest.mark.validation
 def test_cross_mode_demodulated_amplitude_match():
     """Demodulated <a> envelope matches across all frame modes."""
     expect_results: dict[str, np.ndarray] = {}

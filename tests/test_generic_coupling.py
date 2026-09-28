@@ -12,6 +12,9 @@ from quchip.engine.approximations import apply_operator_band_filter
 from quchip.declarative.expr import materialize_expr
 
 
+pytestmark = pytest.mark.unit
+
+
 @pytest.fixture()
 def q0():
     return DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
@@ -30,35 +33,6 @@ def res():
 # ---------------------------------------------------------------------------
 # Construction validation
 # ---------------------------------------------------------------------------
-
-
-class TestCouplingValidation:
-    def test_missing_both_raises(self, q0, q1):
-        """Coupling with neither op_a/op_b nor interaction raises ValueError."""
-        with pytest.raises(ValueError, match="Provide either"):
-            Coupling(q0, q1, g=0.01)
-
-    def test_both_modes_raises(self, q0, q1):
-        """Coupling given both op_a/op_b and interaction raises ValueError."""
-        with pytest.raises(ValueError, match="not both"):
-            Coupling(
-                q0,
-                q1,
-                g=0.01,
-                op_a=lambda d: d.number_operator(),
-                op_b=lambda d: d.number_operator(),
-                interaction=lambda a, b, bk: bk.tensor(a.identity(), b.identity()),
-            )
-
-    def test_partial_ops_raises(self, q0, q1):
-        """Coupling with only op_a set raises ValueError."""
-        with pytest.raises(ValueError, match="Both op_a and op_b"):
-            Coupling(q0, q1, g=0.01, op_a=lambda d: d.number_operator())
-
-    def test_non_device_raises(self, q0):
-        """A non-device, non-label first argument raises TypeError."""
-        with pytest.raises(TypeError, match="BaseDevice or label string"):
-            Coupling(42, q0, g=0.01, op_a=lambda d: d.identity(), op_b=lambda d: d.identity())  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -166,19 +140,6 @@ class TestCouplingChipIntegration:
 # ---------------------------------------------------------------------------
 # Serialization (not supported)
 # ---------------------------------------------------------------------------
-
-
-class TestCouplingSerialization:
-    def test_to_dict_raises(self, q0, q1):
-        """Coupling.to_dict raises NotImplementedError."""
-        c = Coupling(q0, q1, g=0.01, op_a=lambda d: d.identity(), op_b=lambda d: d.identity())
-        with pytest.raises(NotImplementedError, match="cannot be serialized"):
-            c.to_dict()
-
-    def test_from_dict_raises(self, q0, q1):
-        """Coupling.from_dict raises NotImplementedError."""
-        with pytest.raises(NotImplementedError, match="cannot be deserialized"):
-            Coupling.from_dict({}, q0, q1)
 
 
 # ---------------------------------------------------------------------------

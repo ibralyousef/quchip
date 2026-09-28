@@ -50,6 +50,7 @@ def test_thermal_state_declarations_reject_invalid_values(value) -> None:
         PortNetwork().termination("load", thermal_occupation=value)
 
 
+@pytest.mark.validation
 def test_thermal_equilibrium_output_is_flat_without_double_counting() -> None:
     """A warm source incident on a lossless cavity emerges with the same thermal spectrum."""
     from quchip import VNA

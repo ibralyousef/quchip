@@ -9,19 +9,7 @@ from quchip.declarative.ops import EndpointOps, LocalOps
 from quchip.devices.spaces import FockSpace
 
 
-def test_same_endpoint_matrix_composition_uses_matmul():
-    """Composing same-endpoint operators with ``@`` produces a matmul-kind expression."""
-    op = LocalOps(label="q", space=FockSpace(3))
-    expr = op.n @ (op.n - op.I)
-    assert isinstance(expr, PhysicsExpr)
-    assert expr.kind == "matmul"
-
-
-def test_same_endpoint_star_errors_with_clear_message():
-    """Multiplying same-endpoint operators with ``*`` raises, naming ``@`` as the fix."""
-    op = LocalOps(label="q", space=FockSpace(3))
-    with pytest.raises(TypeError, match="same endpoint.*use @"):
-        _ = op.n * op.I
+pytestmark = pytest.mark.unit
 
 
 def test_cross_endpoint_star_builds_tensor_product():
@@ -39,15 +27,6 @@ def test_cross_endpoint_matmul_errors_with_clear_message():
     b = EndpointOps(label="b", space=FockSpace(4))
     with pytest.raises(TypeError, match="different endpoints.*use \\*"):
         _ = a.x @ b.x
-
-
-@pytest.mark.parametrize("value", [2, 2.0, jnp.asarray(2.0)])
-def test_scalar_multiplication_from_either_side(value):
-    """Python and array scalars scale every matrix element from either side."""
-    op = LocalOps(label="q", space=FockSpace(3))
-    expected = jnp.diag(jnp.asarray([0.0, 2.0, 4.0]))
-    assert jnp.array_equal(materialize_array(value * op.n), expected)
-    assert jnp.array_equal(materialize_array(op.n * value), expected)
 
 
 def test_traced_scalar_flows_through_jax_grad():

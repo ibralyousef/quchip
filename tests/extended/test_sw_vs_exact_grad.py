@@ -41,6 +41,7 @@ def _bridge_chip_dynamiqs(leg0_g: jnp.ndarray | float) -> Chip:
     return Chip([q0, q1, bus], couplings=couplings, frame="rotating", backend=DynamiqsBackend())
 
 
+@pytest.mark.validation
 def test_grad_through_exact_zz_matches_finite_difference():
     """jax.grad of the exact-route residual ZZ w.r.t. one leg's g matches a central finite difference."""
 
@@ -49,7 +50,7 @@ def test_grad_through_exact_zz_matches_finite_difference():
         return eliminate(chip, "bus", method="exact").effective_params["exchange"]["zz"]
 
     g0 = 0.08
-    grad = jax.grad(loss)(jnp.float64(g0))
+    grad = jax.jit(jax.grad(loss))(jnp.float64(g0))
     assert jnp.isfinite(grad)
 
     step = 1e-5

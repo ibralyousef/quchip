@@ -10,6 +10,7 @@ from quchip.engine import solve_batch
 from quchip.engine.ir import CanonicalOperator, SolveBatch, StaticTerm
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_batch_keeps_distinct_applied_static_hamiltonians(backend):
     q = DuffingTransmon(freq=1 / (2 * np.pi), anharmonicity=-0.2, levels=2, label="q")
@@ -52,6 +53,7 @@ def test_point_observables_obey_native_storage_choice(states, noisy):
             assert point.final_state is not None
 
 
+@pytest.mark.validation
 def test_point_observables_keep_native_jit_gradients_without_histories():
     import jax
     import jax.numpy as jnp
@@ -68,6 +70,7 @@ def test_point_observables_keep_native_jit_gradients_without_histories():
     assert derivative == pytest.approx(3 * np.exp(-0.3), abs=3e-6)
 
 
+@pytest.mark.validation
 def test_point_observables_follow_dynamic_pulse_axes_and_gradients():
     import jax
     import jax.numpy as jnp

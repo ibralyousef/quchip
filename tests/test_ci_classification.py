@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import os
 import subprocess
 import tempfile
@@ -56,6 +58,7 @@ class ChangeClassificationTests(unittest.TestCase):
         result = self.classify(self.commit())
         self.assertEqual((result.returncode, result.stdout), (0, "full_ci=false\n"))
 
+    @pytest.mark.validation
     def test_executable_markdown_and_ci_policy_require_tests(self):
         """Example notebooks, test resources, and CI policy cannot use the Markdown exemption."""
         for name in ("examples/demo.md", "tests/fixture.md", "tools/helper.md", ".github/rulesets/main.json"):

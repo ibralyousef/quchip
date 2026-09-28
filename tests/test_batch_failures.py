@@ -72,6 +72,7 @@ def test_failure_index_survives_heterogeneous_backend_grouping():
     assert "Excess work" in str(caught.value)
 
 
+@pytest.mark.validation
 def test_actual_worker_error_preserves_point_context_and_pool_usability(monkeypatch):
     batch = _batch()
     backend = batch.problems[0].backend
@@ -96,6 +97,7 @@ def test_incomplete_backend_output_is_never_a_partial_batch(monkeypatch):
         solve_batch(batch, progress=False)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("consumer", ["value_and_grad", "grad", "vmap"])
 def test_dynamiqs_failure_keeps_runtime_parameters_under_jit_and_gradient(consumer):
     import jax
@@ -106,25 +108,30 @@ def test_dynamiqs_failure_keeps_runtime_parameters_under_jit_and_gradient(consum
         result = solve_batch(batch, progress=False)
         return jnp.real(result.expect("q", reduce="last").sum())
 
-    evaluate = jax.jit(jax.value_and_grad(objective))
-    value, derivative = evaluate(jnp.asarray(0.1))
     import numpy as np
-    assert value == pytest.approx(np.sin(np.pi * 0.1) ** 2, abs=2e-6)
-    assert derivative == pytest.approx(np.pi * np.sin(2 * np.pi * 0.1), abs=2e-6)
+
     if consumer == "grad":
         evaluate = jax.jit(jax.grad(objective))
+        assert evaluate(jnp.asarray(0.1)) == pytest.approx(np.pi * np.sin(2 * np.pi * 0.1), abs=2e-6)
         arguments = jnp.asarray(100.0)
     elif consumer == "vmap":
         evaluate = jax.jit(jax.vmap(jax.value_and_grad(objective)))
-        np.testing.assert_allclose(evaluate(jnp.asarray([0.1, 0.2]))[0],
-                                   np.sin(np.pi * np.asarray([0.1, 0.2])) ** 2, atol=2e-6)
+        amplitudes = jnp.asarray([0.1, 0.2])
+        values, derivatives = evaluate(amplitudes)
+        np.testing.assert_allclose(values, np.sin(np.pi * amplitudes) ** 2, atol=2e-6)
+        np.testing.assert_allclose(derivatives, np.pi * np.sin(2 * np.pi * amplitudes), atol=2e-6)
         arguments = jnp.asarray([0.1, 100.0])
     else:
+        evaluate = jax.jit(jax.value_and_grad(objective))
+        value, derivative = evaluate(jnp.asarray(0.1))
+        assert value == pytest.approx(np.sin(np.pi * 0.1) ** 2, abs=2e-6)
+        assert derivative == pytest.approx(np.pi * np.sin(2 * np.pi * 0.1), abs=2e-6)
         arguments = jnp.asarray(100.0)
     with pytest.raises(Exception, match="Batch point 1 failed.*amp.*100.0.*maximum number of solver steps"):
         jax.block_until_ready(evaluate(arguments))
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("consumer", ["value", "grad", "constant"])
 def test_compiled_heterogeneous_failure_uses_original_collection_index(consumer):
     import jax

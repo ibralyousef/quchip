@@ -68,6 +68,7 @@ def _dag(matrix: np.ndarray) -> np.ndarray:
     return matrix.conj().T
 
 
+@pytest.mark.unit
 def test_series_product_matches_textbook_rule() -> None:
     """G1 ▷ G2 = (S2 S1, L2 + S2 L1, H1 + H2 + (L2† S2 L1 − h.c.) / 2i)."""
     a = _lowering()
@@ -91,6 +92,7 @@ def test_series_product_matches_textbook_rule() -> None:
     assert [channel.key for channel in combined.channels] == ["g2.0", "g2.1"]
 
 
+@pytest.mark.unit
 def test_series_product_rejects_channel_count_mismatch() -> None:
     """Series composition needs as many outputs on the first system as inputs on the second."""
     a = _lowering()
@@ -100,6 +102,7 @@ def test_series_product_rejects_channel_count_mismatch() -> None:
         series_product(first, second)
 
 
+@pytest.mark.unit
 def test_concatenate_is_block_diagonal_and_prefixes_keys() -> None:
     """G1 ⊞ G2 stacks channels block-diagonally, adds Hamiltonians, and disambiguates keys on request."""
     a = _lowering()
@@ -115,6 +118,7 @@ def test_concatenate_is_block_diagonal_and_prefixes_keys() -> None:
     assert not combined.feeds(0, 1) and combined.feeds(1, 1)
 
 
+@pytest.mark.unit
 def test_feedback_reduce_matches_textbook_rule() -> None:
     """Closing output x into input y follows the Gough-James reduction formulas."""
     a = _lowering()
@@ -140,6 +144,7 @@ def test_feedback_reduce_matches_textbook_rule() -> None:
     assert [channel.key for channel in reduced.channels] == ["g.1->g.0", "g.2"]
 
 
+@pytest.mark.unit
 def test_feedback_reduce_rejects_singular_loop() -> None:
     """A loop with unit round-trip scattering has no instantaneous solution."""
     a = _lowering()
@@ -148,6 +153,7 @@ def test_feedback_reduce_rejects_singular_loop() -> None:
         feedback_reduce(system, output="g.0", input="g.0")
 
 
+@pytest.mark.unit
 def test_algebra_requires_common_hilbert_space() -> None:
     """Operators on different subsystem layouts cannot be combined."""
     a = _lowering()
@@ -184,6 +190,7 @@ def test_graph_cascade_equals_feedback_of_concatenated_ports() -> None:
     assert [channel.key for channel in closed.channels] == ["pa->pb"]
 
 
+@pytest.mark.validation
 def test_feedback_gain_traces_under_jit_and_grad() -> None:
     """A traced loop phase flows through feedback_reduce without concretization."""
     jax = pytest.importorskip("jax")
@@ -205,6 +212,7 @@ def test_feedback_gain_traces_under_jit_and_grad() -> None:
     assert np.isfinite(float(value)) and np.isfinite(float(gradient))
 
 
+@pytest.mark.unit
 def test_joins_require_matching_accessibility_and_carrier() -> None:
     """Joined legs must agree on visibility and carrier before their metadata can be merged."""
     a = _lowering()
@@ -220,6 +228,7 @@ def test_joins_require_matching_accessibility_and_carrier() -> None:
         feedback_reduce(pair, output="g.0", input="d.0")
 
 
+@pytest.mark.unit
 def test_concrete_jax_operands_stay_in_jax() -> None:
     """Concrete JAX payloads are composed with JAX, not coerced to NumPy."""
     jax = pytest.importorskip("jax")
@@ -234,6 +243,7 @@ def test_concrete_jax_operands_stay_in_jax() -> None:
         assert all(isinstance(operator.values, jax.Array) for operator in result.L)
 
 
+@pytest.mark.unit
 def test_thermal_input_survives_series_and_feedback_at_its_input_column() -> None:
     """SLH composition retains a surviving external bath and rejects an overwritten one."""
     first = _system("first", np.eye(2), [_lowering(), _lowering()], None)

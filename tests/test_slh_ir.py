@@ -12,6 +12,9 @@ from quchip.engine.ir import (
 )
 
 
+pytestmark = pytest.mark.unit
+
+
 def _collapse(
     source: str,
     channel: str,

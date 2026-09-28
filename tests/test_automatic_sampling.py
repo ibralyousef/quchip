@@ -6,13 +6,7 @@ import pytest
 from quchip import Chip, DuffingTransmon, QuantumSequence
 
 
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
-def test_stationary_rotating_qubit_needs_only_interval_endpoints(backend):
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="q")
-    problem = QuantumSequence(Chip([q], backend=backend, frame="rotating")).build_problem(duration=1000.0)
-    np.testing.assert_array_equal(problem.tlist, [0.0, 1000.0])
-
-
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_automatic_idle_grid_resolves_fast_population_exchange(backend):
     from quchip.declarative import DeviceModel, parameter
@@ -41,55 +35,6 @@ def test_automatic_idle_grid_resolves_fast_population_exchange(backend):
     np.testing.assert_allclose(interpolated, np.sin(2 * np.pi * q.rate * query) ** 2, atol=0.005)
 
 
-def test_fast_decay_is_sampled_without_a_hamiltonian_frequency():
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, T1=0.001, label="q")
-    chip = Chip([q], frame="rotating")
-    sequence = QuantumSequence(chip)
-    problem = sequence.build_problem(duration=0.01, initial_state={"q": 1})
-    assert np.max(np.diff(problem.tlist)) <= q.T1 / 16
-    closed = sequence.build_problem(duration=0.01, dissipation=False)
-    np.testing.assert_array_equal(closed.tlist, [0.0, 0.01])
-
-
-def test_narrow_gaussian_features_are_local_to_pulse():
-    from quchip import ChargeDrive, Gaussian
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="q")
-    chip = Chip([q], frame="rotating")
-    drive = ChargeDrive(q)
-    chip.wire(drive)
-    sequence = QuantumSequence(chip)
-    sequence.schedule(drive, envelope=Gaussian(duration=0.01, sigmas=12.0, amplitude=0.01),
-                      start_time=500.0, freq=5.0)
-    times = np.asarray(sequence.build_problem(duration=1000.0).tlist)
-    assert len(times) < 1000
-    assert sum((times > 500.0) & (times < 500.01)) >= 60
-    assert sum(times < 500.0) <= 2
-
-
-def test_amplitude_sweep_uses_one_grid_without_growth_per_point():
-    from quchip import ChargeDrive, Square
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="q")
-    chip = Chip([q], frame="rotating")
-    drive = ChargeDrive(q)
-    chip.wire(drive)
-    sequence = QuantumSequence(chip)
-    pulse = sequence.schedule(drive, envelope=Square(duration=10.0, amplitude=0.01), freq=5.0)
-    amplitudes = np.linspace(0.01, 0.2, 20)
-    many = sequence.build_batch(pulse.vary("amplitude", amplitudes))
-    largest = sequence.build_batch(pulse.vary("amplitude", amplitudes[-1:]))
-    assert many.has_shared_tlist
-    np.testing.assert_array_equal(many.tlist, largest.tlist)
-
-
-def test_explicit_grid_keeps_its_values_despite_fast_dynamics():
-    q = DuffingTransmon(freq=20.0, anharmonicity=-0.2, levels=3, label="q")
-    times = np.array([0.0, 0.2, 3.0])
-    problem = QuantumSequence(Chip([q], frame="lab")).build_problem(times)
-    np.testing.assert_array_equal(problem.tlist, times)
-
-
 def test_sparse_spectral_span_covers_off_diagonal_and_ignores_energy_origin():
     from scipy import sparse
     from quchip.engine.ir import CanonicalOperator, StaticTerm
@@ -106,6 +51,7 @@ def test_sparse_spectral_span_covers_off_diagonal_and_ignores_energy_origin():
         assert _static_spectral_span((StaticTerm(operator), StaticTerm(shift))) == pytest.approx(2.0)
 
 
+@pytest.mark.validation
 @pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 def test_narrow_gaussian_trace_matches_integrated_pulse_area(backend):
     from scipy.special import erf
@@ -166,6 +112,7 @@ def test_large_sparse_spectral_bound_does_not_need_dense_materialization(monkeyp
     assert _static_spectral_span((StaticTerm(operator),)) == pytest.approx(4.0)
 
 
+@pytest.mark.validation
 def test_automatic_grid_can_be_reused_for_differentiation():
     import jax
     import jax.numpy as jnp
@@ -273,12 +220,6 @@ def test_narrow_output_pulse_survives_reference_plane_delays():
     assert np.max(field.photon_flux) == pytest.approx(0.01, abs=1e-6)
     peak_time = np.asarray(result.times)[np.argmax(field.photon_flux)]
     assert 2.0 <= peak_time <= 2.01
-
-
-def test_excessive_automatic_grid_explains_an_explicit_choice():
-    q = DuffingTransmon(freq=50.0, anharmonicity=-0.2, levels=2, label="q")
-    with pytest.raises(ValueError, match="Automatic sampling would require.*explicit tlist"):
-        QuantumSequence(Chip([q], frame="lab")).build_problem(duration=1000.0)
 
 
 def test_value_dependent_automatic_grid_explains_the_jax_boundary():

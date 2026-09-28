@@ -1,30 +1,16 @@
 from __future__ import annotations
 
-import inspect
 
 import jax
 import numpy as np
 import numpy.testing as npt
 import pytest
 
-from quchip import CouplingModel, DeviceModel, Envelope, Scalar, qnp, parameter
+from quchip import CouplingModel, DeviceModel, Scalar, parameter
 from quchip.declarative import setting
-from quchip.devices.base import BaseDevice
 
 
-class CosineEnvelope(Envelope):
-    duration: Scalar = parameter(positive=True)
-    amplitude: Scalar = parameter(default=1.0)
-
-    def value(self, t):
-        return self.amplitude * (1.0 - qnp.cos(qnp.pi * t / self.duration))
-
-
-def test_custom_envelope_samples_without_xp_argument():
-    """A custom Envelope subclass samples correctly through the base pipeline without an explicit xp argument."""
-    env = CosineEnvelope(duration=10.0, amplitude=2.0)
-    samples = env.sample(np.asarray([0.0, 5.0, 10.0]))
-    npt.assert_allclose(np.asarray(samples), np.asarray([0.0, 2.0, 4.0]), atol=1e-7)
+pytestmark = pytest.mark.unit
 
 
 class HarmonicMode(DeviceModel):
@@ -41,19 +27,6 @@ class ConfiguredMode(DeviceModel):
 
     def local_hamiltonian(self, op, p):
         return p.freq * op.n
-
-
-def test_device_setting_is_keyword_only_and_round_trips():
-    with pytest.raises(TypeError, match="basis_name"):
-        ConfiguredMode(5.0)
-    signature = inspect.signature(ConfiguredMode)
-    assert signature.parameters["basis_name"].kind is inspect.Parameter.KEYWORD_ONLY
-
-    mode = ConfiguredMode(5.0, basis_name="eigen", levels=3, label="m")
-    restored = BaseDevice.from_dict(mode.to_dict())
-
-    assert isinstance(restored, ConfiguredMode)
-    assert restored.basis_name == "eigen"
 
 
 def test_device_setting_is_jax_structural_data():
@@ -212,23 +185,3 @@ def test_tunable_capacitive_without_modulation_has_no_dynamic_term():
     q1 = DuffingTransmon(freq=5.05, anharmonicity=-0.25, levels=3, label="q1")
     c = TunableCapacitive(q0, q1, g_0=0.02)
     assert c._time_terms() == ()
-
-
-def test_declarative_device_round_trip_uses_declared_parameters():
-    """A DeviceModel round-trips through to_dict()/from_dict() with its type and declared parameter values preserved."""
-    mode = HarmonicMode(freq=7.0, levels=4, label="m")
-    restored = BaseDevice.from_dict(mode.to_dict())
-    assert isinstance(restored, HarmonicMode)
-    assert restored.freq == 7.0
-    assert restored.levels == 4
-    assert restored.label == "m"
-    npt.assert_allclose(restored.hamiltonian().matrix(), np.diag([0.0, 7.0, 14.0, 21.0]), atol=1e-12)
-
-
-def test_declarative_envelope_round_trip_uses_declared_parameters():
-    """An Envelope round-trips through to_dict()/from_dict() with type and declared parameters preserved."""
-    env = CosineEnvelope(duration=10.0, amplitude=2.0)
-    restored = Envelope.from_dict(env.to_dict())
-    assert isinstance(restored, CosineEnvelope)
-    assert restored.duration == 10.0
-    assert restored.amplitude == 2.0

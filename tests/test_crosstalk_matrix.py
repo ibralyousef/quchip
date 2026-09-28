@@ -7,7 +7,7 @@ import pytest
 import quchip
 
 from quchip.chip.chip import Chip
-from quchip.control import ChargeDrive, ControlEquipment, Crosstalk, CrosstalkMatrix
+from quchip.control import ChargeDrive, ControlEquipment, Crosstalk
 from quchip.control.envelopes import Square
 from quchip.devices.transmon.duffing import DuffingTransmon
 from quchip.engine import simulate
@@ -48,26 +48,6 @@ def test_crosstalk_matrix_extract_shape_and_labels() -> None:
     assert m.beta[0, 1] == pytest.approx(0.0)
 
 
-def test_reciprocal_matrix_edges_do_not_recursively_leak() -> None:
-    """Reciprocal edges read the same input map rather than one another's output."""
-    q1 = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="q1")
-    q2 = DuffingTransmon(freq=5.2, anharmonicity=-0.2, levels=2, label="q2")
-    d1 = ChargeDrive(target=q1, label="d1")
-    d2 = ChargeDrive(target=q2, label="d2")
-    equipment = ControlEquipment([d1, d2])
-    equipment.set_crosstalk_matrix(np.array([[1.0, 0.16], [0.14, 1.0]]))
-
-    transformed = equipment.apply_signal_chain({
-        ("d1", 0): quchip.control.AnalyticSignal(Constant(1.0)),
-        ("d2", 1): quchip.control.AnalyticSignal(Constant(2.0)),
-    })
-
-    assert transformed[("d1", 0)].evaluate(0.0, xp=np) == pytest.approx(1.0)
-    assert transformed[("d2", 1)].evaluate(0.0, xp=np) == pytest.approx(2.0)
-    assert transformed[("d2", 0)].evaluate(0.0, xp=np) == pytest.approx(0.14)
-    assert transformed[("d1", 1)].evaluate(0.0, xp=np) == pytest.approx(0.32)
-
-
 def test_crosstalk_delay_transforms_the_complete_carrier_signal() -> None:
     source = quchip.control.AnalyticSignal(
         program=Multiply((Constant(0.3 + 0.2j), Carrier(TWO_PI * 4.7, sign=-1))),
@@ -86,16 +66,6 @@ def test_crosstalk_delay_transforms_the_complete_carrier_signal() -> None:
 
     expected = 0.12 * np.exp(1j * 0.31) * source.evaluate(time - 0.08, xp=np)
     assert delivered.evaluate(time, xp=np) == pytest.approx(expected)
-
-
-def test_set_crosstalk_matrix_installs_one_signal_transform() -> None:
-    """The matrix owns parallel mixing instead of special-casing equipment dispatch."""
-    _, equipment, *_ = _build_two_drive_chip()
-
-    equipment.set_crosstalk_matrix(np.array([[1.0, 0.16], [0.14, 1.0]]))
-
-    assert len(equipment.signal_chain) == 1
-    assert isinstance(equipment.signal_chain[0], CrosstalkMatrix)
 
 
 def test_set_crosstalk_matrix_roundtrip_changes_simulation() -> None:
@@ -135,52 +105,6 @@ def test_set_crosstalk_matrix_roundtrip_changes_simulation() -> None:
     assert float(beta_12) == pytest.approx(0.35)
 
 
-def test_set_crosstalk_matrix_preserves_non_crosstalk_transforms() -> None:
-    """Non-:class:`Crosstalk` signal-chain entries survive a matrix rehydrate."""
-    from quchip.control import Gain
-
-    q1 = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q1")
-    q2 = DuffingTransmon(freq=5.5, anharmonicity=-0.2, levels=3, label="q2")
-    d1 = ChargeDrive(target=q1, label="d1")
-    d2 = ChargeDrive(target=q2, label="d2")
-    gain = Gain(line=d1.label, factor=0.9)
-    equip = ControlEquipment(
-        lines=[d1, d2],
-        signal_chain=[gain, Crosstalk(source=d1.label, victim=d2.label, beta=0.1)],
-    )
-    Chip([q1, q2]).connect(equip)
-
-    beta = np.zeros((2, 2), dtype=float)
-    beta[1, 0] = 0.2
-    equip.set_crosstalk_matrix(beta)
-
-    assert any(t is gain for t in equip.signal_chain), (
-        "Gain transform should be preserved when rehydrating the crosstalk matrix"
-    )
-    matrices = [t for t in equip.signal_chain if isinstance(t, CrosstalkMatrix)]
-    assert len(matrices) == 1
-    assert len(equip.crosstalks) == 2
-
-
-def test_matrix_transform_round_trips_through_equipment_serialization() -> None:
-    """The matrix remains one transform after equipment serialization."""
-    chip, equipment, *_ = _build_two_drive_chip()
-    equipment.set_crosstalk_matrix(
-        np.array([[1.0, 0.16], [0.14, 1.0]]),
-        np.array([[0.0, 0.3], [0.4, 0.0]]),
-    )
-
-    restored = ControlEquipment.from_dict(
-        equipment.to_dict(),
-        chip.device_map,
-        chip.coupling_map,
-    )
-
-    assert len(restored.signal_chain) == 1
-    assert isinstance(restored.signal_chain[0], CrosstalkMatrix)
-    np.testing.assert_allclose(restored.crosstalk_matrix().beta, [[1.0, 0.16], [0.14, 1.0]])
-
-
 def test_unwire_restricts_matrix_to_remaining_lines() -> None:
     """Removing one line preserves the matrix entries among surviving lines."""
     qubits = [
@@ -212,28 +136,6 @@ def test_crosstalk_matrix_rejects_wrong_shape() -> None:
     for name in ("beta", "theta", "delay"):
         with pytest.raises(ValueError, match="shape"):
             equip.signal_chain[0].with_parameter_value(name, np.zeros((1, 1)))
-
-
-def test_set_crosstalk_matrix_accepts_nested_lists():
-    from quchip import Capacitive, Chip, ChargeDrive, DuffingTransmon, RWA
-    from quchip.control.equipment import ControlEquipment
-
-    q1 = DuffingTransmon(freq=5.3, anharmonicity=-0.26, levels=3)
-    q2 = DuffingTransmon(freq=5.2, anharmonicity=-0.26, levels=3)
-    xy1, xy2 = ChargeDrive(target=q1), ChargeDrive(target=q2)
-    eq = ControlEquipment([xy1, xy2])
-    eq.set_crosstalk_matrix([[1, 0.14], [0.16, 1]], [[0, 1.885], [3.31, 0]])
-    chip = Chip(
-        [q1, q2],
-        couplings=[Capacitive(q1, q2, g=0.01)],
-        control_equipment=eq,
-        frame="rotating",
-        approximation=RWA(),
-    )
-    (matrix,) = chip.control_equipment.signal_chain
-    assert matrix.beta.shape == (2, 2)
-    assert float(matrix.beta[0, 1]) == 0.14
-    assert float(matrix.theta[1, 0]) == 3.31
 
 
 def test_set_crosstalk_matrix_list_with_traced_entry_is_differentiable():

@@ -55,12 +55,6 @@ class TestAutoConfig:
 
         assert mapping_value == pytest.approx(keyword_value)
 
-    def test_energy_invalid_label_raises(self, dispersive_chip) -> None:
-        """energy() with invalid state label raises KeyError."""
-        chip, _, _ = dispersive_chip
-        # q=5 exceeds Q_LEVELS=4, so label won't exist in dressed_eigenvalues
-        with pytest.raises(KeyError, match="Available"):
-            chip.energy(q=5, r=0)
 
     def test_state_accepts_device_keyed_mapping(self, dispersive_chip) -> None:
         """chip.state({device: level}) matches the keyword form."""

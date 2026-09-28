@@ -122,6 +122,7 @@ def test_qutip_and_dynamiqs_stationary_output_analysis_agree() -> None:
         np.testing.assert_allclose(np.asarray(dynamiqs_value), qutip_value, atol=2e-7)
 
 
+@pytest.mark.validation
 def test_qutip_output_analysis_is_not_capped_by_engine_dense_dimension() -> None:
     """QuTiP output analysis uses its native stationary lowering beyond the old dense cap."""
     resonator = Resonator(freq=6.0, levels=17, label="r", T1=20.0)

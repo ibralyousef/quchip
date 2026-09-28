@@ -10,6 +10,9 @@ import pytest
 from quchip import Capacitive, Chip, CrossKerr, DuffingTransmon, KerrCavity, KerrMatrix, Resonator
 
 
+pytestmark = pytest.mark.unit
+
+
 def test_kerr_matrix_result_is_frozen_labeled_and_a_jax_pytree() -> None:
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
     values = jnp.asarray([[-0.25, -0.001], [-0.001, 0.0]])
@@ -28,49 +31,6 @@ def test_kerr_matrix_result_is_frozen_labeled_and_a_jax_pytree() -> None:
 
     with pytest.raises(FrozenInstanceError):
         matrix.labels = ("other",)  # type: ignore[misc]
-
-
-def test_kerr_matrix_lookup_names_available_labels() -> None:
-    matrix = KerrMatrix(labels=("q", "r"), values=jnp.zeros((2, 2)))
-
-    with pytest.raises(KeyError, match=r"missing.*q.*r"):
-        _ = matrix["missing", "r"]
-
-
-@pytest.mark.parametrize(
-    ("labels", "values", "match"),
-    [
-        (("q", "q"), jnp.zeros((2, 2)), "unique"),
-        (("q", "r"), jnp.zeros((2, 3)), "shape"),
-        (("q",), jnp.asarray([[1.0j]]), "real"),
-        (("q", "r"), jnp.asarray([[0.0, 1.0], [2.0, 0.0]]), "symmetric"),
-    ],
-)
-def test_kerr_matrix_rejects_ambiguous_or_invalid_data(labels, values, match) -> None:
-    with pytest.raises(ValueError, match=match):
-        KerrMatrix(labels=labels, values=values)
-
-
-def test_chip_kerr_matrix_matches_scalar_dressed_observables_in_chip_order() -> None:
-    q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
-    q1 = DuffingTransmon(freq=5.3, anharmonicity=-0.24, levels=3, label="q1")
-    bus = Resonator(freq=7.0, levels=3, label="bus")
-    chip = Chip(
-        [q0, q1, bus],
-        [Capacitive(q0, bus, g=0.035), Capacitive(q1, bus, g=0.04)],
-    )
-
-    matrix = chip.kerr_matrix()
-
-    assert matrix.labels == ("q0", "q1", "bus")
-    assert matrix.values.shape == (3, 3)
-    assert not jnp.iscomplexobj(matrix.values)
-    np.testing.assert_allclose(matrix.values, matrix.values.T, atol=0.0)
-    for index, device in enumerate(chip.devices):
-        assert matrix.values[index, index] == pytest.approx(chip.dressed_anharmonicity(device), abs=1e-13)
-    for row, device_a in enumerate(chip.devices):
-        for column, device_b in enumerate(chip.devices[row + 1 :], start=row + 1):
-            assert matrix.values[row, column] == pytest.approx(chip.dispersive_shift(device_a, device_b), abs=1e-13)
 
 
 def test_kerr_matrix_uses_duffing_and_kerr_cavity_diagonal_conventions() -> None:

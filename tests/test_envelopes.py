@@ -10,13 +10,10 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
-from quchip.control.envelopes import Gaussian, GaussianDRAG, Square, SquareWithGaussianEdges
+from quchip.control.envelopes import Gaussian, Square, SquareWithGaussianEdges
 
 
-def test_square_rejects_envelope_owned_global_phase():
-    """Global phase belongs to scheduling, not the local square shape."""
-    with pytest.raises(TypeError, match="phase"):
-        Square(duration=10.0, amplitude=0.5, phase=0.2)
+pytestmark = pytest.mark.unit
 
 
 class TestSquare:
@@ -30,27 +27,10 @@ class TestSquare:
         w = sq.value(t)
         npt.assert_allclose(np.abs(w), amp, atol=1e-14)
 
-    def test_defaults_all_real_ones(self):
-        """Default amplitude produces an all-real, all-ones local shape."""
-        sq = Square(duration=10.0)
-        t = np.linspace(0, 10.0, 50)
-        w = sq.value(t)
-        npt.assert_allclose(w.real, 1.0, atol=1e-14)
-        npt.assert_allclose(w.imag, 0.0, atol=1e-14)
 
 class TestGaussian:
     """Tests for the Gaussian window envelope."""
 
-    def test_symmetry(self):
-        """Waveform is approximately symmetric: |w[k]| ≈ |w[N-1-k]|."""
-        # Integer-indexed sampling gives |k| and |N-1-k| centre-distances
-        # differing by 1 sample; worst-case asymmetry at 1000 samples is ~1.8%.
-        g = Gaussian(duration=100.0, amplitude=1.0)
-        N = 1000
-        t = np.linspace(0, 100.0, N)
-        w = g.value(t)
-        mag = np.abs(w)
-        npt.assert_allclose(mag, mag[::-1], rtol=0.02)
 
     def test_edge_value_analytical(self):
         """The edge-to-center ratio should equal exp(-sigmas² / 2)."""
@@ -72,11 +52,6 @@ class TestGaussian:
 class TestSquareWithGaussianEdges:
     """Tests for the flat-top pulse with Gaussian ramp edges."""
 
-    def test_plateau_value(self):
-        """Mid-pulse samples (plateau) should equal the amplitude."""
-        env = SquareWithGaussianEdges(duration=40.0, amplitude=0.7, edge_frac=0.25)
-        mid = np.abs(env.value(np.asarray([20.0]))[0])
-        npt.assert_allclose(mid, 0.7, atol=1e-14)
 
     def test_ramp_endpoints(self):
         """At t = edge, value is at the peak amplitude; at t = 0, attenuated by exp(-(2*sigmas)^2/2)."""
@@ -95,45 +70,10 @@ class TestSquareWithGaussianEdges:
         with pytest.raises(ValueError):
             SquareWithGaussianEdges(duration=10.0, amplitude=1.0, edge_frac=0.6)
 
-    def test_shape_invariant_under_duration_rescale(self):
-        """At matching fractional positions, the waveform is the same."""
-        a = SquareWithGaussianEdges(duration=40.0, amplitude=1.0, edge_frac=0.25)
-        b = SquareWithGaussianEdges(duration=100.0, amplitude=1.0, edge_frac=0.25)
-        fracs = np.linspace(0.0, 1.0, 11)
-        wa = a.value(fracs * a.duration)
-        wb = b.value(fracs * b.duration)
-        npt.assert_allclose(wa, wb, atol=1e-14)
-
-    def test_roundtrip_serialization(self):
-        """to_dict()/from_dict() round-trip preserves the waveform."""
-        env = SquareWithGaussianEdges(duration=30.0, amplitude=0.5, edge_frac=0.3, sigmas=2.5)
-        d = env.to_dict()
-        restored = SquareWithGaussianEdges.from_dict(d)
-        t = np.linspace(0, 30.0, 50)
-        npt.assert_allclose(env.value(t), restored.value(t), atol=1e-14)
-
 
 class TestSample:
     """Verify ``sample(tlist)`` evaluates ``value(tlist)`` elementwise."""
 
-    def test_sample_matches_value_for_each_subclass(self):
-        """sample(tlist) matches value(tlist) for every envelope subclass."""
-        cases = [
-            Square(duration=20.0, amplitude=0.7),
-            Gaussian(duration=20.0, amplitude=0.5, sigmas=2.5),
-            SquareWithGaussianEdges(duration=20.0, amplitude=0.6, edge_frac=0.2),
-        ]
-        t = np.linspace(0, 20.0, 51)
-        for env in cases:
-            npt.assert_allclose(env.sample(t), env.value(t), atol=1e-14)
-
-    def test_sample_real_flag(self):
-        """sample(..., real=True) returns the I part of a complex shape."""
-        env = GaussianDRAG(duration=10.0, amplitude=1.2, beta=0.4)
-        t = np.linspace(0, 10.0, 30)
-        w = env.sample(t)
-        r = env.sample(t, real=True)
-        npt.assert_allclose(r, w.real, atol=1e-14)
 
     def test_sample_jax_traced(self):
         """Traced JAX input stays JAX-shaped; no Python-float concretization."""

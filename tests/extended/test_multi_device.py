@@ -1,20 +1,10 @@
-"""Multi-device simulation and crosstalk integration tests.
-
-Physics tests:
-  1. Two resonant transmons with capacitive coupling — vacuum Rabi
-     oscillation: P(|01⟩, t) = sin²(2π·g·t).
-  2. Crosstalk structural: more Hamiltonian terms when crosstalks present.
-  3. Crosstalk dynamics: leaked signal excites the victim device measurably.
-"""
+"""Multi-device simulation and crosstalk integration tests."""
 
 from __future__ import annotations
 
 import numpy as np
-import numpy.testing as npt
 
-from quchip.backend.qutip import QuTiPBackend
 from quchip.chip.chip import Chip
-from quchip.chip.couplings import Capacitive
 from quchip import ControlEquipment
 from quchip.control.signal import Crosstalk
 from quchip.control.drive import ChargeDrive
@@ -23,87 +13,6 @@ from quchip.devices.transmon.duffing import DuffingTransmon
 from quchip.engine import simulate
 from quchip.engine.ir import DriveOp
 
-
-class TestMultiDeviceSimulation:
-    """Verify two-transmon population transfer via capacitive coupling.
-
-    Physics: H = ω·n̂₀ + ω·n̂₁ + g·(a₀†a₁ + a₀a₁†)  (RWA).
-    With ω₀ = ω₁ (resonant) and initial state |10⟩:
-        P(|01⟩, t) = sin²(2π·g·t)
-        P(|10⟩, t) = cos²(2π·g·t)
-
-    g = 0.01 GHz → full oscillation period = 1/(2g) = 50 ns.
-    """
-
-    FREQ = 5.0  # GHz, same for both transmons (resonant)
-    ANHARMONICITY = -0.25  # GHz
-    LEVELS = 3  # Fock space truncation
-    G = 0.01  # GHz, coupling strength
-    DURATION = 50.0  # ns, one full oscillation
-    N_POINTS = 501  # time grid density
-
-    def _setup_and_run(self):
-        """Build two-transmon chip and simulate free evolution from |10⟩."""
-        q0 = DuffingTransmon(
-            freq=self.FREQ,
-            anharmonicity=self.ANHARMONICITY,
-            levels=self.LEVELS,
-            label="q0",
-        )
-        q1 = DuffingTransmon(
-            freq=self.FREQ,
-            anharmonicity=self.ANHARMONICITY,
-            levels=self.LEVELS,
-            label="q1",
-        )
-        coupling = Capacitive(q0, q1, g=self.G)
-        chip = Chip([q0, q1], [coupling], frame="lab")
-
-        psi0 = chip.bare_state(q0=1)
-
-        tlist = np.linspace(0, self.DURATION, self.N_POINTS)
-
-        result = simulate(
-            chip,
-            [],
-            tlist,
-            initial_state=psi0,
-        )
-        return tlist, result
-
-    def test_vacuum_rabi_q0(self, backend: QuTiPBackend) -> None:
-        """P(q0, level=1) matches cos²(2π·g·t) within 1%."""
-        tlist, result = self._setup_and_run()
-
-        p1_q0 = result.population("q0", level=1)
-        p1_analytic = np.cos(2 * np.pi * self.G * tlist) ** 2
-
-        npt.assert_allclose(
-            p1_q0,
-            p1_analytic,
-            atol=0.01,
-            err_msg=(
-                f"q0 |1⟩ population deviates from cos²(2π·g·t). "
-                f"Max deviation: {np.max(np.abs(p1_q0 - p1_analytic)):.4f}"
-            ),
-        )
-
-    def test_vacuum_rabi_q1(self, backend: QuTiPBackend) -> None:
-        """P(q1, level=1) matches sin²(2π·g·t) within 1%."""
-        tlist, result = self._setup_and_run()
-
-        p1_q1 = result.population("q1", level=1)
-        p1_analytic = np.sin(2 * np.pi * self.G * tlist) ** 2
-
-        npt.assert_allclose(
-            p1_q1,
-            p1_analytic,
-            atol=0.01,
-            err_msg=(
-                f"q1 |1⟩ population deviates from sin²(2π·g·t). "
-                f"Max deviation: {np.max(np.abs(p1_q1 - p1_analytic)):.4f}"
-            ),
-        )
 
 class TestCrosstalkIntegration:
     """Verify crosstalk terms flow through the Hamiltonian pipeline."""

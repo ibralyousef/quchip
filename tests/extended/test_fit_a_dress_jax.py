@@ -15,6 +15,7 @@ from quchip.backend.dynamiqs import DynamiqsBackend  # noqa: E402
 from quchip.inverse_design import fit as fit_module  # noqa: E402
 
 
+@pytest.mark.validation
 def test_fit_a_dress_passes_an_exact_jax_jacobian_to_scipy(monkeypatch: pytest.MonkeyPatch) -> None:
     """SciPy receives a JAX Jacobian matching finite differences of the residual."""
     checked = False

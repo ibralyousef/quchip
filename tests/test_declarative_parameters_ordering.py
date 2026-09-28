@@ -8,6 +8,9 @@ from quchip.declarative import DeviceModel, Envelope, Scalar, TimeCoefficient, p
 from quchip.declarative.parameters import UNBOUND
 
 
+pytestmark = pytest.mark.unit
+
+
 def test_device_model_parameter_can_explicitly_remain_unbound_after_defaulted_field():
     """Declaration order does not prevent a later parameter from remaining symbolic."""
     class SymbolicDevice(DeviceModel):

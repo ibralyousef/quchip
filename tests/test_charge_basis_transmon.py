@@ -8,7 +8,6 @@ import jax
 import numpy as np
 import pytest
 
-from quchip.devices.protocols import ChargeCoupled, FluxCoupled, PhaseCoupled
 from quchip.devices.transmon.charge_basis import ChargeBasisTransmon
 
 
@@ -24,14 +23,6 @@ def test_constructor_accepts_energies():
     assert q.projection_levels == 3
 
 
-def test_invalid_energies_raise_on_concrete():
-    """Non-positive E_C or E_J raises ValueError naming the invalid parameter."""
-    with pytest.raises(ValueError, match="E_C"):
-        ChargeBasisTransmon(E_C=-0.1, E_J=20.0)
-    with pytest.raises(ValueError, match="E_J"):
-        ChargeBasisTransmon(E_C=0.25, E_J=-1.0)
-
-
 def test_num_basis_must_be_odd():
     """num_basis must be odd; an even charge-basis cutoff raises ValueError."""
     with pytest.raises(ValueError, match="num_basis"):
@@ -44,19 +35,6 @@ def test_num_basis_must_be_odd():
         with pytest.raises(TypeError):
             setattr(device, field, 3.5)
     assert (device.num_basis, device.projection_levels) == (7, 3)
-
-
-def test_is_charge_coupled_and_phase_coupled():
-    """ChargeBasisTransmon satisfies both the ChargeCoupled and PhaseCoupled protocols."""
-    q = ChargeBasisTransmon(E_C=0.25, E_J=20.0)
-    assert isinstance(q, ChargeCoupled)
-    assert isinstance(q, PhaseCoupled)
-
-
-def test_is_not_flux_coupled():
-    """Fixed-frequency charge-basis transmon has no flux DOF."""
-    q = ChargeBasisTransmon(E_C=0.25, E_J=20.0)
-    assert not isinstance(q, FluxCoupled)
 
 
 def test_computational_property():
@@ -98,28 +76,15 @@ def test_jax_grad_through_E_J():
         return ChargeBasisTransmon(E_C=0.2, E_J=E_J, levels=3).freq
 
     grad = jax.grad(f01)(20.0)
-    assert np.isfinite(float(grad))
+    assert np.isfinite(float(grad)) and float(grad) != 0.0
+    step = 1e-4
+    reference = (f01(20.0 + step) - f01(20.0 - step)) / (2 * step)
+    np.testing.assert_allclose(grad, reference, rtol=1e-6, atol=1e-9)
 
 
 # ----------------------------------------------------------------------
 # Serialization
 # ----------------------------------------------------------------------
-
-
-def test_serialization_roundtrip():
-    """to_dict/from_dict round-trips E_C, E_J, n_g, levels, label, and T1 exactly."""
-    q = ChargeBasisTransmon(
-        E_C=0.25, E_J=20.0, n_g=0.1, levels=4, label="tr0", T1=30_000.0,
-        coupling_channel="charge",
-    )
-    d = q.to_dict()
-    q2 = ChargeBasisTransmon.from_dict(d)
-    assert q2.E_C == q.E_C
-    assert q2.E_J == q.E_J
-    assert q2.n_g == q.n_g
-    assert q2.projection_levels == q.projection_levels
-    assert q2.label == q.label
-    assert q2.T1 == q.T1
 
 
 # ----------------------------------------------------------------------

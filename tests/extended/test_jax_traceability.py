@@ -34,6 +34,7 @@ def test_shift_phase_differentiates_with_respect_to_delay() -> None:
     np.testing.assert_allclose(gradient, expected, rtol=1e-12, atol=1e-12)
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_gaussian_ramsey_delay_gradient_matches_finite_difference() -> None:
     """A swept Ramsey delay remains differentiable through pulse scheduling."""
@@ -205,6 +206,7 @@ def test_cr_susceptibility_supports_jax_grad() -> None:
     assert abs(float(derivative)) > 1e-8
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_reference_freq_supports_jax_grad() -> None:
     """A device's ``reference_freq`` (readout/frame LO) must be differentiable."""
@@ -233,6 +235,7 @@ def test_reference_freq_supports_jax_grad() -> None:
     assert abs(float(grad)) > 1e-3, "reference_freq detuning must move the state's transverse overlap"
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_chip_state_dressed_initial_state_traces_through_simulate() -> None:
     """``chip.state()`` (dressed) must work as an initial state under jit/grad."""
@@ -261,9 +264,10 @@ def test_chip_state_dressed_initial_state_traces_through_simulate() -> None:
         return result.population(q, level=1)
 
     def loss(freq):
-        return trace(freq)[-1]
+        populations = trace(freq)
+        return populations[-1], populations
 
-    value, grad = jax.jit(jax.value_and_grad(loss))(jnp.asarray(5.02))
+    (value, pops), grad = jax.jit(jax.value_and_grad(loss, has_aux=True))(jnp.asarray(5.02))
     assert jnp.isfinite(value) and jnp.isfinite(grad)
     assert float(value) > 0.9
 
@@ -271,10 +275,11 @@ def test_chip_state_dressed_initial_state_traces_through_simulate() -> None:
     # rotating frame under RWA, so a lab-dressed eigenstate is constant only
     # up to RWA corrections (~4e-5 here), while a bare |1,0> would beat with
     # amplitude 4g²/Δ² ≈ 3e-3. 5e-4 sits between the two scales.
-    pops = np.asarray(jax.jit(trace)(jnp.asarray(5.02)))
+    pops = np.asarray(pops)
     np.testing.assert_allclose(pops, float(pops[0]), atol=5e-4)
 
 
+@pytest.mark.validation
 @pytest.mark.optional_backend
 def test_default_initial_state_omitted_traces_through_simulate() -> None:
     """Omitting ``initial_state`` under jit uses the traced dressed ground state, never a cached tracer."""

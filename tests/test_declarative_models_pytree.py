@@ -4,6 +4,11 @@ import jax.tree_util as jtu
 
 from quchip.declarative import DeviceModel, Scalar, parameter
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 
 class _Oscillator(DeviceModel):
     freq: Scalar = parameter(positive=True, unit="GHz")

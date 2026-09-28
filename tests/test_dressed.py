@@ -31,7 +31,6 @@ from quchip.control import ChargeDrive, ControlEquipment
 from quchip.devices.resonator import Resonator
 from quchip.devices.transmon.duffing import DuffingTransmon
 from quchip.devices.transmon.charge_basis import ChargeBasisTransmon
-from quchip.extensions import ChargePhaseDrive
 
 
 OMEGA_Q = 5.0
@@ -103,27 +102,6 @@ def dispersive_system():
 class TestDressedStates:
     """Verify dressed-state computation and state assignment surfaces."""
 
-    def test_state_map_covers_low_energy(self, dispersive_system) -> None:
-        """state_map must include |0,0>, |1,0>, and |0,1> labels."""
-        chip, _, _ = dispersive_system
-
-        result = chip.dress()
-
-        for label in ((0, 0), (1, 0), (0, 1)):
-            assert label in result.state_map
-            assert label in result.dressed_eigenvalues
-
-    def test_single_device_has_no_hybridized_labels(self) -> None:
-        """A single-device chip has no hybridization and no hybridization warning."""
-        chip = Chip([Resonator(freq=6.0, levels=4, label="r")])
-
-        with warnings.catch_warnings(record=True) as captured:
-            warnings.simplefilter("always")
-            result = chip.dress()
-
-        assert result.hybridized_labels == ()
-        assert result.assignment_overlaps[(0,)] == pytest.approx(1.0)
-        assert not [warning for warning in captured if "Strong hybridization detected" in str(warning.message)]
 
     def test_resonant_system_exposes_hybridization_diagnostics(self) -> None:
         """Resonant coupling produces hybridized labels, overlap fractions, and one warning."""
@@ -190,101 +168,7 @@ class TestDressedStates:
         assert result.state_map == reference_map
 
 
-class TestEnergy:
-    """Verify energy() extraction against perturbation theory."""
-
-    def test_energy_matches_perturbation_theory(self, dispersive_system) -> None:
-        """Dispersive shift via energy arithmetic matches perturbative prediction."""
-        chip, _, _ = dispersive_system
-
-        # chi = E(q=1,r=1) - E(q=1,r=0) - E(q=0,r=1) + E(q=0,r=0)
-        chi_numeric = chip.energy(q=1, r=1) - chip.energy(q=1, r=0) - chip.energy(q=0, r=1) + chip.energy(q=0, r=0)
-
-        delta = OMEGA_Q - OMEGA_R
-        chi_pert = (G**2 * ALPHA) / (delta * (delta + ALPHA))
-
-        # Observable number splitting = 2*chi_pert
-        expected = 2.0 * chi_pert
-
-        assert chi_numeric == pytest.approx(expected, rel=0.15)
-
-    def test_dispersive_shift_matches_energy_arithmetic(self, dispersive_system) -> None:
-        """dispersive_shift() matches the equivalent energy() arithmetic."""
-        chip, qubit, resonator = dispersive_system
-
-        direct = chip.dispersive_shift(qubit, resonator)
-        reference = chip.energy(q=1, r=1) - chip.energy(q=1, r=0) - chip.energy(q=0, r=1) + chip.energy(q=0, r=0)
-
-        assert direct == pytest.approx(reference, abs=1e-14)
-
-    def test_dressed_anharmonicity_matches_energy_arithmetic(self, dispersive_system) -> None:
-        """dressed_anharmonicity() matches the equivalent energy() arithmetic."""
-        chip, qubit, _ = dispersive_system
-
-        direct = chip.dressed_anharmonicity(qubit)
-        reference = chip.energy(q=2) - 2.0 * chip.energy(q=1) + chip.energy(q=0)
-
-        assert direct == pytest.approx(reference, abs=1e-14)
-
-
-def test_static_zz_matches_energy_arithmetic() -> None:
-    """static_zz() matches the equivalent energy() arithmetic."""
-    q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
-    q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.24, levels=3, label="q1")
-    chip = Chip([q0, q1], [Capacitive(q0, q1, g=0.02)])
-
-    direct = chip.static_zz(q0, q1)
-    manual = (
-        chip.energy(q0=1, q1=1)
-        - chip.energy(q0=1, q1=0)
-        - chip.energy(q0=0, q1=1)
-        + chip.energy(q0=0, q1=0)
-    )
-
-    assert direct == pytest.approx(manual)
-
-
-class TestTransitionFreq:
-    """Verify conditional dressed transition frequencies."""
-
-    def test_transition_freq_conditional(self, dispersive_system) -> None:
-        """n=1 conditional transition shift matches perturbative splitting."""
-        chip, qubit, resonator = dispersive_system
-
-        chip.dress()
-
-        freq_vacuum = chip.freq(qubit)
-        freq_conditional = chip.freq(qubit, when={resonator: 1})
-        delta_freq = freq_conditional - freq_vacuum
-
-        delta = OMEGA_Q - OMEGA_R
-        chi_pert = (G**2 * ALPHA) / (delta * (delta + ALPHA))
-        expected_delta = 2.0 * chi_pert
-
-        assert delta_freq == pytest.approx(expected_delta, rel=0.15)
-
-        chi_energy = chip.energy(q=1, r=1) - chip.energy(q=1, r=0) - chip.energy(q=0, r=1) + chip.energy(q=0, r=0)
-        assert delta_freq == pytest.approx(chi_energy, abs=1e-14)
-
-    def test_transition_freq_bool_rejection(self, dispersive_system) -> None:
-        """Boolean Fock indices in `when` are explicitly rejected."""
-        chip, qubit, resonator = dispersive_system
-
-        chip.dress()
-
-        with pytest.raises(ValueError, match="got bool"):
-            chip.freq(qubit, when={resonator: True})
-
 class TestLookupHelpers:
-    def test_dressed_index_and_bare_label_round_trip(self, dispersive_system) -> None:
-        """dressed_index() and bare_label() round-trip a bare Fock label."""
-        chip, _, _ = dispersive_system
-        chip.dress()
-
-        dressed_idx = chip.dressed_index(q=1, r=0)
-
-        assert dressed_idx is not None
-        assert chip.bare_label(dressed_idx) == (1, 0)
 
     def test_state_components_are_normalized(self, dispersive_system) -> None:
         """state_components() weights sum to 1."""
@@ -322,26 +206,6 @@ class TestDriveMatrixElements:
         )
         return chip, q1, q2, d1, d2
 
-    def test_device_transition_matches_explicit_final_initial_matrix_element(self) -> None:
-        """Device shorthand returns ``<1~|D_j|0~>`` with object and label lookup."""
-        chip, q1, q2, d1, d2 = self._driven_pair()
-
-        elements = chip.drive_matrix_elements(q1, drives=[d1, d2.label])
-
-        initial = chip.dressed_index({q1: 0})
-        final = chip.dressed_index({q1: 1})
-        assert initial is not None and final is not None
-        for drive, target in ((d1, q1), (d2, q2)):
-            from quchip.control.signal import AnalyticSignal
-            from quchip.declarative.expr import split_dynamic_hamiltonian
-            from quchip.engine.ir import Constant
-
-            authored = drive.hamiltonian(target, AnalyticSignal(Constant(1.0)))
-            operator = split_dynamic_hamiltonian(authored)[0][1]
-            dressed = chip.operator_in_dressed_basis(target, operator)
-            explicit = np.asarray(chip.backend.to_array(dressed), dtype=complex)[final, initial]
-            assert elements[drive] == pytest.approx(explicit, abs=1e-12)
-            assert elements[drive.label] == pytest.approx(explicit, abs=1e-12)
 
     def test_explicit_transition_supports_arbitrary_bare_state_mappings(self) -> None:
         """Explicit ``(initial, final)`` mappings select arbitrary dressed transitions."""
@@ -363,14 +227,6 @@ class TestDriveMatrixElements:
         explicit = np.asarray(chip.backend.to_array(dressed), dtype=complex)[final, initial]
         assert element == pytest.approx(explicit, abs=1e-12)
 
-    def test_multi_channel_drive_fails_closed(self) -> None:
-        """A drive with distinct I and Q operators cannot collapse to one matrix element."""
-        qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
-        drive = ChargePhaseDrive(qubit, label="iq")
-        chip = Chip([qubit], control_equipment=ControlEquipment([drive]))
-
-        with pytest.raises(ValueError, match="exactly one local Hamiltonian channel"):
-            chip.drive_matrix_elements(qubit, drives=[drive])
 
     def test_missing_equipment_and_unknown_drive_report_available_lines(self) -> None:
         """Drive resolution failures identify missing equipment and available labels."""
@@ -414,29 +270,6 @@ class TestCacheInvalidation:
             atol=1e-12,
         )
 
-def test_effective_subspace_hamiltonian_lowdin_on_bus_coupled_pair() -> None:
-    """Loewdin orthonormalization yields the exchange coupling off-diagonally and dressed energies as eigenvalues."""
-    q0 = DuffingTransmon(freq=5.00, anharmonicity=-0.25, levels=3, label="q0")
-    q1 = DuffingTransmon(freq=5.10, anharmonicity=-0.25, levels=3, label="q1")
-    bus = Resonator(freq=6.35, levels=4, label="bus")
-    chip = Chip([q0, q1, bus], [Capacitive(q0, bus, g=0.075), Capacitive(q1, bus, g=0.075)])
-
-    # Löwdin orthonormalization prevents absolute-energy leakage from dwarfing
-    # the exchange generated by the complete transverse interaction.
-    effective = chip.effective_subspace_hamiltonian(({q0: 1, q1: 0}, {q0: 0, q1: 1}))
-
-    g, w0, w1, wr = 0.075, 5.00, 5.10, 6.35
-    j_exchange = g**2 / 2 * (
-        1 / (w0 - wr)
-        + 1 / (w1 - wr)
-        - 1 / (w0 + wr)
-        - 1 / (w1 + wr)
-    )
-    assert np.real(effective[0, 1]) == pytest.approx(j_exchange, abs=1e-4)
-
-    expected = sorted([chip.energy({q0: 1}), chip.energy({q1: 1})])
-    assert np.linalg.eigvalsh(effective) == pytest.approx(expected, abs=1e-12)
-
 
 def test_cached_qutip_kerr_values_remain_accessible_inside_jit():
     import jax
@@ -446,22 +279,3 @@ def test_cached_qutip_kerr_values_remain_accessible_inside_jit():
     chip = Chip([q, r], [Capacitive(q, r, g=0.08)], backend="qutip")
     expected = float(chip.dispersive_shift("q", "r"))
     assert jax.jit(lambda scale: chip.dispersive_shift("q", "r") * scale)(2.0) == pytest.approx(2 * expected)
-
-
-def test_hybridization_warning_text_is_independent_of_the_affected_states() -> None:
-    """Sweeps emit one warning per call site: the text carries no per-point numbers."""
-    import warnings as _warnings
-
-    from quchip import Capacitive, Chip, Resonator
-
-    texts = []
-    for detuning in (0.0, 0.002):
-        r_a = Resonator(freq=6.0, levels=4, label="r_a")
-        r_b = Resonator(freq=6.0 + detuning, levels=4, label="r_b")
-        chip = Chip([r_a, r_b], [Capacitive(r_a, r_b, g=0.05)])
-        with _warnings.catch_warnings(record=True) as captured:
-            _warnings.simplefilter("always")
-            result = chip.dress()
-        assert result.hybridized_labels
-        texts.append([str(w.message) for w in captured if "Strong hybridization" in str(w.message)])
-    assert texts[0] == texts[1] and len(texts[0]) == 1

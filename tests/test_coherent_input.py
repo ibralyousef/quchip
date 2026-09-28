@@ -324,6 +324,7 @@ def test_coherent_amplitude_is_jax_differentiable_through_assembly() -> None:
     assert float(gradient) > 0.0
 
 
+@pytest.mark.validation
 def test_qutip_and_dynamiqs_solve_the_same_coherent_input_problem() -> None:
     """QuTiP and Dynamiqs agree on the same coherent-input evolution."""
     pytest.importorskip("dynamiqs")
