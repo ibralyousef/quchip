@@ -16,7 +16,8 @@ scq = pytest.importorskip("scqubits")
 from quchip import from_scqubits, to_scqubits  # noqa: E402
 from quchip.backend import get_default_backend  # noqa: E402
 from quchip.declarative.expr import materialize_expr  # noqa: E402
-from quchip.devices import DuffingTransmon  # noqa: E402
+from quchip.devices import DuffingTransmon, Resonator  # noqa: E402
+from quchip.devices.fluxonium import Fluxonium  # noqa: E402
 from quchip.devices.transmon import ChargeBasisTransmon  # noqa: E402
 
 
@@ -208,6 +209,60 @@ def test_generic_qubit_import_matches_splitting():
 
 
 # ---------------------------------------------------------------------------
+# scqubits energy units
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("make_source", "count", "tolerance"),
+    [
+        (lambda: scq.Transmon(EJ=30e3, EC=200.0, ng=0.25, ncut=31, truncated_dim=5), 5, {"atol": 1e-9}),
+        (lambda: scq.TunableTransmon(EJmax=30e3, EC=200.0, d=0.1, flux=0.25, ng=0.0, ncut=31, truncated_dim=5),
+         5, {"atol": 1e-9}),
+        # Cross-discretization tolerance, as in test_fluxonium_import_matches_scqubits_spectrum.
+        (lambda: scq.Fluxonium(EJ=8.9e3, EC=2.5e3, EL=0.5e3, flux=0.5, cutoff=110, truncated_dim=5), 5,
+         {"rtol": 5e-4, "atol": 1e-6}),
+        (lambda: scq.Oscillator(E_osc=5e3, truncated_dim=6), 6, {"atol": 1e-9}),
+        (lambda: scq.KerrOscillator(E_osc=5e3, K=50.0, truncated_dim=6), 6, {"atol": 1e-9}),
+        (lambda: scq.GenericQubit(E=4.5e3), 2, {"atol": 1e-9}),
+        pytest.param(lambda: _small_zero_pi(units_per_ghz=1e3), 4, {"atol": 1e-8}, marks=pytest.mark.validation),
+    ],
+    ids=["transmon", "tunable_transmon", "fluxonium", "oscillator", "kerr_oscillator", "generic_qubit", "zero_pi"],
+)
+def test_import_converts_scqubits_units_to_ghz(scqubits_mhz, make_source, count, tolerance):
+    """A source built in MHz imports with its scqubits spectrum converted to GHz."""
+    source = make_source()
+    np.testing.assert_allclose(
+        _device_spectrum(from_scqubits(source), count), _oracle_spectrum(source, count) / 1e3, **tolerance
+    )
+
+
+@pytest.mark.parametrize(
+    ("device", "count", "tolerance"),
+    [
+        (ChargeBasisTransmon(E_C=0.2, E_J=30.0, n_g=0.25, num_basis=63, levels=5, basis="eigen"), 5,
+         {"atol": 1e-9}),
+        (Fluxonium(E_C=2.5, E_J=8.9, E_L=0.5, phi_ext=0.5, levels=5, basis="eigen"), 5,
+         {"rtol": 5e-4, "atol": 1e-6}),
+        (Resonator(freq=5.0, levels=6), 6, {"atol": 1e-9}),
+    ],
+    ids=["transmon", "fluxonium", "resonator"],
+)
+def test_export_writes_scqubits_units(scqubits_mhz, device, count, tolerance):
+    """An export under MHz reproduces the device spectrum in MHz."""
+    np.testing.assert_allclose(
+        _oracle_spectrum(to_scqubits(device), count) / 1e3, _device_spectrum(device, count), **tolerance
+    )
+
+
+def test_duffing_export_inverts_in_scqubits_units(scqubits_mhz):
+    """A Duffing export under MHz keeps its GHz frequency and anharmonicity."""
+    exported = to_scqubits(DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3))
+    levels = _oracle_spectrum(exported, 3) / 1e3
+    np.testing.assert_allclose([levels[1], levels[2] - 2 * levels[1]], [5.0, -0.25], atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # Dispatch and guards
 # ---------------------------------------------------------------------------
 
@@ -236,15 +291,15 @@ def test_export_of_traced_device_raises_value_error():
 # ---------------------------------------------------------------------------
 
 
-def _small_zero_pi():
-    """A deliberately small ZeroPi so the test stays a few seconds."""
+def _small_zero_pi(units_per_ghz: float = 1.0):
+    """A deliberately small ZeroPi so the test stays a few seconds, with energies in the given unit."""
     grid = scq.Grid1d(-19.0, 19.0, 200)
     return scq.ZeroPi(
         grid=grid,
-        EJ=10.0,
-        EL=0.04,
-        ECJ=20.0,
-        EC=0.04,
+        EJ=10.0 * units_per_ghz,
+        EL=0.04 * units_per_ghz,
+        ECJ=20.0 * units_per_ghz,
+        EC=0.04 * units_per_ghz,
         ng=0.1,
         flux=0.23,
         ncut=30,
