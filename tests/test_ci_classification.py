@@ -54,7 +54,7 @@ class ChangeClassificationTests(unittest.TestCase):
     def test_documentation_is_lightweight(self):
         """Documentation and release metadata require no physics test environment."""
         self.write("docs/guide.md", "Guide\n")
-        self.write("RELEASE_NOTES_1.0.md", "Notes\n")
+        self.write("CHANGELOG.md", "Notes\n")
         result = self.classify(self.commit())
         self.assertEqual((result.returncode, result.stdout), (0, "full_ci=false\n"))
 
