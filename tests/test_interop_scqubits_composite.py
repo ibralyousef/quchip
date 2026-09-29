@@ -45,12 +45,13 @@ def _solver_spectrum(chip: Chip, count: int) -> np.ndarray:
     return _ground_shifted(np.linalg.eigvalsh(matrix)[:count])
 
 
-def _transmon_oscillator_hilbertspace() -> Any:  # type: ignore[valid-type]
-    """Build the reference transmon <-> oscillator ``HilbertSpace``."""
-    tmon = scq.Transmon(EJ=30.0, EC=0.2, ng=0.25, ncut=31, truncated_dim=4, id_str="tmon")
-    osc = scq.Oscillator(E_osc=6.0, truncated_dim=3, id_str="osc")
+def _transmon_oscillator_hilbertspace(units_per_ghz: float = 1.0) -> Any:  # type: ignore[valid-type]
+    """Build the reference transmon <-> oscillator ``HilbertSpace`` with energies in the given unit."""
+    tmon = scq.Transmon(EJ=30.0 * units_per_ghz, EC=0.2 * units_per_ghz, ng=0.25, ncut=31, truncated_dim=4,
+                        id_str="tmon")
+    osc = scq.Oscillator(E_osc=6.0 * units_per_ghz, truncated_dim=3, id_str="osc")
     hs = scq.HilbertSpace([tmon, osc])
-    hs.add_interaction(g=0.035, op1=tmon.n_operator, op2=osc.creation_operator, add_hc=True)
+    hs.add_interaction(g=0.035 * units_per_ghz, op1=tmon.n_operator, op2=osc.creation_operator, add_hc=True)
     return hs
 
 
@@ -67,6 +68,17 @@ def test_hilbertspace_dressed_spectrum_matches_oracle():
     got = _ground_shifted(np.asarray(chip.dress().eigenvalues)[:6])
     want = _ground_shifted(hs.eigenvals(evals_count=6))
     np.testing.assert_allclose(got, want, atol=1e-6)
+
+
+def test_hilbertspace_import_and_export_convert_scqubits_units(scqubits_mhz):
+    """Composites import from MHz to GHz and export from GHz to MHz."""
+    hs = _transmon_oscillator_hilbertspace(units_per_ghz=1e3)
+    imported = _ground_shifted(np.asarray(from_scqubits(hs).dress().eigenvalues)[:6])
+    np.testing.assert_allclose(imported, _ground_shifted(hs.eigenvals(evals_count=6)) / 1e3, atol=1e-6)
+
+    chip = _transmon_oscillator_chip()
+    exported = _ground_shifted(to_scqubits(chip).eigenvals(evals_count=6)) / 1e3
+    np.testing.assert_allclose(exported, _solver_spectrum(chip, 6), atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
