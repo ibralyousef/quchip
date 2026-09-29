@@ -32,7 +32,6 @@ import jax.numpy as jnp
 import numpy as np
 
 from quchip.utils.values import DeferredValue
-from quchip.approximations import Exact
 from quchip.chip.couplings import Capacitive, TunableCapacitive
 from quchip.chip.effective import EffectiveTerms, OperatorProjection
 from quchip.declarative.dissipation import CollapseChannel
@@ -245,11 +244,6 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
     scanned = {lbl for lbl, _ in survivors}
     touching_labels = [lbl for lbl in labels if lbl in scanned]
 
-    # Capture the full lab-frame matrix now; diagonalize only if chi is read.
-    report_h = None
-    if not is_multi and survivors:
-        report_h = h if not approximation.filters_terms else bare_hamiltonian(chip, approximation=Exact())[0]
-
     p_mask, _ = mode_blocks(dims, labels, mode_label)
     min_gap = cross_block_gap(h, p_mask)
 
@@ -300,7 +294,7 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
             def _chi() -> Any:
                 from quchip.chip.analysis import kerr_entry
 
-                values, _, labeling = _exact_eigensystem(report_h, dims)
+                values, _, labeling = _exact_eigensystem(h, dims)
                 return kerr_entry(
                     mode_index, survivor_index, dims=dims, eigenvalues=values, labeling=labeling,
                 )

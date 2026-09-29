@@ -193,11 +193,6 @@ class ExactReduction(ReductionMethod):
 
     name: ClassVar[str] = "exact"
 
-    def source_approximation(self, chip: Any) -> Any:
-        from quchip.approximations import Exact
-
-        return Exact()
-
     def retained_hamiltonian(self, ctx: DeviceReductionContext) -> Any:
         return ctx.exact.hamiltonian
 

@@ -895,14 +895,14 @@ and are rejected by the unfiltered correlation API.
 
 Sources: [`quchip/chip/chip.py`](quchip/chip/chip.py), [`quchip/chip/analysis.py`](quchip/chip/analysis.py)
 
-`Chip.dress()` diagonalizes the full static lab-frame Hamiltonian, assigns bare product states to dressed eigenstates by overlap, and stores a `DressedResult` containing:
+`Chip.dress()` diagonalizes the static lab-frame Hamiltonian retained by `chip.approximation`, assigns bare product states to dressed eigenstates by overlap, and stores a `DressedResult` containing:
 
 - eigenvalues and lazily materialized eigenstates
 - bare-to-dressed state assignments and the assigned eigenvalue for each bare label
 - assignment overlaps and labels below the requested overlap threshold
 - the dressed eigenvector matrix used by dressed-basis analysis
 
-`Chip.freq()` evaluates dressed `0 -> 1` frequencies through the traceable array-labeling cache; those frequencies are not stored in `DressedResult`.
+`Chip.freq()` evaluates dressed `0 -> 1` frequencies through the traceable array-labeling cache; those frequencies are not stored in `DressedResult`. Frequencies, states, Kerr shifts and drive matrix elements all use the chip's approximation. `RWA(keep_bands=...)` also applies to this analysis. Choose `Exact()` to include counter-rotating bands and their Bloch–Siegert shifts.
 
 `Chip.dress()` is always intrinsic static lab-frame analysis. It is not part
 of the runtime frame transform. A resolved `EngineResult` also provides
@@ -915,8 +915,9 @@ When `initial_state=None`, a solve uses the eigenstate of the undriven static
 lab-frame Hamiltonian retained by its approximation that is assigned to the
 all-ground label. The state is phase-fixed to have real, nonnegative overlap on
 the bare product before the runtime frame transform (§4.2). With ordinary
-couplings, the default RWA leaves the bare product unchanged, while `Exact()`
-selects the same physical state as `chip.state()` for the all-ground label.
+couplings, the default RWA leaves the bare product unchanged. When the solve
+uses the chip's approximation, its start is the same physical state as
+`chip.state()` for the all-ground label before the frame transform.
 Retained bands, effective terms, or network Hamiltonian terms that couple the
 vacuum can dress an RWA default.
 
@@ -1061,7 +1062,7 @@ dJ/domega_c = (g_a*g_b/2)(1/Delta_a^2 + 1/Delta_b^2)
 
 ### 10.4 The exact route (`method="exact"`)
 
-One full diagonalization; parameters are read off the *labeled* dressed spectrum (`label_eigensystem`, §9), so kept-block energies are exact to all orders, as required for residual ZZ:
+One full diagonalization of the Hamiltonian retained by `chip.approximation`; `method="exact"` selects the reduction algorithm and does not restore discarded bands. Parameters are read off the *labeled* dressed spectrum (`label_eigensystem`, §9), so kept-block energies are exact to all orders within that Hamiltonian, as required for residual ZZ:
 
 ```text
 zz(a, b) = E(1,1) − E(1,0) − E(0,1) + E(0,0)        (≡ Chip.dispersive_shift)
@@ -1110,7 +1111,7 @@ expansion's failure mode even when every `g/Delta` is small.
 
 Device elimination leaves surviving devices' authored frequencies and local bases unchanged. The retained Hamiltonian correction owns their shifts; `effective_params` reports the reduction's transition diagnostics. Use `chip.freq(...)` for a reduced chip's coupled transitions. To reduce another operating point, rebind the source model and eliminate again.
 
-The retained correction is the route's retained Hamiltonian minus the reduced chip's own assembled matrix at the approximation that produced it: all bands for `method="exact"`, the chip's approximation for `method="sw"`. Dressed queries always read the all-band static model, so under `method="exact"` a reduced chip reproduces the source's labeled energies exactly and `reduced.static_zz(a, b)` equals `effective_params["exchange"]["zz"]`. Under `method="sw"` the reduced dressed spectrum is the second-order one; compare its diagnostics through `effective_params`. Retained effective terms are part of the dressed-analysis cache key, so attaching them to a chip that was already resolved invalidates its cached dressing.
+The retained correction is the route's retained Hamiltonian minus the reduced chip's own assembled matrix, both using the chip's approximation. Dressed queries use that same approximation, so under `method="exact"` a reduced chip reproduces the source's labeled energies and `reduced.static_zz(a, b)` equals `effective_params["exchange"]["zz"]`. Under `method="sw"` the reduced dressed spectrum is the second-order one; compare its diagnostics through `effective_params`. Retained effective terms are part of the dressed-analysis cache key, so attaching them to a chip that was already resolved invalidates its cached dressing.
 
 `result.mapping` captures source and target labels, dimensions, backend and lab-frame solver coordinates. Its `embedding` maps retained coordinates into the source space. `project_operator(operator)` returns `B† O B`; `project_state(state)` returns `B† psi` or `B† rho B`; `lift_state(state)` performs the reverse embedding. These methods accept full numerical matrices and backend-native objects and return native objects on the captured backend. Projection preserves the lost norm or trace, so discarded population remains visible. No state is silently renormalized. Rotating-frame trajectory states must be expressed in lab coordinates before using this map.
 

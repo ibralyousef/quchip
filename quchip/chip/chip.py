@@ -166,8 +166,8 @@ class Chip:
         - scalar-like — one shared reference frequency for all devices.
         - ``dict`` — per-device references keyed by label or device.
     approximation : Approximation
-        Engine strategy applied after the complete authored Hamiltonian is
-        assembled. Defaults to :class:`~quchip.approximations.RWA`.
+        Strategy for dressed analysis and solver assembly. Defaults to
+        :class:`~quchip.approximations.RWA`; use ``Exact()`` to retain every band.
     basis : {"native", "eigen"}
         Chip-wide local solver-basis policy. ``"native"`` preserves each
         device's authored coordinate basis; ``"eigen"`` transforms into its
@@ -748,7 +748,7 @@ class Chip:
 
     @property
     def approximation(self) -> Approximation:
-        """Default engine approximation strategy."""
+        """Approximation for dressed analysis and default solver assembly."""
         return self._approximation
 
     @property

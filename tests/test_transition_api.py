@@ -65,22 +65,14 @@ def dressed_chip():
     return chip, qubit, resonator
 
 
-def test_dressed_transition_is_independent_of_solve_approximation() -> None:
-    def build(approximation):
-        first = Resonator(freq=5.0, levels=3, label="first")
-        second = Resonator(freq=7.0, levels=3, label="second")
-        return Chip(
-            [first, second],
-            [Capacitive(first, second, g=0.2)],
-            approximation=approximation,
-        ), first
-
-    exact_chip, exact_target = build(Exact())
-    rwa_chip, rwa_target = build(RWA())
-
-    assert rwa_chip.transition_frequency(rwa_target, 0, 1) == pytest.approx(
-        exact_chip.transition_frequency(exact_target, 0, 1)
-    )
+@pytest.mark.parametrize("approximation", [RWA(), Exact()])
+def test_dressed_transition_follows_chip_approximation(approximation) -> None:
+    """A dressed transition uses the same retained Hamiltonian as a lab-frame solve."""
+    first = Resonator(freq=5.0, levels=3, label="first")
+    second = Resonator(freq=7.0, levels=3, label="second")
+    chip = Chip([first, second], [Capacitive(first, second, g=0.2)], approximation=approximation)
+    energies = chip.resolve(frame="lab").dress().dressed_eigenvalues
+    assert chip.transition_frequency(first, 0, 1) == pytest.approx(energies[(1, 0)] - energies[(0, 0)], abs=1e-12)
 
 
 def test_dressed_transition_rejects_target_in_condition(dressed_chip) -> None:
