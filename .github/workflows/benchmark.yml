@@ -61,10 +61,12 @@ jobs:
       - name: Record environment
         run: |
           mkdir -p benchmark-output
-          uv run --no-sync python --version > benchmark-output/environment.txt
-          uv pip freeze >> benchmark-output/environment.txt
-          uname -a >> benchmark-output/environment.txt
-          lscpu >> benchmark-output/environment.txt
+          {
+            uv run --no-sync python --version
+            uv pip freeze
+            uname -a
+            lscpu
+          } > benchmark-output/environment.txt
 
       - name: Run benchmark
         id: benchmark
