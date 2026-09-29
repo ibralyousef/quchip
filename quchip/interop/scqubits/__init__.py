@@ -33,7 +33,9 @@ def from_scqubits(obj: Any, **opts: Any) -> Any:
     ----------
     obj : scqubits object
         A supported circuit, oscillator, or ``HilbertSpace``. Device mappings
-        are listed in :mod:`quchip.interop.scqubits.devices`.
+        are listed in :mod:`quchip.interop.scqubits.devices`. Its energies are
+        read in scqubits' current unit, ``scqubits.get_units()``, and
+        converted to GHz.
     **opts
         Device imports accept ``levels`` (default: source ``truncated_dim``),
         ``label`` (default: source ``id_str``), and target-device noise options
@@ -91,7 +93,8 @@ def to_scqubits(device_or_chip: Any, **opts: Any) -> Any:
     Returns
     -------
     scqubits object
-        Corresponding device or ``HilbertSpace``. Chip control equipment and
+        Corresponding device or ``HilbertSpace``, with energies in scqubits'
+        current unit, ``scqubits.get_units()``. Chip control equipment and
         baths are omitted with a warning; port networks and effective terms
         are unsupported. See :func:`~quchip.interop.scqubits.composite.export_chip`.
 
