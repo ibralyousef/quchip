@@ -202,7 +202,12 @@ def build_problem(
         ``plane.output`` request; read the complete field afterward with
         ``result.output(plane)``.
     initial_state : optional
-        Initial state; ``None`` defaults to the chip ground state.
+        Initial state. ``None`` uses the all-ground-labeled eigenstate of the
+        undriven static lab-frame Hamiltonian retained by the approximation, with
+        real, nonnegative overlap on the bare product, expressed in the solve
+        frame at ``tlist[0]``. See
+        :meth:`~quchip.control.sequence.QuantumSequence.simulate` for accepted
+        forms and approximation-specific cases.
     approximation : Approximation or None, optional
         Approximation strategy, such as :class:`~quchip.RWA`, used during
         assembly. ``None`` uses the chip declaration.
@@ -328,8 +333,8 @@ def simulate(
         Observables keyed by device label (or a 2-tuple of labels for a
         two-body observable).
     initial_state : optional
-        Initial state. ``None`` starts every device in its local ground state as a
-        bare product state. A ``Mapping`` gives a product state from per-device
+        Initial state. ``None`` uses the default start described in
+        :func:`build_problem`. A ``Mapping`` gives a product state from per-device
         energy levels or authored local kets; configured string shorthand gives
         per-device energy levels. Both are built in the resolved local bases. QuTiP
         ``Qobj`` and dynamiqs ``QArray`` kets or density matrices use resolved

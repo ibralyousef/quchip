@@ -117,8 +117,13 @@ only requested expectation traces; later state measurements need saved states.
 `observable_at()` can select or interpolate a saved trace. State queries use
 saved times and do not interpolate quantum states.
 
-Prepare coupled eigenstates with `chip.state()`. Use `chip.bare_state()` for
-bare product states. `result.population(q, level=1)` measures a local isolated
+An omitted `initial_state` uses the all-ground-labeled eigenstate of the
+undriven static lab-frame Hamiltonian retained by the solve's approximation,
+then expresses it in the solve frame at `tlist[0]`. With ordinary couplings,
+this is the bare product under the default RWA and the same physical state as
+`chip.state()` under `Exact()` before the frame transform. Use `chip.state()`
+for other coupled eigenstates and `chip.bare_state()` to request a bare product
+state explicitly. `result.population(q, level=1)` measures a local isolated
 energy-state population; `overlap()` tests a particular joint state.
 
 ## Declare network noise
