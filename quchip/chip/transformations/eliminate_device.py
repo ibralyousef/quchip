@@ -49,6 +49,7 @@ from quchip.chip.transformations.dispatch import EliminationTarget, register_eli
 from quchip.chip.transformations.methods import DeviceReductionContext, lookup_reduction_method
 from quchip.chip.transformations.plumbing import (
     StrandedLine,
+    inherited_notes,
     plan_stranded_lines,
     reattach_equipment,
     rebuild_chip,
@@ -466,8 +467,13 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
         chip, tuple(survivor_labels), tuple(final.authored_dims),
         step_embedding,
     ).with_current_operators(tuple(f"port:{label}" for label in port_replacements))
+    order = "second-order" if method == "sw" else "exact projected"
+    notes.append(f"Retained the full {order} Hamiltonian correction and each transformed channel "
+                 "from the removed components; inherited decay remains collective and separate "
+                 "from intrinsic survivor noise.")
     terms = EffectiveTerms(tuple(survivor_labels), tuple(final.authored_dims), correction,
-                           tuple(inherited_channels), label=f"retained_{mode_label}", projection=projection)
+                           tuple(inherited_channels), label=f"retained_{mode_label}", projection=projection,
+                           notes=(*inherited_notes(chip), *notes))
     final = rebuild_chip(chip, devices=final.devices, couplings=final.couplings,
                          port_replacements=port_replacements,
                          effective_terms=(*final.effective_terms, terms), baths=projected_baths)
@@ -483,11 +489,6 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
             lambda: reduce(jnp.kron, source_factors) @ reduction.embedding(ctx) @ target_to_solver.conj().T
         ),
     )
-    order = "second-order" if method == "sw" else "exact projected"
-    notes.append(f"Retained the full {order} Hamiltonian correction and each transformed channel "
-                 "from the removed components; inherited decay remains collective and separate "
-                 "from intrinsic survivor noise.")
-
     reattach_equipment(
         chip,
         final,
