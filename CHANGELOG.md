@@ -4,6 +4,10 @@ This file records notable user-visible changes to quchip.
 
 ## Unreleased
 
+## [0.4.0] - 2026-09-29 <a id="quchip-0-4-0"></a>
+
+Changes since [v0.3.2](https://github.com/quchip/quchip/compare/v0.3.2...v0.4.0).
+
 - Dressed analysis now follows `chip.approximation`, including frequencies,
   states, Kerr shifts and drive matrix elements. Previously these queries
   silently retained all coupling bands even on an `RWA()` chip. Construct the
@@ -30,10 +34,10 @@ This file records notable user-visible changes to quchip.
 - Solves with `initial_state=None` now use the all-ground-labeled eigenstate of
   the undriven static lab-frame Hamiltonian retained by the solve's
   approximation. The default RWA with ordinary couplings remains a bare
-  product. Before the frame transform, `Exact()` selects the same physical
-  state as `chip.state()` for the all-ground label; retained bands, effective
-  terms, or network Hamiltonian terms that couple the vacuum can dress an RWA
-  start. Rotating-frame solves apply `U(tlist[0])†`. Pass `chip.bare_state()`
+  product. Before the frame transform, a solve using the chip's approximation
+  selects the same physical state as `chip.state()` for the all-ground label.
+  Retained bands, effective terms, or network Hamiltonian terms that couple
+  the vacuum can dress an RWA start. Rotating-frame solves apply `U(tlist[0])†`. Pass `chip.bare_state()`
   explicitly to keep the previous bare start.
 - Per-call backend overrides no longer re-project QuTiP `Qobj` or dynamiqs
   `QArray` initial states returned by `chip.state()`, `chip.bare_state()`, or
@@ -59,10 +63,6 @@ This file records notable user-visible changes to quchip.
 - Collective and other multi-device collapse channels are now checked for a
   single removable frame phase. Unequal device frames raise before solving
   instead of silently retaining a static jump operator.
-- `eliminate()` assembles the retained correction at the approximation the
-  route reads (all bands for `method="exact"`), so a reduced chip's dressed
-  energies and `static_zz` match the source's under RWA instead of counting
-  its own couplings' counter-rotating terms twice.
 - Retained effective terms enter the dressed-analysis cache key; a chip
   resolved before a coupling elimination no longer reports bare energies.
 - The hybridization warning has fixed text and is shown once per call site.
@@ -84,6 +84,7 @@ This file records notable user-visible changes to quchip.
 - Preserve shifted square-pulse endpoints when floating-point subtraction
   rounds the local time past the pulse duration.
 
+- Add the ideal two-level `Qubit` model.
 - Add native quantum-jump and diffusive SSE/SME solvers on QuTiP and Dynamiqs,
   with parameter batches, native results, and explicit monitored-channel selection.
 - Truncation diagnostics are now explicit. Remove `check_truncation` and
@@ -95,6 +96,11 @@ This file records notable user-visible changes to quchip.
   global unit, `scqubits.get_units()`, and GHz. Previously they assumed GHz, so
   objects built after `scqubits.set_units("MHz")`, such as Quantum Metal's LOM
   composites, imported 1000 times too large.
+- The contributor workflow starts PRs as drafts. Marking a PR ready for
+  review runs validation; later pushes rerun it. Documentation, workflow changes and version-only
+  release metadata use lightweight checks.
+- Historical release notes are consolidated in this changelog. Tagged
+  releases extract their notes from the matching dated section.
 
 ## [0.3.2] - 2026-09-10 <a id="quchip-0-3-2"></a>
 
