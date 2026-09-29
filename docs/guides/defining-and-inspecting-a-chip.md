@@ -58,9 +58,9 @@ print(f"Conditional resonator pull: {1000 * chip.dispersive_shift(q, r):.3f} MHz
 Output:
 
 ```text
-Qubit f01: 4.998533 GHz
-Resonator frequency: 7.001041 GHz
-Conditional resonator pull: -0.286 MHz
+Qubit f01: 4.998751 GHz
+Resonator frequency: 7.001249 GHz
+Conditional resonator pull: -0.277 MHz
 ```
 
 The full conditional pull is $E_{11}-E_{10}-E_{01}+E_{00}$. Its half is the
@@ -81,8 +81,8 @@ print(f"Changed bare / dressed: {shifted.parameters['q.freq']:.3f} / {shifted.fr
 Output:
 
 ```text
-Original bare / dressed: 5.000 / 4.998533 GHz
-Changed bare / dressed: 5.100 / 5.098470 GHz
+Original bare / dressed: 5.000 / 4.998751 GHz
+Changed bare / dressed: 5.100 / 5.098685 GHz
 ```
 
 ## Inspect the Hamiltonian
@@ -102,8 +102,8 @@ Output:
 
 ```text
 2 term(s) dropped:
-  [qr] coupling band (Δa=-1, Δb=-1) on q·r  (counter-rotating under RWA; amp 0.173205 GHz, freq 11.9996 GHz)
-  [qr] coupling band (Δa=+1, Δb=+1) on q·r  (counter-rotating under RWA; amp 0.173205 GHz, freq 11.9996 GHz)
+  [qr] coupling band (Δa=-1, Δb=-1) on q·r  (counter-rotating under RWA; amp 0.173205 GHz, freq 12 GHz)
+  [qr] coupling band (Δa=+1, Δb=+1) on q·r  (counter-rotating under RWA; amp 0.173205 GHz, freq 12 GHz)
 ```
 
 The dropped terms create or annihilate two excitations. Their oscillation
@@ -130,7 +130,7 @@ print(f"Converged: {fit.converged}; normalized loss: {fit.loss:.2e}")
 Output:
 
 ```text
-Converged: True; normalized loss: 1.43e-21
+Converged: True; normalized loss: 5.43e-24
 ```
 
 <details>
@@ -143,19 +143,19 @@ print(fit.summary())
 Output:
 
 ```text
-fit_a_dress: converged | loss 1.43e-21 | targets: 4 | parameters: 4
-identifiability: rank 4/4 | condition 33.9
+fit_a_dress: converged | loss 5.43e-24 | targets: 4 | parameters: 4
+identifiability: rank 4/4 | condition 35.8
 `xtol` termination condition is satisfied.
 targets (GHz):
-  q.freq [component default]: 5 -> 5 (error -2.8e-14)
-  q.anharmonicity [component default]: -0.25 -> -0.25 (error +6.4e-14)
-  r.freq [component default]: 7 -> 7 (error +1.4e-14)
-  qr.cross_kerr [component default]: -0.0003 -> -0.0003 (error +1.1e-14)
+  q.freq [component default]: 5 -> 5 (error +1.8e-15)
+  q.anharmonicity [component default]: -0.25 -> -0.25 (error +3.6e-15)
+  r.freq [component default]: 7 -> 7 (error +0)
+  qr.cross_kerr [component default]: -0.0003 -> -0.0003 (error +7e-16)
 bare parameters (GHz):
-  q.freq: 5 -> 5.00153 [component declaration]
-  q.anharmonicity: -0.25 -> -0.250281 [component declaration]
-  r.freq: 7 -> 6.99891 [component declaration]
-  qr.g: 0.0512101 -> 0.0511229 [isolated-pair root solve; positive convention]
+  q.freq: 5 -> 5.00135 [component declaration]
+  q.anharmonicity: -0.25 -> -0.2503 [component declaration]
+  r.freq: 7 -> 6.99865 [component declaration]
+  qr.g: 0.0520244 -> 0.0519304 [isolated-pair root solve; positive convention]
 ```
 
 </details>

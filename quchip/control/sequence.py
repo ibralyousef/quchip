@@ -1278,9 +1278,9 @@ class QuantumSequence:
             assigned to the all-ground label. Its overlap with the bare product is
             made real and nonnegative before it is expressed in the solve frame at
             ``tlist[0]``. With ordinary couplings, this is the bare product under the
-            default RWA and the same physical state as ``chip.state()`` under
-            ``Exact()`` before the frame transform. Retained bands, effective terms,
-            or network Hamiltonian terms that couple the vacuum can also dress an RWA
+            default RWA. When the solve uses the chip's approximation, it is the
+            same physical state as ``chip.state()`` before the frame transform.
+            Retained bands, effective terms, or network Hamiltonian terms that couple the vacuum can also dress an RWA
             start. At a nonzero rotating-frame start time, the frame transform is
             applied at ``tlist[0]``, so the state need not match the lab-frame vector
             returned by ``chip.state()``. Mappings and configured string shorthand give product

@@ -32,7 +32,6 @@ import jax.numpy as jnp
 import numpy as np
 
 from quchip.utils.values import DeferredValue
-from quchip.approximations import Exact
 from quchip.chip.couplings import Capacitive, TunableCapacitive
 from quchip.chip.effective import EffectiveTerms, OperatorProjection
 from quchip.declarative.dissipation import CollapseChannel
@@ -50,6 +49,7 @@ from quchip.chip.transformations.dispatch import EliminationTarget, register_eli
 from quchip.chip.transformations.methods import DeviceReductionContext, lookup_reduction_method
 from quchip.chip.transformations.plumbing import (
     StrandedLine,
+    inherited_notes,
     plan_stranded_lines,
     reattach_equipment,
     rebuild_chip,
@@ -245,11 +245,6 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
     scanned = {lbl for lbl, _ in survivors}
     touching_labels = [lbl for lbl in labels if lbl in scanned]
 
-    # Capture the full lab-frame matrix now; diagonalize only if chi is read.
-    report_h = None
-    if not is_multi and survivors:
-        report_h = h if not approximation.filters_terms else bare_hamiltonian(chip, approximation=Exact())[0]
-
     p_mask, _ = mode_blocks(dims, labels, mode_label)
     min_gap = cross_block_gap(h, p_mask)
 
@@ -300,7 +295,7 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
             def _chi() -> Any:
                 from quchip.chip.analysis import kerr_entry
 
-                values, _, labeling = _exact_eigensystem(report_h, dims)
+                values, _, labeling = _exact_eigensystem(h, dims)
                 return kerr_entry(
                     mode_index, survivor_index, dims=dims, eigenvalues=values, labeling=labeling,
                 )
@@ -472,8 +467,13 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
         chip, tuple(survivor_labels), tuple(final.authored_dims),
         step_embedding,
     ).with_current_operators(tuple(f"port:{label}" for label in port_replacements))
+    order = "second-order" if method == "sw" else "exact projected"
+    notes.append(f"Retained the full {order} Hamiltonian correction and each transformed channel "
+                 "from the removed components; inherited decay remains collective and separate "
+                 "from intrinsic survivor noise.")
     terms = EffectiveTerms(tuple(survivor_labels), tuple(final.authored_dims), correction,
-                           tuple(inherited_channels), label=f"retained_{mode_label}", projection=projection)
+                           tuple(inherited_channels), label=f"retained_{mode_label}", projection=projection,
+                           notes=(*inherited_notes(chip), *notes))
     final = rebuild_chip(chip, devices=final.devices, couplings=final.couplings,
                          port_replacements=port_replacements,
                          effective_terms=(*final.effective_terms, terms), baths=projected_baths)
@@ -489,11 +489,6 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
             lambda: reduce(jnp.kron, source_factors) @ reduction.embedding(ctx) @ target_to_solver.conj().T
         ),
     )
-    order = "second-order" if method == "sw" else "exact projected"
-    notes.append(f"Retained the full {order} Hamiltonian correction and each transformed channel "
-                 "from the removed components; inherited decay remains collective and separate "
-                 "from intrinsic survivor noise.")
-
     reattach_equipment(
         chip,
         final,
