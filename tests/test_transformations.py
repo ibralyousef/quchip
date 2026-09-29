@@ -365,7 +365,6 @@ def test_eliminate_coupling_target_keeps_circuit_parameters(method):
     assert result.chip["q"].E_C == q.E_C and result.chip["q"].E_J == q.E_J
     assert np.isfinite(result.effective_params["q"]["freq_after"])
     if method == "exact":
-        from quchip import Exact
-        source_h = chip.resolve(frame="lab", approximation=Exact()).hamiltonian().matrix()
+        source_h = chip.resolve(frame="lab").hamiltonian().matrix()
         target_h = result.chip.resolve(frame="lab").hamiltonian().matrix()
         np.testing.assert_allclose(result.mapping.project_operator(source_h).full(), target_h, atol=1e-11)

@@ -40,6 +40,13 @@ Use device objects while building the model; use their labels when retrieving
 results or binding parameters. `chip.freq()` dresses automatically. You do not
 need a preceding `dress()` call.
 
+Dressed queries and default solves share `chip.approximation`. The default
+`RWA()` drops counter-rotating bands in both; construct the chip with
+`approximation=Exact()` to retain them. Dressed queries always use the lab
+frame. If a solve overrides the approximation, use the same choice for its
+carrier and state preparation; `chip.resolve(frame="lab", approximation=...)`
+provides a snapshot whose `dress()` returns the corresponding eigensystem.
+
 `dispersive_shift(q, r)` returns the full conditional resonator pull. Divide by
 two for the usual sigma-z coefficient χ. `kerr_matrix()` collects full pulls
 off diagonal and dressed anharmonicities on the diagonal.
@@ -120,8 +127,8 @@ saved times and do not interpolate quantum states.
 An omitted `initial_state` uses the all-ground-labeled eigenstate of the
 undriven static lab-frame Hamiltonian retained by the solve's approximation,
 then expresses it in the solve frame at `tlist[0]`. With ordinary couplings,
-this is the bare product under the default RWA and the same physical state as
-`chip.state()` under `Exact()` before the frame transform. Use `chip.state()`
+this is the bare product under the default RWA. With the chip's approximation,
+it is the same physical state as `chip.state()` before the frame transform. Use `chip.state()`
 for other coupled eigenstates and `chip.bare_state()` to request a bare product
 state explicitly. `result.population(q, level=1)` measures a local isolated
 energy-state population; `overlap()` tests a particular joint state.
