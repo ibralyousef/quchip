@@ -4,6 +4,22 @@ This file records notable user-visible changes to quchip.
 
 ## Unreleased
 
+- `eliminate()` accepts the label of an `EffectiveTerms` contribution. With
+  `method="exact"` it diagonalizes those terms together with the local
+  Hamiltonians of their devices, keeps every device and edge authored, and
+  retains the level shifts as a correction, so dressed queries on the reduced
+  chip return the source spectrum. `effective_params` reports each device's
+  dressed transition, Lamb shift, anharmonicity and cross-Kerr shifts.
+  Coupling and effective-term reductions share one implementation of the
+  retained change of coordinates. `Chip` now rejects effective-term labels
+  that collide with device or coupling labels.
+- `EffectiveTerms` carry producer `notes`. `Chip.physics_notes()` lists each
+  contribution under `effective:<label>` with its support, assembly rule,
+  channels and notes, and `describe()` lists them. Device and coupling
+  eliminations record their approximations on the retained terms, including
+  the notes of earlier contributions they absorb. Serialized effective terms
+  include `notes` when present; payloads without them still load.
+  `Resonator.physics_notes()` states its harmonic approximation once.
 - Solves with `initial_state=None` now use the all-ground-labeled eigenstate of
   the undriven static lab-frame Hamiltonian retained by the solve's
   approximation. The default RWA with ordinary couplings remains a bare
