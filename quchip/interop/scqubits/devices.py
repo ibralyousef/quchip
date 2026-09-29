@@ -10,7 +10,9 @@ guards each against JAX tracers via :func:`maybe_concrete_scalar`, and
 reconstructs the scqubits object.
 
 Every mapping's docstring states its parameter translation; these are the
-reference examples for authoring further mappings.
+reference examples for authoring further mappings. scqubits stores energies in
+its global unit, ``scqubits.get_units()`` (GHz by default); every energy is
+converted between that unit and quchip's GHz at this boundary.
 """
 
 from __future__ import annotations
@@ -28,6 +30,13 @@ _EXPORT_GUARD_MESSAGE = (
     "to_scqubits requires concrete parameters; call outside jit/grad or "
     "substitute concrete values first."
 )
+
+
+def _units_per_ghz() -> float:
+    """Return the number of scqubits energy units in one GHz under ``scqubits.get_units()``."""
+    from scqubits.core import units
+
+    return units.units_scale_factor("GHz") / units.units_scale_factor()
 
 
 def _export_levels(device: Any) -> int:
@@ -72,9 +81,10 @@ class TransmonMapping(ModelMapping):
     def import_model(self, obj: Any, *, levels: int | None = None, label: str | None = None,
                      **noise_kwargs: Any) -> ChargeBasisTransmon:
         coupling_channel = noise_kwargs.pop("coupling_channel", None)
+        units = _units_per_ghz()
         return ChargeBasisTransmon(
-            E_C=obj.EC,
-            E_J=obj.EJ,
+            E_C=obj.EC / units,
+            E_J=obj.EJ / units,
             n_g=obj.ng,
             levels=levels or obj.truncated_dim,
             num_basis=2 * obj.ncut + 1,
@@ -88,9 +98,10 @@ class TransmonMapping(ModelMapping):
         import scqubits
 
         vals = _concrete_params(device, ("E_C", "E_J", "n_g"))
+        units = _units_per_ghz()
         return scqubits.Transmon(
-            EJ=vals["E_J"],
-            EC=vals["E_C"],
+            EJ=vals["E_J"] * units,
+            EC=vals["E_C"] * units,
             ng=vals["n_g"],
             ncut=(device.num_basis - 1) // 2,
             truncated_dim=_export_levels(device),
@@ -127,9 +138,10 @@ class TunableTransmonMapping(ModelMapping):
             np.cos(np.pi * obj.flux) ** 2 + obj.d**2 * np.sin(np.pi * obj.flux) ** 2
         )
         coupling_channel = noise_kwargs.pop("coupling_channel", None)
+        units = _units_per_ghz()
         return ChargeBasisTransmon(
-            E_C=obj.EC,
-            E_J=effective_e_j,
+            E_C=obj.EC / units,
+            E_J=effective_e_j / units,
             n_g=obj.ng,
             levels=levels or obj.truncated_dim,
             num_basis=2 * obj.ncut + 1,
@@ -168,10 +180,11 @@ class FluxoniumMapping(ModelMapping):
 
     def import_model(self, obj: Any, *, levels: int | None = None, label: str | None = None,
                      **noise_kwargs: Any) -> Fluxonium:
+        units = _units_per_ghz()
         return Fluxonium(
-            E_C=obj.EC,
-            E_J=obj.EJ,
-            E_L=obj.EL,
+            E_C=obj.EC / units,
+            E_J=obj.EJ / units,
+            E_L=obj.EL / units,
             phi_ext=obj.flux,
             levels=levels or obj.truncated_dim,
             basis="eigen",
@@ -183,10 +196,11 @@ class FluxoniumMapping(ModelMapping):
         import scqubits
 
         vals = _concrete_params(device, ("E_C", "E_J", "E_L", "phi_ext"))
+        units = _units_per_ghz()
         return scqubits.Fluxonium(
-            EJ=vals["E_J"],
-            EC=vals["E_C"],
-            EL=vals["E_L"],
+            EJ=vals["E_J"] * units,
+            EC=vals["E_C"] * units,
+            EL=vals["E_L"] * units,
             flux=vals["phi_ext"],
             cutoff=110,
             truncated_dim=_export_levels(device),
@@ -209,7 +223,7 @@ class OscillatorMapping(ModelMapping):
     def import_model(self, obj: Any, *, levels: int | None = None, label: str | None = None,
                      **noise_kwargs: Any) -> Resonator:
         return Resonator(
-            freq=obj.E_osc,
+            freq=obj.E_osc / _units_per_ghz(),
             levels=levels or obj.truncated_dim,
             label=cast(str, label or getattr(obj, "id_str", None)),
             **noise_kwargs,
@@ -219,7 +233,9 @@ class OscillatorMapping(ModelMapping):
         import scqubits
 
         vals = _concrete_params(device, ("freq",))
-        return scqubits.Oscillator(E_osc=vals["freq"], truncated_dim=device.levels, id_str=device.label)
+        return scqubits.Oscillator(
+            E_osc=vals["freq"] * _units_per_ghz(), truncated_dim=device.levels, id_str=device.label
+        )
 
 
 class KerrOscillatorMapping(ModelMapping):
@@ -245,9 +261,10 @@ class KerrOscillatorMapping(ModelMapping):
 
     def import_model(self, obj: Any, *, levels: int | None = None, label: str | None = None,
                      **noise_kwargs: Any) -> KerrCavity:
+        units = _units_per_ghz()
         return KerrCavity(
-            freq=obj.E_osc,
-            kerr=obj.K,
+            freq=obj.E_osc / units,
+            kerr=obj.K / units,
             levels=levels or obj.truncated_dim,
             label=cast(str, label or getattr(obj, "id_str", None)),
             **noise_kwargs,
@@ -269,7 +286,7 @@ class GenericQubitMapping(ModelMapping):
     def import_model(self, obj: Any, *, levels: int | None = None, label: str | None = None,
                      **noise_kwargs: Any) -> DuffingTransmon:
         return DuffingTransmon(
-            freq=obj.E,
+            freq=obj.E / _units_per_ghz(),
             anharmonicity=0.0,
             levels=levels or 2,
             label=cast(str, label or getattr(obj, "id_str", None)),
@@ -300,8 +317,9 @@ class DuffingTransmonMapping(ModelMapping):
         import scqubits
 
         vals = _concrete_params(device, ("freq", "anharmonicity"))
+        units = _units_per_ghz()
         e_j, e_c = scqubits.Transmon.find_EJ_EC(
-            E01=vals["freq"], anharmonicity=vals["anharmonicity"], ncut=ncut
+            E01=vals["freq"] * units, anharmonicity=vals["anharmonicity"] * units, ncut=ncut
         )
         return scqubits.Transmon(
             EJ=e_j, EC=e_c, ng=0.0, ncut=ncut, truncated_dim=device.levels, id_str=device.label
@@ -342,7 +360,7 @@ class ZeroPiMapping(ModelMapping):
 
         levels = levels or obj.truncated_dim
         esys = obj.eigensys(evals_count=levels)
-        energies = esys[0]
+        energies = esys[0] / _units_per_ghz()
         return EigenbasisDevice(
             energies,
             charge_operator=np.asarray(obj.n_theta_operator(energy_esys=esys)),

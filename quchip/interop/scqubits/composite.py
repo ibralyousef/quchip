@@ -24,6 +24,8 @@ differentiable with respect to the source circuit parameters (the same
 frozen-snapshot contract :class:`~quchip.interop.eigenbasis.EigenbasisDevice`
 carries). ``InteractionTermStr`` string expressions and non-pairwise products
 raise :class:`NotImplementedError` rather than importing a partial model.
+Subsystem energies and interaction strengths are converted from scqubits'
+current unit, ``scqubits.get_units()``, to GHz on import and back on export.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from quchip.devices.base import BaseDevice
 from quchip.devices.protocols import ChargeCoupled
 from quchip.interop.base import export_object
 from quchip.interop.eigenbasis import EigenbasisDevice
+from quchip.interop.scqubits.devices import _units_per_ghz
 from quchip.utils.jax_utils import maybe_concrete_scalar
 
 _SUPPORTED_EXPORT_COUPLINGS = "Capacitive, TunableCapacitive, CrossKerr, or product-form Coupling"
@@ -96,7 +99,7 @@ def _snapshot_subsystem(subsys: Any) -> EigenbasisDevice:
     levels = int(subsys.truncated_dim)
     esys = subsys.eigensys(evals_count=levels)
     return EigenbasisDevice(
-        esys[0],
+        esys[0] / _units_per_ghz(),
         charge_operator=_projected_source_operator(
             subsys,
             ("n_operator", "n_theta_operator"),
@@ -161,7 +164,8 @@ def _coupling_from_term(
         devices[index_a],
         devices[index_b],
         g=1.0,
-        interaction=_product_interaction(term.g_strength, matrix_a, matrix_b, bool(term.add_hc)),
+        interaction=_product_interaction(term.g_strength / _units_per_ghz(), matrix_a, matrix_b,
+                                         bool(term.add_hc)),
         label=f"scq_interaction_{index}",
     )
 
@@ -430,7 +434,7 @@ def export_chip(chip: Chip, **opts: Any) -> Any:
         subsys_a = label_to_subsys[coupling.device_a_label]
         subsys_b = label_to_subsys[coupling.device_b_label]
         hs.add_interaction(
-            g=g,
+            g=g * _units_per_ghz(),
             op1=(_lift_to_native(subsys_a, matrix_a), subsys_a),
             op2=(_lift_to_native(subsys_b, matrix_b), subsys_b),
             add_hc=False,
