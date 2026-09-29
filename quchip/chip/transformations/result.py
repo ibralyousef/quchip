@@ -143,10 +143,17 @@ class EliminationResult:
         ``coupling`` names the emitted mediated edge. The flux-retargeting
         derivative remains second-order even with exact reduction.
         ``zz`` is available for the exact route; ``pathways`` for SW.
+
+        An effective-terms target reports, for each device the terms act on,
+        ``freq_after``, ``lamb_shift``, ``anharmonicity`` (with three or more
+        levels) and ``cross_kerr``, a mapping from each other such device to
+        the full-pull shift ``E11 - E10 - E01 + E00`` (GHz), all from the
+        exactly diagonalized isolated terms.
     validity
         Per-coupling ``g_over_delta``, ``is_valid`` and ``min_block_gap``.
         The validity flag uses ``g_over_delta < 0.1`` and remains a native
-        boolean under JAX tracing. It is a perturbative diagnostic.
+        boolean under JAX tracing. It is a perturbative diagnostic; the exact
+        effective-terms route has none and leaves this mapping empty.
     notes
         Approximation order, omitted physics and control retargeting.
     mapping

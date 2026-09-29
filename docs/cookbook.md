@@ -18,6 +18,7 @@ rates in 1/ns.
 | Outcomes from a saved quantum state | `result.measure()` |
 | Bare parameters that meet dressed targets | `fit_a_dress()` |
 | A reduced model around driven devices | `sequence.active_patch()` |
+| Diagonalize effective terms, such as a junction cosine | `eliminate(chip, label, method="exact")` |
 
 The {doc}`guides <guides/index>` develop these workflows. The
 {doc}`focused studies <studies/index>` apply them to specific physical questions.
