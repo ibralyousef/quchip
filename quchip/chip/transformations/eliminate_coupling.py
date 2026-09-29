@@ -7,27 +7,20 @@ transformation of every other interaction in the chip.
 
 from __future__ import annotations
 
-from functools import reduce
 from typing import TYPE_CHECKING, Any
 
 import jax.numpy as jnp
 from jax.scipy.linalg import expm
 
 from quchip.approximations import Exact
-from quchip.chip.dressing import BareProductReference, label_eigensystem
-from quchip.chip.effective import EffectiveTerms, OperatorProjection
 from quchip.chip.sw import bare_hamiltonian, interaction_generator
-from quchip.chip.transformations.dispatch import EliminationTarget, register_elimination_target
-from quchip.chip.transformations.plumbing import (
-    StrandedLine, plan_stranded_lines, reattach_equipment, rebuild_chip,
+from quchip.chip.transformations.coordinate_change import (
+    embed_on_labels, isolated_hamiltonian, labeled_eigenvectors, product_energies, retain_coordinate_change,
 )
-from quchip.chip.transformations.result import EliminationResult, ReductionMap
-from quchip.declarative.dissipation import CollapseChannel
-from quchip.declarative.expr import materialize_expr
-from quchip.engine.bands import embed_on_support
-from quchip.engine.basis import _lowest_eigenpairs
+from quchip.chip.transformations.dispatch import EliminationTarget, register_elimination_target
+from quchip.chip.transformations.plumbing import StrandedLine, plan_stranded_lines, reattach_equipment
+from quchip.chip.transformations.result import EliminationResult
 from quchip.utils.labeling import LabelKeyedDict, resolve_label
-from quchip.utils.values import DeferredValue
 
 if TYPE_CHECKING:
     from quchip.chip.chip import Chip
@@ -47,8 +40,6 @@ def reduce_coupling(chip: "Chip", target: Any, method: str) -> EliminationResult
     coordinate map; the Hamiltonian keeps its second-order truncation.
     Surviving control operators are not transformed yet.
     """
-    from quchip.chip.chip import Chip
-
     if method not in {"sw", "exact"}:
         raise NotImplementedError(f"Coupling-target reduction does not implement method {method!r}.")
     coupling_label = resolve_label(target)
@@ -84,39 +75,19 @@ def reduce_coupling(chip: "Chip", target: Any, method: str) -> EliminationResult
     h, labels, dims = bare_hamiltonian(chip, approximation=approximation)
     cloned = chip.clone()
     pair_devices = [cloned[label] for label in pair_labels]
-    pair = Chip(pair_devices, [cloned.coupling_map[coupling_label]],
-                basis=chip.basis, backend=chip.backend, approximation=approximation)
-    pair_h, _, pair_dims = bare_hamiltonian(pair)
-    pair_bases = pair.resolve(frame="lab").bases
-    pair_e = (pair_bases[pair_labels[0]].energies[:, None]
-              + pair_bases[pair_labels[1]].energies[None, :]).reshape(-1)
-    isolated = Chip(pair_devices, basis=chip.basis, backend=chip.backend, approximation=approximation)
-    local_h = bare_hamiltonian(isolated)[0]
-    # Local energies define H0. Subtract their assembled matrix before adding
-    # that diagonal: basis roundoff must not masquerade as a selected coupling
-    # between exactly degenerate isolated levels.
-    pair_h = jnp.diag(pair_e) + (pair_h - local_h)
-
-    def embed(operator: Any, support_labels: tuple[str, ...]) -> Any:
-        support = tuple(labels.index(label) for label in support_labels)
-        local_dims = [dims[index] for index in support]
-        native = chip.backend.from_array(operator, dims=[local_dims, local_dims])
-        return jnp.asarray(chip.backend.to_array(embed_on_support(chip.backend, native, support, dims)))
+    pair_h, pair_e, pair_dims = isolated_hamiltonian(chip, pair_devices, approximation,
+                                                     couplings=[cloned.coupling_map[coupling_label]])
 
     if method == "exact":
-        _, vectors = _lowest_eigenpairs(pair_h, pair_h.shape[0])
-        assignment = label_eigensystem(vectors, BareProductReference(pair_dims))
-        pair_rotation = vectors[:, assignment.indices]
-        rotation = embed(pair_rotation, pair_labels)
+        pair_rotation = labeled_eigenvectors(pair_h, pair_dims)
+        rotation = embed_on_labels(chip.backend, labels, dims, pair_rotation, pair_labels)
         pair_after = pair_rotation.conj().T @ pair_h @ pair_rotation
         retained_h = rotation.conj().T @ h @ rotation
     else:
         pair_s = interaction_generator(pair_e, pair_h)
-        s = embed(pair_s, pair_labels)
+        s = embed_on_labels(chip.backend, labels, dims, pair_s, pair_labels)
         rotation = expm(-s)
-        energies = source.bases[labels[0]].energies
-        for label in labels[1:]:
-            energies = (energies[:, None] + source.bases[label].energies[None, :]).reshape(-1)
+        energies = product_energies(source.bases, labels)
 
         def second_order(matrix: Any, energies: Any, generator: Any) -> Any:
             h0 = jnp.diag(energies)
@@ -128,44 +99,16 @@ def reduce_coupling(chip: "Chip", target: Any, method: str) -> EliminationResult
         retained_h = second_order(h, energies, s)
         pair_after = second_order(pair_h, pair_e, pair_s)
 
-    def transform(operator: Any) -> Any:
-        return rotation.conj().T @ operator @ rotation
-
-    final = rebuild_chip(chip, devices=cloned.devices,
-                         couplings=[c for c in cloned.couplings if c.label != coupling_label],
-                         effective_terms=())
-    resolved = final.resolve(frame="lab", approximation=approximation)
-    lift = reduce(jnp.kron, (source.bases[label].energy_vectors for label in labels))
-    final_lift = reduce(jnp.kron, (resolved.bases[label].vectors for label in labels))
-    remaining_h = jnp.asarray(resolved.hamiltonian().matrix(backend=chip.backend))
-    correction = lift @ retained_h @ lift.conj().T - final_lift @ remaining_h @ final_lift.conj().T
-    channels = []
-
-    def inherit(channel: CollapseChannel, support: tuple[str, ...], name: str) -> None:
-        local = jnp.asarray(chip.backend.to_array(materialize_expr(channel.operator, chip.backend)))
-        basis = reduce(jnp.kron, (source.bases[label].energy_vectors for label in support))
-        transformed = transform(embed(basis.conj().T @ local @ basis, support))
-        channels.append(CollapseChannel(lift @ transformed @ lift.conj().T,
-                                       materialize_expr(channel.rate, chip.backend), name))
-
-    contributions = chip._collapse_contributions_with_owners(source.bases)
-    for operator, rate, support, owner_label, name, _paths, owner in contributions:
-        if owner is coupling or isinstance(owner, EffectiveTerms):
-            support_labels = tuple(labels[index] for index in support) if support else tuple(labels)
-            inherit(CollapseChannel(operator, rate, name), support_labels, f"{owner_label}.{name}")
-    projection = OperatorProjection.capture(
-        chip, tuple(labels), tuple(final.authored_dims), lift @ rotation @ lift.conj().T,
+    notes = [f"Removed '{coupling_label}' and retained its complete {method} Hamiltonian correction; "
+             "device parameters and remaining edges stay authored.",
+             "The full-space coordinate map includes the effect on parallel and spectator interactions.",
+             "Surviving channel operators follow the captured map; control operators are not transformed yet."]
+    final, mapping = retain_coordinate_change(
+        chip, source=source, labels=labels, dims=dims, rotation=rotation, retained_h=retained_h,
+        approximation=approximation, devices=cloned.devices,
+        couplings=[c for c in cloned.couplings if c.label != coupling_label],
+        label=f"retained_{coupling_label}", notes=tuple(notes), removed_owners=(coupling,),
     )
-    terms = EffectiveTerms(tuple(labels), tuple(final.authored_dims), correction,
-                           tuple(channels), label=f"retained_{coupling_label}", projection=projection)
-    terms.validate_for(final)
-    final._effective_terms = (terms,)
-    source_to_solver = reduce(jnp.kron, (source.bases[label].vectors.conj().T
-                                       @ source.bases[label].energy_vectors for label in labels))
-    target_to_solver = final_lift.conj().T @ lift
-    embedding = source_to_solver @ rotation @ target_to_solver.conj().T
-    mapping = ReductionMap(tuple(labels), tuple(dims), tuple(labels), tuple(dims),
-                           chip.backend, DeferredValue(lambda: embedding))
     # These diagnostics describe the isolated selected pair, not a refolding
     # of all the remaining chip interactions into two frequencies.
     diagonal = jnp.real(jnp.diagonal(pair_after))
@@ -179,10 +122,6 @@ def reduce_coupling(chip: "Chip", target: Any, method: str) -> EliminationResult
     delta = pair_e[indices[0]] - pair_e[indices[1]]
     ratio = jnp.abs(coupling.coupling_strength / delta)
     validity: dict[str, Any] = LabelKeyedDict({coupling_label: {"g_over_delta": ratio, "is_valid": ratio < .1}})
-    notes = [f"Removed '{coupling_label}' and retained its complete {method} Hamiltonian correction; "
-             "device parameters and remaining edges stay authored.",
-             "The full-space coordinate map includes the effect on parallel and spectator interactions.",
-             "Surviving channel operators follow the captured map; control operators are not transformed yet."]
     reattach_equipment(chip, final, equipment, survivor_lines, retarget_plan,
                        mode_label=coupling_label, result_kind=result_kind, edges={}, notes=notes)
     return EliminationResult(chip=final, effective_params=effective_params, validity=validity,
