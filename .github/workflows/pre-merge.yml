@@ -1,11 +1,11 @@
 name: pre-merge
 
 # Completes the suite after the required fast lanes. Documentation-only PRs
-# skip it; other changes require ready-to-merge on the current PR commit.
+# skip it; other changes run validation when the PR is ready for review.
 # Manual dispatch explicitly requests the same validation suite.
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
 
 concurrency:
@@ -28,8 +28,13 @@ jobs:
   test-full:
     name: pre-merge full suite
     needs: changes
-    # Only a successful docs-only classification may skip the required check.
-    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.full_ci != 'false') }}
+    # Classification errors fail even on drafts; ready code changes run validation.
+    if: >-
+      always() &&
+      (needs.changes.result != 'success' ||
+       (needs.changes.outputs.full_ci != 'true' && needs.changes.outputs.full_ci != 'false') ||
+       (needs.changes.outputs.full_ci == 'true' &&
+        (github.event_name != 'pull_request' || !github.event.pull_request.draft)))
     runs-on: ubuntu-latest
     steps:
       - name: Require a valid change classification
@@ -41,13 +46,6 @@ jobs:
             echo "::error::Could not classify this change."
             exit 1
           fi
-      - name: Require an explicit merge attempt
-        if: >-
-          github.event_name == 'pull_request' &&
-          (github.event.action != 'labeled' || github.event.label.name != 'ready-to-merge')
-        run: |
-          echo "::error::Add (or remove and re-add) ready-to-merge to run validation for this commit."
-          exit 1
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
         with:
