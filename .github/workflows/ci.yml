@@ -79,25 +79,34 @@ jobs:
 
   test-fast:
     needs: changes
-    if: ${{ needs.changes.outputs.full_ci == 'true' }}
     strategy:
       fail-fast: false
       matrix:
         python: ["3.11", "3.12"]
     runs-on: ubuntu-latest
+    # Keep both required matrix check names even for lightweight changes.
     steps:
+      - name: Lightweight change
+        if: ${{ needs.changes.outputs.full_ci == 'false' }}
+        run: echo "Scientific tests are not needed for this change."
       - uses: actions/checkout@v5
+        if: ${{ needs.changes.outputs.full_ci == 'true' }}
       - uses: astral-sh/setup-uv@v6
+        if: ${{ needs.changes.outputs.full_ci == 'true' }}
         with:
           enable-cache: true
           cache-dependency-glob: |
             pyproject.toml
             ci-constraints-*.txt
       - run: uv venv --python ${{ matrix.python }}
+        if: ${{ needs.changes.outputs.full_ci == 'true' }}
       - run: uv pip install -e '.[test,dynamiqs]' -c ci-constraints-${{ matrix.python }}.txt
+        if: ${{ needs.changes.outputs.full_ci == 'true' }}
       - name: Unit tests
+        if: ${{ needs.changes.outputs.full_ci == 'true' }}
         timeout-minutes: 2
         run: uv run --no-sync pytest -m unit --durations=10
       - name: End-to-end and physics tests
+        if: ${{ needs.changes.outputs.full_ci == 'true' }}
         timeout-minutes: 10
         run: uv run --no-sync pytest -m e2e --durations=10
