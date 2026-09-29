@@ -7,10 +7,10 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from quchip import Capacitive, Chip, DuffingTransmon, Exact, PortNetwork, Resonator, eliminate
+from quchip import Capacitive, Chip, DuffingTransmon, Exact, PortNetwork, Resonator, RWA, eliminate
 
 
-def _readout_chip(*, phase_shift: float | None = None) -> tuple[Chip, float]:
+def _readout_chip(*, phase_shift: float | None = None, approximation=RWA()) -> tuple[Chip, float]:
     qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
     resonator = Resonator(freq=6.0, levels=3, label="r")
     network = PortNetwork(label="readout_line")
@@ -24,6 +24,7 @@ def _readout_chip(*, phase_shift: float | None = None) -> tuple[Chip, float]:
         [qubit, resonator],
         [Capacitive(qubit, resonator, g=0.04, label="qr")],
         port_network=network,
+        approximation=approximation,
     )
     # The retained jump uses exp(-S), whose one-excitation transfer is sin(g/Delta).
     return chip, 0.03 * np.sin(0.04 / (5.0 - 6.0)) ** 2
@@ -59,11 +60,15 @@ def test_eliminate_preserves_scattering_and_explicit_exposure() -> None:
     assert after.external_channels[0].reference == before.external_channels[0].reference
 
 
-def test_exact_elimination_also_retains_the_network_boundary() -> None:
+@pytest.mark.parametrize("approximation", [RWA(), Exact()])
+def test_exact_elimination_also_retains_the_network_boundary(approximation) -> None:
     """Exact reduction carries the port operator through its dressed rotation."""
-    chip, _ = _readout_chip()
+    chip, _ = _readout_chip(approximation=approximation)
 
     hamiltonian = np.asarray(chip.unresolved_hamiltonian().matrix(), dtype=complex)
+    if isinstance(approximation, RWA):
+        excitations = (np.arange(3)[:, None] + np.arange(3)).ravel()
+        hamiltonian *= excitations[:, None] == excitations[None, :]
     _, eigenvectors = np.linalg.eigh(hamiltonian)
     kept = np.array([0, 3, 6])
     selected = np.argmax(np.abs(eigenvectors[kept]) ** 2, axis=1)

@@ -150,6 +150,9 @@ class EffectiveTerms:
         Name used for diagnostics and the generated expression.
     projection : OperatorProjection or None, default=None
         Captured source-to-retained operator coordinates.
+    notes : tuple[str, ...], default=()
+        Approximations stated by the producer of these terms, reported by
+        :meth:`physics_notes` after the notes derived from the terms.
     """
 
     labels: tuple[str, ...]
@@ -158,6 +161,7 @@ class EffectiveTerms:
     channels: tuple[CollapseChannel, ...] = ()
     label: str = "effective"
     projection: OperatorProjection | None = None
+    notes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         labels, dims = tuple(self.labels), tuple(self.dims)
@@ -197,6 +201,10 @@ class EffectiveTerms:
                     raise ValueError("Effective channel operators and rates must be finite.")
         if len({c.name for c in channels}) != len(channels):
             raise ValueError("Effective channel names must be unique within one contribution.")
+        notes = (self.notes,) if isinstance(self.notes, str) else tuple(self.notes)
+        if any(not isinstance(note, str) or not note for note in notes):
+            raise ValueError("EffectiveTerms notes must be nonempty strings.")
+        object.__setattr__(self, "notes", notes)
         object.__setattr__(self, "labels", labels)
         object.__setattr__(self, "dims", dims)
         object.__setattr__(self, "hamiltonian", h)
@@ -213,6 +221,20 @@ class EffectiveTerms:
         return PhysicsExpr.from_matrix(
             self.hamiltonian if matrix is None else matrix, labels=self.labels, dims=self.dims, name=self.label
         )
+
+    def physics_notes(self) -> list[str]:
+        """Return the terms' support, assembly rule, channels and coordinate map, then the producer's notes."""
+        support = ", ".join(f"{label} ({dim} levels)" for label, dim in zip(self.labels, self.dims))
+        notes = [
+            f"Captured matrix terms on {support}; editing a device does not recompute them.",
+            "Assembly moves them into the chip frame without dropping operator bands, "
+            "whatever the chip approximation.",
+        ]
+        if self.channels:
+            notes.append("Retained Lindblad channels: " + ", ".join(c.name for c in self.channels) + ".")
+        if self.projection is not None:
+            notes.append("Operators of surviving components follow the captured coordinate map.")
+        return notes + list(self.notes)
 
     def validate_for(self, chip: Any) -> None:
         """Validate retained labels and dimensions against a chip.
@@ -248,7 +270,7 @@ class EffectiveTerms:
             array = np.asarray(value, dtype=complex)
             return {"real": array.real.tolist(), "imag": array.imag.tolist()}
 
-        return dict(
+        data = dict(
             projection=None if self.projection is None else self.projection.to_dict(),
             label=self.label,
             labels=list(self.labels),
@@ -256,6 +278,9 @@ class EffectiveTerms:
             hamiltonian=matrix(self.hamiltonian),
             channels=[dict(name=c.name, operator=matrix(c.operator), rate=float(c.rate)) for c in self.channels],
         )
+        if self.notes:
+            data["notes"] = list(self.notes)
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EffectiveTerms:
@@ -266,7 +291,8 @@ class EffectiveTerms:
         data : dict[str, Any]
             Payload produced by :meth:`to_dict`.
         """
-        if set(data) != {"label", "labels", "dims", "hamiltonian", "channels", "projection"}:
+        required = {"label", "labels", "dims", "hamiltonian", "channels", "projection"}
+        if not required <= set(data) <= required | {"notes"}:
             raise ValueError("Invalid serialized EffectiveTerms fields.")
 
         def matrix(value: dict[str, Any]) -> Any:
@@ -279,4 +305,5 @@ class EffectiveTerms:
             tuple(CollapseChannel(matrix(c["operator"]), c["rate"], c["name"]) for c in data["channels"]),
             data["label"],
             None if data["projection"] is None else OperatorProjection.from_dict(data["projection"]),
+            tuple(data.get("notes", ())),
         )

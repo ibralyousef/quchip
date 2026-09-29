@@ -396,7 +396,7 @@ class ChipAnalysis:
     Parameters
     ----------
     chip : Chip
-        Chip whose exact static lab-frame Hamiltonian is analyzed.
+        Chip whose static lab-frame Hamiltonian is analyzed under its approximation.
     """
 
     def __init__(self, chip: "Chip") -> None:
@@ -448,6 +448,7 @@ class ChipAnalysis:
         return (
             f"{type(chip.backend).__module__}.{type(chip.backend).__qualname__}",
             chip.basis,
+            chip.approximation,
             tuple(component_fingerprint(device) for device in chip.devices),
             tuple(
                 (
@@ -482,6 +483,7 @@ class ChipAnalysis:
 
         result = _build_static_analysis_result(
             self._chip,
+            approximation=self._chip.approximation,
             _local_resolution=_local_resolution,
         )
         if not result._contains_tracer():
@@ -604,17 +606,18 @@ class ChipAnalysis:
             return self._ground_cache[1]
         chip = self._chip
         backend = chip.backend
-        # The all-band case reuses the static result and eigensystem cache used by dressed analysis.
-        retains_all = not approximation.filters_terms
+        # Reuse dressed analysis only when it describes the solve's approximation.
+        same_approximation = approximation == chip.approximation
         static = (
-            self.engine_result() if retains_all else _build_static_analysis_result(chip, approximation=approximation)
+            self.engine_result() if same_approximation
+            else _build_static_analysis_result(chip, approximation=approximation)
         )
         bare = _bare_state_from_bases(chip, {}, static.bases)
         traced = static._contains_tracer()
         ket = None
         if traced or not _is_eigenstate(bare, static, backend):
             values, vectors, _, labeling = (
-                self._compute_array_labeled(static) if retains_all else _labeled_eigensystem(static, backend)
+                self._compute_array_labeled(static) if same_approximation else _labeled_eigensystem(static, backend)
             )
             xp = backend.array_module
             index = labeling.indices[0]  # Label 0 is the all-ground product.

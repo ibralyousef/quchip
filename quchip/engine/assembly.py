@@ -31,7 +31,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from quchip.approximations import Approximation, Exact, RWA, require_approximation
+from quchip.approximations import Approximation, RWA, require_approximation
 from quchip.backend import _backend_context
 from quchip.backend.protocol import Backend, Operator
 from quchip.control.drive import BaseDrive, CouplingDrive
@@ -1801,7 +1801,7 @@ def build_engine_result(
 def _build_static_analysis_result(
     chip: "Chip",
     *,
-    approximation: Approximation = Exact(),
+    approximation: Approximation,
     _local_resolution: _SystemResolution | None = None,
 ) -> EngineResult:
     """Resolve the chip in the lab frame and retain only its static model."""

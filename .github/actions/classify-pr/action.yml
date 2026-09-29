@@ -3,7 +3,7 @@ description: Decide whether a change needs the full quchip test lanes.
 
 outputs:
   full_ci:
-    description: Whether the change touches code, tests, examples, packaging, tooling, or CI policy.
+    description: Whether the change touches code, tests, examples, packaging, tooling, or repository rules.
     value: ${{ steps.classify.outputs.full_ci }}
 
 runs:

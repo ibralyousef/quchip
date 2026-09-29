@@ -146,7 +146,6 @@ class Resonator(FockDevice):
     def physics_notes(self) -> list[str]:
         """Return declared harmonic-oscillator and dissipation assumptions."""
         notes = super().physics_notes()
-        notes.append("Linear harmonic oscillator (no Kerr, no cross-Kerr self-interaction)")
         if self.internal_quality_factor is not None:
             notes.append("Internal dissipation: photon loss at rate κ_internal = 2π·ω/Q_internal")
         return notes

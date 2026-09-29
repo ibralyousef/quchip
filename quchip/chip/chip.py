@@ -166,8 +166,8 @@ class Chip:
         - scalar-like — one shared reference frequency for all devices.
         - ``dict`` — per-device references keyed by label or device.
     approximation : Approximation
-        Engine strategy applied after the complete authored Hamiltonian is
-        assembled. Defaults to :class:`~quchip.approximations.RWA`.
+        Strategy for dressed analysis and solver assembly. Defaults to
+        :class:`~quchip.approximations.RWA`; use ``Exact()`` to retain every band.
     basis : {"native", "eigen"}
         Chip-wide local solver-basis policy. ``"native"`` preserves each
         device's authored coordinate basis; ``"eigen"`` transforms into its
@@ -238,6 +238,12 @@ class Chip:
             raise ValueError(
                 f"Coupling labels collide with device labels: {collision}. "
                 "Device and coupling labels share one namespace so control targets resolve unambiguously."
+            )
+        shadowed = [t.label for t in self._effective_terms if t.label in self._device_map or t.label in coupling_labels]
+        if shadowed:
+            raise ValueError(
+                f"Effective-term labels collide with device or coupling labels: {shadowed}. "
+                "They share one namespace so eliminate() resolves targets unambiguously."
             )
         self._coupling_map: dict[str, BaseCoupling] = {c.label: c for c in self._couplings}
         bath_duplicates = [lbl for lbl, n in Counter(b.label for b in baths or ()).items() if n > 1]
@@ -748,7 +754,7 @@ class Chip:
 
     @property
     def approximation(self) -> Approximation:
-        """Default engine approximation strategy."""
+        """Approximation for dressed analysis and default solver assembly."""
         return self._approximation
 
     @property
@@ -1409,9 +1415,10 @@ class Chip:
 
         Returns a dict keyed ``"chip"`` for the chip-level entry, and
         ``"<kind>:<label>"`` — ``kind`` one of ``"device"``, ``"coupling"``,
-        ``"drive"``, ``"bath"``, ``"port"`` — for every component, mapping to that
-        component's declared approximations: Hilbert truncation, model
-        regime, RWA status, noise-channel selection, and any other
+        ``"drive"``, ``"bath"``, ``"port"``, ``"network"``, ``"effective"`` —
+        for every component, mapping to that component's declared
+        approximations: Hilbert truncation, model regime, RWA status,
+        noise-channel selection, and any other
         non-obvious assumption the component explicitly declares. Keys are
         kind-qualified rather than bare labels because the label namespaces
         are *not* globally disjoint — a device, coupling, drive, and bath may
@@ -1446,6 +1453,8 @@ class Chip:
             notes[f"port:{port.label}"] = list(port.physics_notes())
         if self.port_network is not None:
             notes[f"network:{self.port_network.label}"] = list(self.port_network.physics_notes())
+        for terms in self.effective_terms:
+            notes[f"effective:{terms.label}"] = terms.physics_notes()
         return notes
 
     # ------------------------------------------------------------------
