@@ -49,7 +49,7 @@ print("first and last dressed f01 (GHz):", dressed_f01[[0, -1]])
 Output:
 
 ```text
-first and last dressed f01 (GHz): [4.89859099 5.09846968]
+first and last dressed f01 (GHz): [4.8988102  5.09868512]
 ```
 
 [Continue with spectra and parameter sweeps](statics-and-parameter-studies.md).
@@ -157,10 +157,10 @@ print("Jacobian:\n", jax.jacrev(residual)(theta))
 Output:
 
 ```text
-gradient: [-1.02871002e-01 -2.85237283e-06  6.02561564e-03]
+gradient: [-1.02434723e-01  8.49096110e-07  5.10899915e-03]
 Jacobian:
- [[ 9.99395008e-01  3.62188602e-05 -5.86342171e-02]
- [-1.29839799e-04  5.10942405e-04 -5.70796457e-03]]
+ [[ 9.99376169e-01  0.00000000e+00 -4.99376169e-02]
+ [-1.30585777e-04  4.92846075e-04 -5.53077679e-03]]
 ```
 
 [Continue with gradients and parameter fitting](differentiability.md).
