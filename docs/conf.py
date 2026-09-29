@@ -26,7 +26,7 @@ extensions = [
 ]
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "superpowers/**"]
+exclude_patterns = ["_build"]
 
 # -- Autodoc / autosummary ---------------------------------------------------
 

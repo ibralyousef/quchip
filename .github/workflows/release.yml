@@ -20,10 +20,7 @@ jobs:
             echo "::error::Tag ${GITHUB_REF_NAME} does not match the built package version."
             exit 1
           fi
-          if [[ ! -s "RELEASE_NOTES_${version}.md" ]]; then
-            echo "::error::Missing release notes for ${GITHUB_REF_NAME}."
-            exit 1
-          fi
+          python3 tools/release_notes.py "$version" > "$RUNNER_TEMP/release-notes.md"
       - name: Check package metadata
         run: uvx twine check dist/*
       - uses: actions/upload-artifact@v4
@@ -61,6 +58,7 @@ jobs:
             exit 0
           fi
           version="${GITHUB_REF_NAME#v}"
+          python3 tools/release_notes.py "$version" > "$RUNNER_TEMP/release-notes.md"
           gh release create "$GITHUB_REF_NAME" --verify-tag \
             --title "quchip ${version}" \
-            --notes-file "RELEASE_NOTES_${version}.md"
+            --notes-file "$RUNNER_TEMP/release-notes.md"

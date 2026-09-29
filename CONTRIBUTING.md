@@ -73,26 +73,27 @@ remain available for focused work. They do not promise a runtime budget.
 | Event | Checks |
 | --- | --- |
 | PR opened or updated | Lint/types, then separate `unit` and `e2e` runs on Python 3.11 and 3.12 |
-| `ready-to-merge` added to the current PR commit | `validation` on Python 3.11 |
+| PR marked ready for review, or updated while ready | `validation` on Python 3.11 |
 | Push to `main` | Relevant docs build/deployment; no repeated test or benchmark run |
 | Manual pre-merge run | `validation` on Python 3.11 |
 | Manual benchmark run | Full benchmark ladder against the selected comparison ref |
 | Weekly dependency canary | `unit` and `e2e` on Python 3.11 and 3.12 with fresh dependencies |
 
+Open new PRs as drafts (`gh pr create --draft`). Drafts run the fast checks;
+marking a PR ready for review starts validation. Further pushes while ready
+rerun validation for the updated commit. Converting back to draft cancels a
+running validation workflow.
+
 The required fast and pre-merge checks together cover the full suite without
-repeating the fast tests on Python 3.11. Re-add `ready-to-merge` after updating
-a PR; a label on an older commit does not approve the new one. Documentation
-and release metadata use lightweight validation. Source, tests, executable
-examples (including Markdown), tooling, and CI policy require the test lanes.
+repeating the fast tests on Python 3.11. Documentation, workflow changes, and
+release metadata use lightweight validation. A version-only edit to
+`quchip/__init__.py` is release metadata; other source changes, tests, executable
+examples (including Markdown), tooling, and repository rules require test lanes.
 An unreadable change list fails classification.
 
-Validation runs only for an explicit merge attempt or a manual pre-merge run;
-regular PR updates and scheduled dependency checks do not run it. Until the
-merge attempt, the required `pre-merge full suite` check fails before installing
-dependencies. That check name is retained for branch protection: its validation
-run completes the coverage supplied by the separate unit and E2E checks.
-Manual dispatch runs validation on the selected ref; use the PR label when
-requesting the required check for a PR.
+The required `pre-merge full suite` check skips validation for drafts and
+lightweight changes. Its name is retained for branch protection. Manual dispatch
+always runs validation on the selected ref; scheduled dependency checks do not.
 
 The `main` ruleset requires the PR branch to include current `main` before
 merging. Its configuration is recorded in
@@ -115,8 +116,8 @@ python -m mypy quchip tests/typing/external_declarative_models.py
 ```
 
 Run new or changed validation tests locally while developing the physics.
-Run the complete validation suite at merge readiness, through `ready-to-merge`
-or a manual pre-merge run, as described above.
+Run the complete validation suite at merge readiness by marking the PR ready
+for review, or through a manual pre-merge run, as described above.
 
 Ruff uses a 120-character line limit. Public API docstrings use NumPy-style sections and imperative summaries ending with periods. Every test has a one-line docstring stating the invariant under test.
 
@@ -172,6 +173,14 @@ Read [PHYSICS.md](PHYSICS.md) before changing Hamiltonians, frames, approximatio
 Keep pull requests small and focused. Explain the physical or user-visible change, include tests for changed behavior, and update the relevant documentation.
 
 Open an issue before starting a large change or adding a device, coupling, drive, envelope, or noise model. Include the model Hamiltonian, assumptions, intended use, and a reference when available so the scope can be agreed before implementation.
+
+## Releases
+
+Keep release notes in `CHANGELOG.md` under `## [version] - YYYY-MM-DD`.
+Before tagging, move the changes from `Unreleased` into the versioned section
+and run `python tools/release_notes.py <version>` to inspect the release body.
+The documentation includes the changelog, and the tag workflow uses that same
+section for the GitHub release after publishing to PyPI.
 
 ## Policies
 
