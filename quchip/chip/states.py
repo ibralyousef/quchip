@@ -12,6 +12,7 @@ from math import prod
 from typing import TYPE_CHECKING, Any, Mapping
 
 from quchip.backend.protocol import State
+from quchip.utils.constants import TWO_PI
 from quchip.utils.jax_utils import array_namespace, maybe_concrete_scalar
 from quchip.utils.labeling import merge_labeled_values, resolve_label
 
@@ -305,13 +306,62 @@ def _bare_state_from_bases(
     return backend.tensor_states(*kets)
 
 
+def default_initial_state(chip: "Chip", engine_result: Any, start_time: Any) -> State:
+    """Return the default initial state for a solve.
+
+    Use the eigenstate of the undriven static lab-frame Hamiltonian retained by
+    ``engine_result.approximation`` that is assigned to the all-ground label.
+    Make its overlap with the bare product real and nonnegative, then express
+    it in the solve frame at ``start_time``. Return the bare product directly
+    when it is already an eigenstate.
+    """
+    from quchip.engine.assembly import _may_raise_ground
+
+    approximation = engine_result.approximation
+    moves = engine_result.slh.has_network_hamiltonian or _may_raise_ground(chip, approximation, engine_result.bases)
+    ground = chip.analysis._ground_ket(approximation) if moves else None
+    if ground is None:
+        return _bare_state_from_bases(chip, {}, engine_result.bases)
+    ket = _to_solve_frame(ground, chip, engine_result, start_time)
+    dims = list(engine_result.dims)
+    return chip.backend.from_array(ket.reshape(-1, 1), dims=[dims, [1] * len(dims)])
+
+
+def _to_solve_frame(ket: Any, chip: "Chip", engine_result: Any, start_time: Any) -> Any:
+    """Express a lab-frame ket in the solve's frame at ``start_time``.
+
+    The solver evolves ``U(t)† psi`` with ``U(t) = exp(-i 2π t Σ_i f_i n_i)``
+    in absolute time, where ``n_i`` is each device's energy-level index.
+    """
+    xp = chip.backend.array_module
+    frequencies = engine_result.resolved_frame.frequencies
+    tensor = ket.reshape(tuple(engine_result.dims))
+    for axis, device in enumerate(chip.devices):
+        angle = TWO_PI * start_time * frequencies.get(device.label, 0.0)
+        if maybe_concrete_scalar(angle) == 0.0:
+            continue
+        record = engine_result.bases[device.label]
+        phases = xp.exp(1j * xp.asarray(angle) * xp.arange(record.resolved_dim))
+        transform = record.energy_to_solver()
+        if transform is None:
+            local = xp.diag(phases)
+        else:
+            transform = xp.asarray(transform)
+            local = (transform * phases) @ xp.conj(transform).T
+        tensor = xp.moveaxis(xp.tensordot(local, tensor, axes=([1], [axis])), 0, axis)
+    return tensor.reshape(-1)
+
+
 def materialize_state_spec(
     chip: "Chip",
     state_spec: Any,
     bases: Mapping[str, Any],
 ) -> State:
-    """Materialize one authored state specification in the engine's solver basis."""
-    if state_spec is None or isinstance(state_spec, (Mapping, str)):
+    """Materialize one authored state specification in the engine's solver basis.
+
+    An omitted state is :func:`default_initial_state`, which needs the solve's engine result.
+    """
+    if isinstance(state_spec, (Mapping, str)):
         resolved = normalize_device_state_mapping(chip, state_spec, {})
         return _bare_state_from_bases(chip, resolved, bases)
 

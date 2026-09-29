@@ -11,7 +11,7 @@ jnp = jax.numpy
 from quchip import Chip, Resonator  # noqa: E402
 from quchip.chip.couplings import Capacitive  # noqa: E402
 from quchip.devices.transmon.duffing import DuffingTransmon  # noqa: E402
-from quchip.engine.basis import _differentiable_eigenpairs  # noqa: E402
+from quchip.engine.basis import _differentiable_eigenpairs, _differentiable_eigenvector  # noqa: E402
 
 
 def _dispersive_chip() -> Chip:
@@ -63,6 +63,22 @@ def test_eigenvector_tangent_is_orthogonal_to_the_eigenvector() -> None:
     (_, vectors), (_, dvectors) = jax.jvp(lambda m: _differentiable_eigenpairs(m, 3), (matrix,), (direction,))
     connection = jnp.diagonal(jnp.conj(vectors).T @ dvectors)
     np.testing.assert_allclose(np.asarray(connection), 0.0, atol=1e-10)
+
+
+def test_selected_eigenvector_derivative_is_exact_beside_a_tie() -> None:
+    """One column's derivative matches the analytic 2x2 result while two other levels are exactly tied."""
+
+    def ground_weight(coupling):
+        # Levels 2 and 3 stay exactly degenerate, where differentiating eigh itself gives NaN.
+        matrix = jnp.diag(jnp.array([0.0, 1.0, 2.0, 2.0], dtype=complex)).at[0, 1].set(coupling).at[1, 0].set(coupling)
+        values, vectors = jnp.linalg.eigh(matrix)
+        vector = _differentiable_eigenvector(matrix, values[0], values, vectors, vectors[:, 0])
+        return jnp.abs(vector[0]) ** 2
+
+    coupling = 0.1
+    # The block [[0, g], [g, 1]] gives |<0|ground>|² = (1 + (1 + 4g²)^(-1/2)) / 2.
+    exact = -2 * coupling / (1 + 4 * coupling**2) ** 1.5
+    assert float(jax.grad(ground_weight)(coupling)) == pytest.approx(exact, rel=1e-12)
 
 
 @pytest.mark.parametrize("origin", [-1e8, 1e8])
