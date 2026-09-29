@@ -61,9 +61,10 @@ def test_default_start_is_ground_of_simulated_hamiltonian(approximation, couplin
     """The default start is chip.state's dressed ground when retained bands move |00>, else the bare product."""
     chip, q, r = _pair(0.2, approximation=approximation, coupling=coupling)
     result = QuantumSequence(chip).simulate(tlist=np.linspace(0.0, 50.0, 101))
-    # chip.state() always dresses the full lab-frame Hamiltonian.
-    ground = chip.state({q: 0, r: 0}) if dressed else chip.bare_state({q: 0, r: 0})
+    ground = chip.state({q: 0, r: 0})
     assert _start_fidelity(result, ground) == pytest.approx(1.0, abs=_ROUNDOFF)
+    if not dressed:
+        assert _start_fidelity(result, chip.bare_state({q: 0, r: 0})) == pytest.approx(1.0, abs=_ROUNDOFF)
     # Each integrator step applies a function of the constant lab-frame generator, so an
     # eigenstate keeps its populations up to its norm; a bare start under Exact moves
     # P(q=0) by about 1e-3, a few times (g/Σ)² ≈ 3e-4.
@@ -132,16 +133,18 @@ def test_partitioned_default_start_matches_joint_ground():
 
 
 def test_retained_effective_terms_dress_the_rwa_default_start():
-    """After exact coupler elimination, the RWA default start is stationary under the retained effective terms."""
+    """Explicitly retained counter-rotating bands dress the default start after exact coupler elimination."""
     qubits = [
         DuffingTransmon(freq=_QUBIT + 0.13 * i, anharmonicity=_ANHARMONICITY, levels=3, label=f"q{i}")
         for i in range(2)
     ]
     coupler = DuffingTransmon(freq=6.5, anharmonicity=-0.2, levels=3, label="cp")
-    chip = Chip([*qubits, coupler], couplings=[Capacitive(q, coupler, g=0.1) for q in qubits], approximation=RWA())
+    chip = Chip([*qubits, coupler], couplings=[Capacitive(q, coupler, g=0.1) for q in qubits],
+                approximation=_ALL_CAPACITIVE_BANDS)
     reduced = eliminate(chip, coupler, method="exact").chip
     result = QuantumSequence(reduced).simulate(tlist=np.linspace(0.0, 50.0, 101))
     # The effective terms couple |00> to two-excitation states by about 5 MHz, so a bare start drifts by about 1e-6.
+    assert _start_fidelity(result, reduced.bare_state()) < 1 - 1e-8
     assert _drift(result, reduced.devices[0]) < 1e-10
 
 

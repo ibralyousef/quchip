@@ -21,6 +21,7 @@ from quchip import (
     EffectiveTerms,
     Exact,
     Resonator,
+    RWA,
     eliminate,
 )
 
@@ -128,17 +129,20 @@ def test_exact_reduction_diagonalizes_the_terms_and_keeps_the_spectrum():
     assert "retained_junctions : q (8), r (4)" in reduced.describe()
 
 
-def test_exact_reduction_keeps_other_edges_authored_and_the_spectrum():
+@pytest.mark.parametrize("approximation", [RWA(), Exact()])
+def test_exact_reduction_keeps_other_edges_authored_and_the_spectrum(approximation):
     """A spectator edge keeps its authored strength; the retained correction carries its rotated part."""
     chip = _black_box((6, 3), extra_devices=[Resonator(freq=6.1, levels=3, label="s")])
     edge = Capacitive(chip["r"], chip["s"], g=0.03, label="rs")
-    chip = Chip(chip.devices, [edge], effective_terms=chip.effective_terms, approximation=Exact())
+    chip = Chip(chip.devices, [edge], effective_terms=chip.effective_terms, approximation=approximation)
 
     reduced = eliminate(chip, "junctions", method="exact").chip
 
+    assert reduced.approximation == approximation
     assert [coupling.label for coupling in reduced.couplings] == ["rs"]
     assert reduced.coupling_map["rs"].g == pytest.approx(0.03)
-    np.testing.assert_allclose(_spectrum(reduced, 30), _spectrum(chip, 30), atol=1e-10)
+    np.testing.assert_allclose(_spectrum(reduced, 30), _spectrum(chip, 30), rtol=0, atol=1e-10)
+    np.testing.assert_allclose(reduced.dress().eigenvalues, chip.dress().eigenvalues, rtol=0, atol=1e-10)
 
 
 @pytest.mark.validation

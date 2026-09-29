@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any
 import jax.numpy as jnp
 import numpy as np
 
-from quchip.approximations import Exact
 from quchip.chip.sw import bare_hamiltonian
 from quchip.chip.transformations.coordinate_change import (
     embed_on_labels, isolated_hamiltonian, labeled_eigenvectors, retain_coordinate_change,
@@ -34,8 +33,8 @@ def reduce_effective_terms(chip: "Chip", target: Any, method: str) -> Eliminatio
     Hamiltonians of the devices they act on; dressed states take the bare
     label of largest overlap. Its action on the full chip is retained,
     including couplings and other effective terms, so dressed queries on the
-    reduced chip, which read the all-band static model, return the source
-    spectrum. Only ``method='exact'`` is implemented: a second-order expansion
+    reduced chip return the source spectrum at the chip's approximation.
+    Only ``method='exact'`` is implemented: a second-order expansion
     is not reliable for a strong nonlinearity such as a junction cosine. Exact
     derivatives require a locally stable dressed assignment and nondegenerate
     eigenpairs.
@@ -47,7 +46,7 @@ def reduce_effective_terms(chip: "Chip", target: Any, method: str) -> Eliminatio
         )
     terms_label = resolve_label(target)
     selected = next(terms for terms in chip.effective_terms if terms.label == terms_label)
-    approximation = Exact()
+    approximation = chip.approximation
     source = chip.resolve(frame="lab", approximation=approximation)
     h, labels, dims = bare_hamiltonian(chip, approximation=approximation)
     group_labels = tuple(label for label in labels if label in selected.labels)

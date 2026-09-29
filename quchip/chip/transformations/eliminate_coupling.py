@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
 import jax.numpy as jnp
 from jax.scipy.linalg import expm
 
-from quchip.approximations import Exact
 from quchip.chip.sw import bare_hamiltonian, interaction_generator
 from quchip.chip.transformations.coordinate_change import (
     embed_on_labels, isolated_hamiltonian, labeled_eigenvectors, product_energies, retain_coordinate_change,
@@ -70,7 +69,7 @@ def reduce_coupling(chip: "Chip", target: Any, method: str) -> EliminationResult
         )
 
     survivor_lines, retarget_plan = plan_stranded_lines(equipment, classify, result_kind)
-    approximation = Exact() if method == "exact" else chip.approximation
+    approximation = chip.approximation
     source = chip.resolve(frame="lab", approximation=approximation)
     h, labels, dims = bare_hamiltonian(chip, approximation=approximation)
     cloned = chip.clone()
