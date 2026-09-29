@@ -51,7 +51,7 @@ from typing import Literal
 import numpy as np
 from scipy.signal import find_peaks
 from quchip import (
-    RWA, Chip, CouplingModel, CustomSpace, DeviceDrive, DeviceModel, LocalOps,
+    RWA, Exact, Chip, CouplingModel, CustomSpace, DeviceDrive, DeviceModel, LocalOps,
     QuantumSequence, Scalar, SpectrumSweep, Square, Sweep, parameter, setting,
 )
 
@@ -410,7 +410,8 @@ the signal a Ramsey magnetometer records.
 
 ## Check the approximations
 
-Restore the transverse hyperfine term and compare the six resonances:
+Restore the transverse hyperfine term and compare the six resonances. Use
+`Exact()` here to retain the transverse bands in the static analysis:
 
 ```python
 class FullHyperfine(CouplingModel):
@@ -425,7 +426,8 @@ class FullHyperfine(CouplingModel):
 
 
 full_hyperfine = Chip([nv, nitrogen],
-                      [FullHyperfine(nv, nitrogen, A=-0.002162, A_perp=-0.00270, label="hf")])
+                      [FullHyperfine(nv, nitrogen, A=-0.002162, A_perp=-0.00270, label="hf")],
+                      approximation=Exact())
 shift = max(
     abs(full_hyperfine.transition_frequency(nv, 0, level, when={nitrogen: m})
         - chip.transition_frequency(nv, 0, level, when={nitrogen: m}))
