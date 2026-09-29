@@ -27,7 +27,8 @@ This file records notable user-visible changes to quchip.
   and existing lowering, raising and number hooks for T1/T2 channels.
   Elimination supports non-capacitive mediated exchange, derives decay
   summaries from declared channels, and accepts custom harmonic Fock boundaries.
-  A worked atom–cavity guide covers driving, reflection, reduction and fitting.
+  An NV-centre guide models a spin-1 defect and its ¹⁴N nucleus through
+  field-dependent resonances, pulsed ODMR and Ramsey fringes.
 - `effective_hamiltonian` and `effective_hamiltonian_between_states` index the
   resolved product basis, so eigen-projected charge-basis devices no longer
   raise a singular-Gram-matrix error. Traced dressed states and `describe()`
