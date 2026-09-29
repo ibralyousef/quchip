@@ -29,3 +29,9 @@ examples/inspection/
 docs/_build/
 docs/generated/
 docs/.wrangler/
+
+# Local planning and release drafts
+/GUIDES_PLAN.md
+/EXAMPLES_PLAN.md
+/docs/superpowers/
+/RELEASE_NOTES_*.md

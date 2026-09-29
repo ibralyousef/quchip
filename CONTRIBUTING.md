@@ -174,6 +174,14 @@ Keep pull requests small and focused. Explain the physical or user-visible chang
 
 Open an issue before starting a large change or adding a device, coupling, drive, envelope, or noise model. Include the model Hamiltonian, assumptions, intended use, and a reference when available so the scope can be agreed before implementation.
 
+## Releases
+
+Keep release notes in `CHANGELOG.md` under `## [version] - YYYY-MM-DD`.
+Before tagging, move the changes from `Unreleased` into the versioned section
+and run `python tools/release_notes.py <version>` to inspect the release body.
+The documentation includes the changelog, and the tag workflow uses that same
+section for the GitHub release after publishing to PyPI.
+
 ## Policies
 
 - There is no CLA or DCO. By opening a pull request you agree that your contribution is provided under the project's license.
