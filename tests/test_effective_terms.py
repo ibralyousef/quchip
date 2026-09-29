@@ -109,3 +109,23 @@ def test_effective_terms_validate_loaded_shapes_and_graph_membership():
     channel = CollapseChannel(np.eye(2), float("nan"), "bad")
     with pytest.raises(ValueError, match="must be finite"):
         EffectiveTerms(("a",), (2,), np.zeros((2, 2)), (channel,))
+
+
+def test_effective_terms_notes_follow_the_derived_notes_and_survive_serialization():
+    """Producer notes come last in physics_notes() and round-trip; payloads without notes still load."""
+    source = _terms()
+    terms = EffectiveTerms(source.labels, source.dims, source.hamiltonian, source.channels, "retained",
+                           notes=("Second-order correction.",))
+    chip = Chip(_devices(), effective_terms=[terms])
+    loaded = Chip.from_dict(json.loads(json.dumps(chip.to_dict())))
+    data = terms.to_dict()
+    del data["notes"]
+
+    assert terms.physics_notes()[-1] == "Second-order correction."
+    assert loaded.effective_terms[0].notes == ("Second-order correction.",)
+    assert "notes" not in _terms().to_dict()
+    assert EffectiveTerms.from_dict(data).notes == ()
+    with pytest.raises(ValueError, match="Invalid serialized EffectiveTerms fields"):
+        EffectiveTerms.from_dict({**data, "comment": "unknown"})
+    with pytest.raises(ValueError, match="nonempty strings"):
+        EffectiveTerms(("a",), (2,), np.zeros((2, 2)), notes=("",))

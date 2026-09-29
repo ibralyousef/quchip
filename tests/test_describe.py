@@ -10,10 +10,13 @@ from quchip.approximations import RWA
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from quchip.chip.baths import Bath
 from quchip.chip.chip import Chip
 from quchip.chip.couplings import Capacitive
+from quchip.chip.effective import EffectiveTerms
+from quchip.declarative.dissipation import CollapseChannel
 from quchip.control.drive import ChargeDrive
 from quchip.control.envelopes import Gaussian
 from quchip.control.sequence import QuantumSequence
@@ -133,3 +136,31 @@ def test_chip_physics_notes_keys_are_collision_proof_across_kinds() -> None:
     assert notes["drive:chip"] != notes["bath:chip"]
     # The synthetic chip-level entry is never shadowed by a component labeled "chip".
     assert notes["chip"]
+
+
+def test_effective_terms_have_physics_notes_and_a_describe_section() -> None:
+    """Effective terms appear as 'effective:<label>' and in describe(), with the producer's notes last."""
+    device = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
+    jump = np.diag(np.sqrt([1.0, 2.0]), 1)
+    terms = EffectiveTerms(("q",), (3,), np.diag([0.0, 0.001, 0.003]),
+                           channels=(CollapseChannel(jump, 1e-3, "loss"),), label="shift",
+                           notes=("Fitted to a measured spectrum.",))
+    chip = Chip([device], effective_terms=[terms])
+
+    notes = chip.physics_notes()["effective:shift"]
+    text = chip.describe()
+
+    assert notes[0] == "Captured matrix terms on q (3 levels); editing a device does not recompute them."
+    assert "Retained Lindblad channels: loss." in notes
+    assert notes[-1] == "Fitted to a measured spectrum."
+    assert "Effective terms (1)" in text
+    assert "shift : q (3)" in text
+    assert "channels: loss" in text
+
+
+def test_resonator_states_its_linear_model_once() -> None:
+    """The declared harmonic approximation is not repeated by the resonator's own notes."""
+    notes = Resonator(freq=7.0, levels=5, label="r", internal_quality_factor=1e4).physics_notes()
+
+    assert sum("Linear harmonic oscillator" in note for note in notes) == 1
+    assert any(note.startswith("Internal dissipation") for note in notes)

@@ -111,6 +111,15 @@ def describe_chip(chip: "Chip") -> str:
             if detail:
                 lines.append(f"    {detail}")
 
+    if chip.effective_terms:
+        lines.append("")
+        lines += _section(f"Effective terms ({len(chip.effective_terms)})")
+        for terms in chip.effective_terms:
+            support = ", ".join(f"{label} ({dim})" for label, dim in zip(terms.labels, terms.dims))
+            lines.append(f"{terms.label} : {support}")
+            if terms.channels:
+                lines.append(f"    channels: {', '.join(channel.name for channel in terms.channels)}")
+
     equipment = chip.control_equipment
     if equipment is not None and equipment.lines:
         lines.append("")

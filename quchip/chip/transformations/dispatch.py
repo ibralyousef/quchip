@@ -9,16 +9,18 @@ transformation result exposes;
 :class:`~quchip.inverse_design.types.FitADressResult` already satisfies it with
 no changes.
 
-``eliminate`` removes a mode or edge and retains its computed correction in
-``EffectiveTerms``. Surviving authored parameters stay unchanged. The result
-reports the approximation, diagnostics and captured coordinate map.
+``eliminate`` removes a mode or edge, or diagonalizes effective terms, and
+retains its computed correction in ``EffectiveTerms``. Surviving authored
+parameters stay unchanged. The result reports the approximation, diagnostics
+and captured coordinate map.
 
 Each target *kind* is an :class:`EliminationTarget` — a pair of ``(claims,
 reduce)`` closures registered in :data:`_ELIMINATION_TARGETS`. The dispatcher
 scans the registry, hands the target to the first kind that claims it, and
 falls through to a clear error otherwise. The reductions themselves live in the
 sibling handler modules (:mod:`quchip.chip.transformations.eliminate_device`,
-:mod:`quchip.chip.transformations.eliminate_coupling`), which register at
+:mod:`quchip.chip.transformations.eliminate_coupling`,
+:mod:`quchip.chip.transformations.eliminate_effective`), which register at
 import time; the generic P/Q partitioning physics lives in
 :mod:`quchip.chip.sw`. This module owns only the registry and the dispatch, so
 a new reducible target kind registers here without touching either.
@@ -50,13 +52,13 @@ class EliminationTarget:
     Attributes
     ----------
     kind
-        A short label for the target kind (``"device"``, ``"coupling"``),
-        for diagnostics.
+        A short label for the target kind (``"device"``, ``"coupling"``,
+        ``"effective terms"``), for diagnostics.
     claims
         ``claims(chip, target) -> bool``: whether this kind owns ``target`` on
-        ``chip`` (e.g. the label names a device, or a coupling). The device and
-        coupling namespaces are disjoint by construction, so at most one kind
-        claims any target.
+        ``chip`` (e.g. the label names a device, a coupling or effective
+        terms). Chip rejects colliding device, coupling and effective-term
+        labels, so at most one shipped kind claims any target.
     reduce
         ``reduce(chip, target, method) -> EliminationResult``: performs the
         reduction. ``method`` is the already-validated route string (a handler
@@ -83,12 +85,12 @@ def register_elimination_target(target: EliminationTarget) -> None:
 
 
 def eliminate(chip: "Chip", target: Any, *, method: str = "sw") -> EliminationResult:
-    """Reduce a far-detuned device or an edge coupling, returning a reduced chip.
+    """Reduce a far-detuned device, an edge coupling or effective terms, returning a reduced chip.
 
-    ``target`` is resolved against the chip's device and coupling namespaces
-    (disjoint by construction — :class:`~quchip.chip.chip.Chip` rejects a
-    coupling label that collides with a device label) and dispatches to one
-    of two model reductions:
+    ``target`` is resolved against the chip's device, coupling and
+    effective-term labels (disjoint by construction —
+    :class:`~quchip.chip.chip.Chip` rejects colliding labels) and dispatches
+    to one of three model reductions:
 
     - **Device target** — remove a far-detuned mode while retaining its
       computed Hamiltonian correction, transformed channels and interpretation
@@ -106,13 +108,21 @@ def eliminate(chip: "Chip", target: Any, *, method: str = "sw") -> EliminationRe
       route retains a full unitary transformation; SW retains terms through
       second order. The correction preserves per-level shifts without folding
       them into endpoint frequencies or a uniform cross-Kerr coefficient.
+    - **Effective-terms target** — keep every device and edge and diagonalize
+      the selected :class:`~quchip.chip.effective.EffectiveTerms` exactly with
+      the local Hamiltonians of the devices they act on, for example the
+      junction cosine of an energy-participation chip. The rotation acts on
+      the entire Hamiltonian, and the correction keeps each level's shift, so
+      dressed queries on the reduced chip return the source spectrum. Only
+      ``method="exact"`` is implemented.
 
     Parameters
     ----------
     chip
         Source chip (never mutated).
     target
-        The device or coupling to eliminate — label string or object.
+        The device, coupling or effective terms to eliminate — label string or
+        object.
     method
         ``"sw"`` (default) retains second-order Schrieffer-Wolff terms using
         the chip's approximation. ``"exact"`` uses the unapproximated static
@@ -145,4 +155,6 @@ def eliminate(chip: "Chip", target: Any, *, method: str = "sw") -> EliminationRe
     for spec in _ELIMINATION_TARGETS:
         if spec.claims(chip, target):
             return spec.reduce(chip, target, method)
-    raise KeyError(f"'{resolve_label(target)}' is neither a device nor a coupling on chip '{chip.label}'.")
+    raise KeyError(
+        f"'{resolve_label(target)}' names no device, coupling or effective terms on chip '{chip.label}'."
+    )

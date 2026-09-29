@@ -51,6 +51,14 @@ def plan_stranded_lines(
     return survivor_lines, retarget_plan
 
 
+def inherited_notes(chip: Any) -> tuple[str, ...]:
+    """Return the producer notes of ``chip``'s effective terms, prefixed by their labels.
+
+    A reduction folds every earlier effective contribution into its own, so
+    the approximations those contributions state still apply to the result."""
+    return tuple(f"{terms.label}: {note}" for terms in chip.effective_terms for note in terms.notes)
+
+
 def rebuild_chip(
     source_chip: Any,
     *,
