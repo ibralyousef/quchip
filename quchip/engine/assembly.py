@@ -21,10 +21,11 @@ Gambetta et al., *PRA* 74, 042318 (2006); Magesan & Gambetta, *PRA* 101,
 
 from __future__ import annotations
 
+import itertools
 import warnings
 from dataclasses import dataclass, replace
 from math import prod
-from typing import TYPE_CHECKING, Any, Mapping, cast
+from typing import TYPE_CHECKING, Any, Callable, Mapping, cast
 
 import jax
 import jax.numpy as jnp
@@ -638,16 +639,35 @@ def _authored_bands(
 class _Interaction:
     label: str
     labels: tuple[str, ...]
-    expression: Any
+    expression: Callable[[], Any]
     retained: bool = False
 
 
 def _interaction_contributions(chip: "Chip"):
     for coupling in chip.couplings:
         yield _Interaction(coupling.label, (coupling.device_a_label, coupling.device_b_label),
-                           coupling.interaction_hamiltonian())
+                           coupling.interaction_hamiltonian)
     for terms in chip.effective_terms:
-        yield _Interaction(terms.label, terms.labels, terms.expression(), retained=True)
+        yield _Interaction(terms.label, terms.labels, terms.expression, retained=True)
+
+
+def _may_raise_ground(chip: "Chip", approximation: Approximation, bases: Mapping[str, BasisRecord]) -> bool:
+    """Return whether a retained interaction band can move the bare ground product.
+
+    Band weights are energy-basis column minus row on each endpoint, so a band
+    reaches that product only when every weight is nonpositive and at least
+    one is negative. Retained contributions bypass the approximation filter.
+    """
+    for contribution in _interaction_contributions(chip):
+        if contribution.retained:
+            return True
+        levels = (range(bases[label].resolved_dim) for label in contribution.labels)
+        if any(
+            any(raised) and approximation.keeps_operator_band(tuple(-level for level in raised))
+            for raised in itertools.product(*levels)
+        ):
+            return True
+    return False
 
 
 def coupling_band_records(chip: "Chip", resolution: _SystemResolution, backend: Backend) -> list[BandRecord]:
@@ -655,11 +675,12 @@ def coupling_band_records(chip: "Chip", resolution: _SystemResolution, backend: 
     records: list[BandRecord] = []
     for contribution in _interaction_contributions(chip):
         support = tuple(chip.device_index(label) for label in contribution.labels)
-        h_full = _project_on_support(chip, contribution.expression, support, resolution.bases, backend)
+        expression = contribution.expression()
+        h_full = _project_on_support(chip, expression, support, resolution.bases, backend)
         if _is_concrete_zero_array(backend.to_array(h_full)):
             continue
         bands = _authored_bands(
-            chip, contribution.expression, h_full, support, resolution.bases, backend, tag="coupling_local",
+            chip, expression, h_full, support, resolution.bases, backend, tag="coupling_local",
         )
         for charges, band in bands.items():
             records.append(BandRecord(contribution.labels, charges, _concrete_amplitude(band.values),
@@ -734,7 +755,7 @@ def _resolve_coupling_terms(
         support = tuple(label_to_index[label] for label in labels)
         frequencies = tuple(resolved_frame.frequencies.get(label, 0.0) for label in labels)
         filters_terms = approximation.filters_terms and not contribution.retained
-        authored = contribution.expression
+        authored = contribution.expression()
         h_full = _project_on_support(chip, authored, support, resolution.bases, backend)
         if _is_concrete_zero_array(backend.to_array(h_full)):
             continue
@@ -1780,6 +1801,7 @@ def build_engine_result(
 def _build_static_analysis_result(
     chip: "Chip",
     *,
+    approximation: Approximation = Exact(),
     _local_resolution: _SystemResolution | None = None,
 ) -> EngineResult:
     """Resolve the chip in the lab frame and retain only its static model."""
@@ -1793,7 +1815,7 @@ def _build_static_analysis_result(
         chip,
         [],
         resolved_frame=frame,
-        approximation=Exact(),
+        approximation=approximation,
         _local_resolution=_local_resolution,
     )
     metadata = {key: value for key, value in result.metadata.items() if key in {"frame", "spectral_bound_ghz"}}

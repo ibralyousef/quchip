@@ -39,7 +39,8 @@ class Approximation(ABC):
         Parameters
         ----------
         weights : tuple[int, ...]
-            Creation-minus-annihilation weight per endpoint.
+            Energy-basis weight ``column - row`` per endpoint; annihilation has
+            weight ``+1`` and creation has weight ``-1``.
         """
         del weights
         return True
@@ -116,7 +117,8 @@ class RWA(Approximation):
         Parameters
         ----------
         weights : tuple[int, ...]
-            Creation-minus-annihilation weight per endpoint.
+            Energy-basis weight ``column - row`` per endpoint; annihilation has
+            weight ``+1`` and creation has weight ``-1``.
         """
         if self.keep_bands is not None:
             return weights in self.keep_bands

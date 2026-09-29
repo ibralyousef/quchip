@@ -22,7 +22,7 @@ import numpy as np
 
 from quchip.approximations import Approximation
 from quchip.backend import BatchSolveError
-from quchip.chip.states import materialize_state_spec
+from quchip.chip.states import default_initial_state, materialize_state_spec
 from quchip.engine.ir import (
     ControlOp,
     EngineResult,
@@ -238,8 +238,9 @@ def build_solve_batch_from_results(
     All results must share the same static term objects, the same number
     of dynamic terms, and matching operator payloads per slot (by identity
     or by canonical fingerprint — crosstalk rebuilds equal-by-value
-    operators on every instantiation). ``initial_states=None`` constructs
-    each element's default ground state in its resolved basis.
+    operators on every instantiation). ``initial_states=None`` gives every
+    point one shared default start; individual ``None`` entries reuse it.
+    The batch shares one static Hamiltonian, frame, and start time.
     """
     if not engine_results:
         raise ValueError("build_solve_batch_from_results requires at least one engine result")
@@ -254,8 +255,13 @@ def build_solve_batch_from_results(
         raise ValueError(
             f"initial_states length {len(initial_states)} does not match batch_size {batch_size}"
         )
+    # Materialize the shared default only when at least one point omits its state.
+    ground = (
+        default_initial_state(context.chip, ref, context.tlist[0])
+        if any(state_spec is None for state_spec in initial_states) else None
+    )
     states = tuple(
-        materialize_state_spec(context.chip, state_spec, result.bases)
+        ground if state_spec is None else materialize_state_spec(context.chip, state_spec, result.bases)
         for state_spec, result in zip(initial_states, engine_results)
     )
 
@@ -333,7 +339,11 @@ def build_solve_problem(
     problem = SolveProblem(
         chip=context.chip,
         engine_result=engine_result,
-        initial_state=materialize_state_spec(context.chip, initial_state, engine_result.bases),
+        initial_state=(
+            default_initial_state(context.chip, engine_result, context.tlist[0])
+            if initial_state is None
+            else materialize_state_spec(context.chip, initial_state, engine_result.bases)
+        ),
         tlist=context.tlist,
         e_ops=e_ops_solver,
         e_ops_meta=e_ops_meta,

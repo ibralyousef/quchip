@@ -4,6 +4,14 @@ This file records notable user-visible changes to quchip.
 
 ## Unreleased
 
+- Solves with `initial_state=None` now use the all-ground-labeled eigenstate of
+  the undriven static lab-frame Hamiltonian retained by the solve's
+  approximation. The default RWA with ordinary couplings remains a bare
+  product. Before the frame transform, `Exact()` selects the same physical
+  state as `chip.state()` for the all-ground label; retained bands, effective
+  terms, or network Hamiltonian terms that couple the vacuum can dress an RWA
+  start. Rotating-frame solves apply `U(tlist[0])†`. Pass `chip.bare_state()`
+  explicitly to keep the previous bare start.
 - Per-call backend overrides no longer re-project QuTiP `Qobj` or dynamiqs
   `QArray` initial states returned by `chip.state()`, `chip.bare_state()`, or
   `chip.superposition()` in `simulate()` or `simulate_batch()`. Hand-built

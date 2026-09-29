@@ -49,15 +49,44 @@ def _eigenpairs_jvp(
     (dmatrix,) = tangents
     values, vectors = jnp.linalg.eigh(matrix)
     retained = vectors[:, :levels]
+    overlaps, dvectors = _masked_connection(values, vectors, dmatrix, values[:levels], retained)
+    dvalues = jnp.real(jnp.diagonal(overlaps))
+    return (values[:levels], retained), (dvalues, dvectors)
+
+
+def _masked_connection(values: Any, vectors: Any, dmatrix: Any, energies: Any, columns: Any) -> tuple[Any, Any]:
+    """Return ``<v_j|dH|columns>`` and the masked first-order change of ``columns``.
+
+    ``(values, vectors)`` is the full eigensystem. Each column in ``columns``
+    is its eigenvector at the corresponding entry in ``energies``.
+    """
     hermitian = 0.5 * (dmatrix + dmatrix.conj().T)
-    overlaps = vectors.conj().T @ hermitian @ retained
-    gaps = values[None, :levels] - values[:, None]
+    overlaps = vectors.conj().T @ hermitian @ columns
+    gaps = energies[None, :] - values[:, None]
     tolerance = 1e-9 * (values[-1] - values[0])
     resolved = jnp.abs(gaps) > tolerance
     inverse_gaps = jnp.where(resolved, 1.0 / jnp.where(resolved, gaps, 1.0), 0.0)
-    dvalues = jnp.real(jnp.diagonal(overlaps))
-    dvectors = vectors @ (inverse_gaps * overlaps)
-    return (values[:levels], retained), (dvalues, dvectors)
+    return overlaps, vectors @ (inverse_gaps * overlaps)
+
+
+@jax.custom_jvp
+def _differentiable_eigenvector(matrix: Any, energy: Any, values: Any, vectors: Any, vector: Any) -> Any:
+    """Return ``vector``, the eigenvector of ``matrix`` at ``energy`` in ``(values, vectors)``.
+
+    The derivative applies the masked rule of :func:`_differentiable_eigenpairs`
+    to this column and depends on ``dH`` alone. It reuses the forward
+    eigensystem, so unrelated eigenvalue ties leave the derivative finite
+    instead of invoking JAX's full ``eigh`` derivative.
+    """
+    del matrix, energy, values, vectors
+    return vector
+
+
+@_differentiable_eigenvector.defjvp
+def _eigenvector_jvp(primals: tuple[Any, ...], tangents: tuple[Any, ...]) -> tuple[Any, Any]:
+    _, energy, values, vectors, vector = primals
+    _, dvectors = _masked_connection(values, vectors, tangents[0], jnp.reshape(energy, (1,)), vector[:, None])
+    return vector, dvectors[:, 0]
 
 
 def _lowest_eigenpairs(matrix: Any, levels: int) -> tuple[Any, Any]:
