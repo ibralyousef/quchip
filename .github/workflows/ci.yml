@@ -3,9 +3,8 @@ name: ci
 # Installs are locked with ci-constraints-<python>.txt so runs are
 # reproducible; regenerate with tools/compile_ci_constraints.sh. The weekly
 # fresh-resolution check lives in deps-canary.yml.
-# Documentation, Markdown metadata, and release-workflow-only pull requests
-# keep the required lint check lightweight and skip the physics test jobs.
-# Changes to this policy or its workflows always run the full lanes.
+# Documentation, release metadata, and workflow-only pull requests use
+# lightweight checks and skip the scientific test jobs.
 
 on:
   pull_request:
@@ -49,13 +48,14 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - name: Validate documentation, metadata, or release workflow
+      - name: Validate documentation, metadata, or workflows
         if: ${{ needs.changes.outputs.full_ci != 'true' }}
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           git diff --check "$BASE_SHA" "$HEAD_SHA"
+          bash -n .github/actions/classify-pr/classify.sh
           ruby -e 'require "yaml"; Dir[".github/**/*.{yml,yaml}"].sort.each { |file| Psych.parse_file(file) }'
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/repo" \
