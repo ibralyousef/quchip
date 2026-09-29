@@ -68,7 +68,80 @@ This file records notable user-visible changes to quchip.
 - Omitted stochastic storage uses native defaults. Native run keywords go in
   `run_args`; integrator options remain in `options`.
 
-## [0.3.0] - 2026-09-06
+## [0.3.2] - 2026-09-10 <a id="quchip-0-3-2"></a>
+
+Changes since [v0.3.1](https://github.com/quchip/quchip/compare/v0.3.1...v0.3.2).
+
+### Network noise API
+
+- Passive network components now use `thermal_occupation`; replace previous
+  `occupation` and `loss_occupation` arguments and saved parameter keys.
+- Amplifiers require explicit `added_noise`. Temperature, noise-figure, and
+  `noise_frequency` constructor arguments have been removed; convert these
+  inputs to noise quanta before declaring components. See the
+  [network-noise migration guidance](docs/cookbook.md#declare-network-noise).
+
+### API documentation
+
+- Added parameter options, defaults, units, `None` behavior, result shapes,
+  and physics references across public constructors and methods.
+- Reuse inherited backend contracts and suppress empty type-only parameter
+  tables. A coverage check detects missing descriptions and stale names.
+- Serve README images from the documentation site for consistent rendering.
+
+### Development and releases
+
+- PR fast and pre-merge test selections cover the suite without repeating the
+  fast tests on Python 3.11. Merges require checks against current `main`.
+- Remove post-merge test reruns, make benchmarks manual, and fail change
+  classification when Git cannot read the compared revisions.
+- Tagged releases verify package metadata and release notes, publish to PyPI,
+  and create the corresponding GitHub Release after publication.
+
+## [0.3.1] - 2026-09-08 <a id="quchip-0-3-1"></a>
+
+Changes since [v0.3.0](https://github.com/quchip/quchip/compare/v0.3.0...v0.3.1).
+
+### Measurements and fridge noise
+
+- `VNA.measure()` captures the driven steady-state response, internal mode amplitudes and photon numbers, and output noise spectra. Receiver bandwidth, integration time, calibration and repeated IQ sampling reuse those results without another physical solve.
+- Fridge noise propagates through declared attenuators, isolators, circulators, filters and amplifiers. Measurements report output noise density and contributions by source, including cross-output IQ covariance.
+- `result.measure()` samples saved quantum states after either Schrödinger or master-equation evolution. Joint measurements preserve correlations and support assignment errors and calibrated conditional IQ distributions.
+- `result.iq_readout()` uses captured downstream wiring; `IQReadout.from_wiring()` uses a supplied wired model. Both transform supplied conditional coherent fields and accumulate receiver noise without requiring a readout pulse. These detector models do not infer IQ signals from qubit populations or add measurement backaction to the simulated evolution.
+
+### Documentation
+
+- Added section navigation and aligned page titles across headings, sidebars and the README.
+- Extended the fridge guide with steady-state versus sampled resonator responses and Rabi counts and IQ using the same wiring.
+- Moved the Purcell calculation into Focused studies, retaining its existing URL.
+- Shortened the cookbook to practical API choices and common pitfalls; example-authoring guidance now lives under Contribute.
+
+### Public names and compatibility
+
+Public names now distinguish bath occupation, jump rates and network ports:
+
+| Previous name | Preferred name |
+|---|---|
+| `thermal_population` | `thermal_occupation` |
+| `result.collapse_flux(...)` | `result.jump_rate(...)` |
+| `component.side(...)`, `block.side(...)` | `component.port(...)`, `block.port(...)` |
+| `network.exposure(...)`, `network.exposures` | `network.external_port(...)`, `network.external_ports` |
+| `FieldExposure`, `FieldSide` | `NetworkPort`, `ComponentPort` |
+
+The previous names remain compatibility aliases through 0.4 and are scheduled
+for removal in 0.5. Old thermal constructor arguments, parameter bindings,
+noise configurations and saved device dictionaries are accepted. Parameter
+discovery and new serialized dictionaries use `thermal_occupation` only;
+supplying both spellings in one update raises an error. The value is the bath's
+mean occupation, not an initial qubit population. Jump rates include absorption
+and dephasing channels and are not generally emitted photon fluxes.
+
+The new measurement results are named `StateMeasurement` and `StateSamples`
+for saved quantum states, and `VNAMeasurement`, `VNAMeasurementStatistics` and
+`VNAMeasurementSamples` for VNA calculations. `result.measure(...)` and
+`VNA.measure(...)` keep their existing call syntax. `fit_a_dress` is unchanged.
+
+## [0.3.0] - 2026-09-06 <a id="quchip-0-3-0"></a>
 
 ### Fixes
 
@@ -124,9 +197,15 @@ This file records notable user-visible changes to quchip.
 
 ### Breaking changes and migration
 
-- Removed `SimulationResult.population_array()` and `overlap_array()` without aliases. Use `population()` and `overlap()`; they return NumPy arrays with QuTiP and JAX arrays with dynamiqs.
-- Reduction entries now name their resulting edge with `effective_params[<edge>]["coupling"]` instead of `"folded_into"`. Update code that reads this metadata.
-- `chip.parameters` now includes unset optional device fields such as `T1` and `T2` as `None`. Filter these entries before numerical conversion; passing them unchanged to `with_params()` remains supported.
+- Labels are immutable; create a replacement component to rename one. Replace `device.dressed_freq` and chip-bound `device.drive_freq` with `chip.freq(device)`.
+- Local state indices, populations, and Pauli operators use isolated energy levels; excited-state Z is −1.
+- Replace `population_array()` / `overlap_array()` with `population()` / `overlap()` (NumPy on QuTiP, JAX on dynamiqs).
+- Set `states="all"`, `"final"`, or `"none"` instead of native storage options. For the old nearest-time behavior, pass `method="nearest"` to `state_at()` / `dm_at()`; the default is now `"exact"`.
+- `chip.parameters` includes unset optional fields as `None`. Skip them before numerical conversion; unchanged rebinding still works.
+- Replace deprecated fitting arguments `coupling_targets`, `observable_targets`, and `fit_parameters` with `constraints`, `vary`, and `start`. Fitting defaults to `evaluator="full"`; choose `"local"` explicitly.
+- Replace reduction metadata key `"folded_into"` with `"coupling"`. Keep the returned chip's effective terms; parameter summaries no longer reconstruct the reduction.
+- Custom signal transforms use `parameter()` / `setting()` instead of `_parameter_names`; custom reductions implement `retained_hamiltonian(ctx)` and `embedding(ctx)`. See [extensions](docs/extensions.md).
+- Saved models require `format_version: 1`; recreate older models from Python declarations.
 
 ## [0.2.1] - 2026-08-28
 
@@ -233,6 +312,8 @@ This file records notable user-visible changes to quchip.
 - Included device, coupling, control, frame, RWA, dissipation, transformation, sweep, visualization, and inverse-design APIs; QuTiP and dynamiqs backends; and JAX-compatible differentiation paths.
 - Published the README, contribution guide, code of conduct, physics reference, and test suite.
 
+[0.3.2]: https://github.com/quchip/quchip/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/quchip/quchip/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/quchip/quchip/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/quchip/quchip/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/quchip/quchip/compare/v0.1.1...v0.2.0
