@@ -1273,8 +1273,17 @@ class QuantumSequence:
         e_ops : dict, optional
             Named observables to evaluate.
         initial_state : object or mapping, optional
-            Initial state; ``None`` starts every device in its local ground state as a
-            bare product state. Mappings and configured string shorthand give product
+            Initial state. ``None`` uses the eigenstate of the solve's undriven
+            static lab-frame Hamiltonian, as retained by its approximation, that is
+            assigned to the all-ground label. Its overlap with the bare product is
+            made real and nonnegative before it is expressed in the solve frame at
+            ``tlist[0]``. With ordinary couplings, this is the bare product under the
+            default RWA and the same physical state as ``chip.state()`` under
+            ``Exact()`` before the frame transform. Retained bands, effective terms,
+            or network Hamiltonian terms that couple the vacuum can also dress an RWA
+            start. At a nonzero rotating-frame start time, the frame transform is
+            applied at ``tlist[0]``, so the state need not match the lab-frame vector
+            returned by ``chip.state()``. Mappings and configured string shorthand give product
             states in the resolved local bases. QuTiP ``Qobj`` and dynamiqs ``QArray``
             kets or density matrices use resolved solver coordinates; arrays, symbolic
             expressions, and callables are authored-space kets projected onto retained

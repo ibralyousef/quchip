@@ -43,12 +43,14 @@ from quchip.chip.dressing import (
     assign_rowwise_greedy,
     label_eigensystem,
 )
-from quchip.chip.states import normalize_device_state_mapping
+from quchip.chip.states import _bare_state_from_bases, normalize_device_state_mapping
 from quchip.devices.base import BaseDevice, _validate_level_pair
+from quchip.utils.constants import TWO_PI
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar
 from quchip.utils.labeling import LabelKeyedDict, bare_label_from_mapping, resolve_label, top_components
 
 if TYPE_CHECKING:
+    from quchip.approximations import Approximation
     from quchip.chip.chip import Chip
     from quchip.control.drive import BaseDrive
     from quchip.engine.ir import EngineResult
@@ -251,6 +253,39 @@ def dress_engine_result(
     )
 
 
+def _labeled_eigensystem(engine_result: "EngineResult", backend: Any) -> tuple[Any, Any, Any, Labeling]:
+    """Diagonalize a static analysis result and assign its bare product labels.
+
+    Returns ``(eigenvalues, eigenvector_matrix, eigensystem, labeling)``;
+    traced Hamiltonians stay traced.
+    """
+    from quchip.engine.assembly import _analysis_matrix_ghz
+
+    context = engine_result._dressing_context
+    if context is None:
+        raise RuntimeError("Resolved analysis is missing its captured dressing reference.")
+    dims = list(engine_result.dims)
+    eigensystem = backend.eigensystem_data(
+        backend.from_array(_analysis_matrix_ghz(engine_result), dims=[dims, dims])
+    )
+    labeling = label_eigensystem(
+        jnp.asarray(eigensystem.eigenvector_matrix), context.reference, policy=assign_rowwise_greedy
+    )
+    return eigensystem.eigenvalues, eigensystem.eigenvector_matrix, eigensystem, labeling
+
+
+def _is_eigenstate(state: State, result: "EngineResult", backend: Any) -> bool:
+    """Return whether a concrete static result maps ``state`` onto a multiple of itself.
+
+    The residual tolerance is ``1e-12`` times the Hamiltonian's angular
+    spectral span.
+    """
+    operators = [term.coefficient * backend.from_canonical_operator(term.operator) for term in result.static_terms]
+    image = sum(operators[1:], start=operators[0]) @ state
+    residual = float(backend.norm(image - backend.overlap(state, image) * state))
+    return residual <= 1e-12 * TWO_PI * result.metadata["spectral_bound_ghz"]
+
+
 @dataclass(frozen=True)
 class KerrMatrix:
     """Labeled dressed self-Kerr and cross-Kerr coefficients in GHz.
@@ -371,6 +406,7 @@ class ChipAnalysis:
         self._array_cache: tuple[Any, Any, Any, Labeling] | None = None
         self._array_signature: tuple[Any, ...] | None = None
         self._engine_result_cache: tuple[tuple[Any, ...], EngineResult] | None = None
+        self._ground_cache: tuple[tuple[Any, ...], Any] | None = None
         self._bare_labels_cache: tuple[
             tuple[tuple[int, ...], ...], dict[tuple[int, ...], int]
         ] | None = None
@@ -535,40 +571,62 @@ class ChipAnalysis:
         ):
             return self._array_cache
 
-        from quchip.engine.assembly import _analysis_matrix_ghz
-
         if engine_result is None:
             engine_result = self.engine_result()
         elif not engine_result._contains_tracer():
             self._engine_result_cache = (signature, engine_result)
-        hamiltonian = _analysis_matrix_ghz(engine_result)
-        dims = engine_result.dims
-
-        native_hamiltonian = chip.backend.from_array(
-            hamiltonian,
-            dims=[list(dims), list(dims)],
-        )
-        eigensystem = chip.backend.eigensystem_data(native_hamiltonian)
-        eigenvalues = eigensystem.eigenvalues
-        eigenvector_matrix = eigensystem.eigenvector_matrix
-
-        evals_jax = jnp.asarray(eigenvalues)
-        evecs_jax = jnp.asarray(eigenvector_matrix)
-
-        context = engine_result._dressing_context
-        if context is None:
-            raise RuntimeError("Resolved analysis is missing its captured dressing reference.")
-        labeling = label_eigensystem(evecs_jax, context.reference, policy=assign_rowwise_greedy)
-
+        result = _labeled_eigensystem(engine_result, chip.backend)
         # The 3rd slot carries the EigensystemData (lazy eigenstates) rather than
         # a materialized ket list — nothing on the hot path reads it. The cache
         # tracer-check covers only slots (0, 1, 3); touching slot 2 would force
         # the lazy ``eigenstates`` property and defeat the deferral.
-        result = (eigenvalues, eigenvector_matrix, eigensystem, labeling)
-        if not contains_tracer((evals_jax, labeling.indices, labeling.overlaps)):
+        eigenvalues, _, _, labeling = result
+        if not contains_tracer((eigenvalues, labeling.indices, labeling.overlaps)):
             self._array_cache = result
             self._array_signature = signature
         return result
+
+    def _ground_ket(self, approximation: "Approximation") -> Any | None:
+        """Return the all-ground-labeled lab-frame eigenstate for ``approximation``.
+
+        The ket uses solver coordinates and has real, nonnegative overlap on
+        the bare product. ``None`` means the bare product is already an
+        eigenstate. Tracer-free results cache against the analysis signature
+        and ``approximation``. A traced ket is differentiated by first-order
+        perturbation theory over the same eigensystem, masking gaps at the
+        tolerance of :func:`~quchip.engine.basis._differentiable_eigenpairs`.
+        """
+        from quchip.engine.assembly import _analysis_matrix_ghz, _build_static_analysis_result
+        from quchip.engine.basis import _differentiable_eigenvector
+
+        key = (self._analysis_signature(), approximation)
+        if self._ground_cache is not None and self._ground_cache[0] == key:
+            return self._ground_cache[1]
+        chip = self._chip
+        backend = chip.backend
+        # The all-band case reuses the static result and eigensystem cache used by dressed analysis.
+        retains_all = not approximation.filters_terms
+        static = (
+            self.engine_result() if retains_all else _build_static_analysis_result(chip, approximation=approximation)
+        )
+        bare = _bare_state_from_bases(chip, {}, static.bases)
+        traced = static._contains_tracer()
+        ket = None
+        if traced or not _is_eigenstate(bare, static, backend):
+            values, vectors, _, labeling = (
+                self._compute_array_labeled(static) if retains_all else _labeled_eigensystem(static, backend)
+            )
+            xp = backend.array_module
+            index = labeling.indices[0]  # Label 0 is the all-ground product.
+            column = xp.asarray(vectors)[:, index]
+            if traced:
+                # JAX's eigh derivative can be NaN at an unrelated exact tie.
+                matrix = jnp.asarray(_analysis_matrix_ghz(static))
+                column = _differentiable_eigenvector(matrix, values[index], values, vectors, column)
+            ket = _phase_fixed_state(column, xp.vdot(xp.asarray(backend.to_array(bare)).reshape(-1), column), xp)
+        if not contains_tracer(ket):
+            self._ground_cache = (key, ket)
+        return ket
 
     def _bare_label_index(self, label: tuple[int, ...]) -> int:
         """Position of ``label`` in canonical bare-label order (Python int)."""

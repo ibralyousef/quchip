@@ -443,6 +443,11 @@ H_rot = U† H_lab U - 2π Σ_i omega_ref,i * n_i
 
 That second term is why the assembler subtracts `omega_ref,i * n_i` from `H0`.
 
+When `initial_state=None`, the solver receives
+`psi_solve(t0) = U(t0)† psi_lab` at `t0 = tlist[0]`, where `psi_lab` is the
+lab-frame default described in §9. A nonzero rotating-frame start therefore
+need not equal the lab-frame vector returned by `chip.state()`.
+
 ### 4.3 What `"rotating"` means in practice
 
 `"rotating"` means:
@@ -905,6 +910,15 @@ of the runtime frame transform. A resolved `EngineResult` also provides
 If the snapshot has dynamic Hamiltonian terms, `dress(at_time=...)` is required
 and evaluates their signal programs at that instant. This is an instantaneous
 eigensystem, not Floquet or cycle-averaged analysis.
+
+When `initial_state=None`, a solve uses the eigenstate of the undriven static
+lab-frame Hamiltonian retained by its approximation that is assigned to the
+all-ground label. The state is phase-fixed to have real, nonnegative overlap on
+the bare product before the runtime frame transform (§4.2). With ordinary
+couplings, the default RWA leaves the bare product unchanged, while `Exact()`
+selects the same physical state as `chip.state()` for the all-ground label.
+Retained bands, effective terms, or network Hamiltonian terms that couple the
+vacuum can dress an RWA default.
 
 ### 9.1 Dressed drive matrix elements
 
