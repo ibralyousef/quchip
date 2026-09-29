@@ -67,6 +67,10 @@ This file records notable user-visible changes to quchip.
   prepare `with_truncation(problem)` when saving only diagnostics.
 - Omitted stochastic storage uses native defaults. Native run keywords go in
   `run_args`; integrator options remain in `options`.
+- `from_scqubits` and `to_scqubits` now convert energies between scqubits'
+  global unit, `scqubits.get_units()`, and GHz. Previously they assumed GHz, so
+  objects built after `scqubits.set_units("MHz")`, such as Quantum Metal's LOM
+  composites, imported 1000 times too large.
 
 ## [0.3.0] - 2026-09-06
 

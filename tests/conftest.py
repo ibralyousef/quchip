@@ -38,6 +38,16 @@ def backend() -> QuTiPBackend:
     return QuTiPBackend()
 
 
+@pytest.fixture
+def scqubits_mhz():
+    """Set scqubits' global energy unit to MHz for one test and restore the previous unit."""
+    scqubits = pytest.importorskip("scqubits")
+    previous = scqubits.get_units()
+    scqubits.set_units("MHz")
+    yield
+    scqubits.set_units(previous)
+
+
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Assign a daily suite and retain the independent location markers."""
     for item in items:
