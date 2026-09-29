@@ -4,6 +4,13 @@ This file records notable user-visible changes to quchip.
 
 ## Unreleased
 
+- Dressed analysis now follows `chip.approximation`, including frequencies,
+  states, Kerr shifts and drive matrix elements. Previously these queries
+  silently retained all coupling bands even on an `RWA()` chip. Construct the
+  chip with `approximation=Exact()` to recover the previous full-Hamiltonian
+  analysis. Dressed queries remain independent of the integration frame.
+  Elimination and its χ report follow the same choice; `method="exact"`
+  diagonalizes the selected Hamiltonian without restoring discarded bands.
 - `eliminate()` accepts the label of an `EffectiveTerms` contribution. With
   `method="exact"` it diagonalizes those terms together with the local
   Hamiltonians of their devices, keeps every device and edge authored, and
