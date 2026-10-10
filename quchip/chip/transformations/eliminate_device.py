@@ -25,20 +25,29 @@ label here and you need not import this module directly.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from dataclasses import replace
 from functools import reduce
-from itertools import combinations
+from itertools import combinations, product
+from math import prod
 from typing import TYPE_CHECKING, Any
 
+import jax
 import numpy as np
 
-from quchip.utils.jax_utils import concrete_array_module
+from quchip.utils.jax_utils import concrete_array_module, contains_tracer
 from quchip.utils.values import DeferredValue
 from quchip.chip.couplings import Capacitive, TunableCapacitive
 from quchip.chip.effective import (
     EffectiveTerms,
     OperatorProjection,
+    _in_device_order,
     authored_excitation_changes,
     conserves_excitation_number,
+    lineage,
+    lineage_labels,
+    retained_support,
+    transport_retained_operator,
 )
 from quchip.declarative.dissipation import CollapseChannel
 from quchip.chip.ports import Port
@@ -72,6 +81,7 @@ from quchip.utils.labeling import LabelKeyedDict, resolve_label
 
 if TYPE_CHECKING:
     from quchip.chip.chip import Chip
+    from quchip.chip.coupling_base import BaseCoupling
 
 
 class _MediatedExchange(CouplingModel):
@@ -98,8 +108,297 @@ def _retained_port_labels(chip: "Chip") -> set[str]:
     return {
         key.removeprefix("port:")
         for terms in chip.effective_terms if terms.projection is not None
-        for key, _ in terms.projection.overrides if key.startswith("port:")
+        for key in terms.projection.override_keys() if key.startswith("port:")
     }
+
+
+def _operator_terms(expr: PhysicsExpr) -> Iterator[PhysicsExpr]:
+    """Yield the operator products that ``expr`` sums, without their scalar coefficients."""
+    if expr.kind in ("add", "sub"):
+        for arg in expr.args:
+            yield from _operator_terms(arg)
+    elif expr.kind == "scale":
+        yield from _operator_terms(expr.args[1])
+    elif expr.kind in ("tensor", "matmul"):
+        for left, right in product(_operator_terms(expr.args[0]), _operator_terms(expr.args[1])):
+            yield PhysicsExpr(expr.kind, (left, right), expr.labels)
+    elif expr.kind == "embed":
+        for inner in _operator_terms(expr.args[0]):
+            yield PhysicsExpr("embed", (inner, *expr.args[1:]), expr.labels)
+    else:
+        yield expr
+
+
+def _holds_parameter(expr: PhysicsExpr) -> bool:
+    """Return whether a parameter enters ``expr`` other than through a device's energy levels."""
+    if expr.kind == "level":
+        return False
+    return expr.kind == "parameter" or any(
+        _holds_parameter(arg) for arg in expr.args if isinstance(arg, PhysicsExpr)
+    )
+
+
+def _level_dependent(chip: "Chip", operator: Any, labels: tuple[str, ...], label: str, bases: Any) -> bool:
+    """Return whether the energy-diagonal part of ``operator`` on ``labels`` can depend on the level of ``label``.
+
+    Such a part shifts the energies of ``label`` by the state of the other
+    devices, so it changes the Schrieffer-Wolff denominators. A diagonal that
+    stays traced counts as dependent.
+    """
+    from quchip.engine.assembly import _project_on_support, _support_semantic_transform
+
+    support = tuple(chip.device_index(name) for name in labels)
+    backend = chip.backend
+    with jax.ensure_compile_time_eval():
+        local = materialize_expr(operator, backend, local_bases=bases)
+        matrix = _array(backend.to_array(_project_on_support(chip, local, support, bases, backend)))
+        transform = _support_semantic_transform(chip, support, bases)
+        if transform is not None:
+            matrix = transform.conj().T @ matrix @ transform
+        dims = tuple(bases[name].resolved_dim for name in labels)
+        xp = concrete_array_module(matrix)
+        diagonal = xp.diagonal(matrix).reshape(dims)
+    if contains_tracer(diagonal):
+        return True
+    diagonal = np.moveaxis(np.asarray(diagonal), labels.index(label), 0)
+    return bool(not np.all(np.isfinite(diagonal)) or np.any(diagonal != diagonal[:1]))
+
+
+def _coupling_level_dependent(chip: "Chip", coupling: "BaseCoupling", label: str, bases: Any) -> bool:
+    """Check each operator product without scalar coefficients, including cancelled couplings."""
+    operator = coupling.interaction_hamiltonian()
+    terms = tuple(_operator_terms(operator)) if isinstance(operator, PhysicsExpr) else (operator,)
+    labels = (coupling.device_a_label, coupling.device_b_label)
+    return any((isinstance(term, PhysicsExpr) and _holds_parameter(term))
+               or _level_dependent(chip, term, labels, label, bases) for term in terms)
+
+
+def _holds_hamiltonian(terms: EffectiveTerms) -> bool:
+    """Return whether effective terms carry a Hamiltonian that can be nonzero."""
+    return contains_tracer(terms.hamiltonian) or bool(np.any(np.asarray(terms.hamiltonian) != 0.0))
+
+
+def _local_patch(chip: "Chip", mode_label: str,
+                 bases: Any) -> tuple[tuple[str, ...], tuple[EffectiveTerms, ...]]:
+    """Return the devices that a local reduction of ``mode_label`` reads, and the effective Hamiltonians it absorbs.
+
+    The core is the mode and every device that shares a coupling, an effective
+    Hamiltonian or a port with it. The generator acts only on the core. The
+    patch adds the far device of every coupling, and the full support of every
+    effective Hamiltonian, whose energy-diagonal part depends on a core level.
+    With that, the patch generator equals the full-chip generator. The patch
+    also holds every device that the operators of the mode's ports act on.
+    It absorbs the single-device effective Hamiltonians on its devices, and
+    the others that touch the core inside the part that the generator needs.
+    Devices are returned in chip order.
+    """
+    statics = [terms for terms in chip.effective_terms if _holds_hamiltonian(terms)]
+    core = {mode_label}
+    for coupling in chip.couplings:
+        if mode_label in (coupling.device_a_label, coupling.device_b_label):
+            core.update((coupling.device_a_label, coupling.device_b_label))
+    for terms in statics:
+        if mode_label in terms.labels:
+            core.update(terms.labels)
+    ports = [port for port in chip.ports if mode_label in port.resolve_targets(chip)]
+    for port in ports:
+        core.update(port.resolve_targets(chip))
+    patch = set(core)
+    if chip.port_network is not None:
+        for support in chip.port_network.dynamical_supports(chip):
+            if not core.isdisjoint(support):
+                patch.update(support)
+    for coupling in chip.couplings:
+        ends = (coupling.device_a_label, coupling.device_b_label)
+        inner = [label for label in ends if label in core]
+        outer = [label for label in ends if label not in patch]
+        if len(inner) == 1 and outer and _coupling_level_dependent(chip, coupling, inner[0], bases):
+            patch.update(outer)
+    for terms in statics:
+        inner = [label for label in terms.labels if label in core]
+        if inner and not patch.issuperset(terms.labels) and any(
+            _level_dependent(chip, terms.expression(), terms.labels, label, bases) for label in inner
+        ):
+            patch.update(terms.labels)
+    required = set(patch)
+    for port in ports:
+        patch.update(retained_support(chip, tuple(port.resolve_targets(chip)), f"port:{port.label}"))
+    absorbed = tuple(terms for terms in statics if patch.issuperset(terms.labels) and (
+        len(terms.labels) == 1 or (not core.isdisjoint(terms.labels) and required.issuperset(terms.labels))))
+    return tuple(device.label for device in chip.devices if device.label in patch), absorbed
+
+
+def _patch_chip(chip: "Chip", clone: "Chip", labels: tuple[str, ...],
+                absorbed: tuple[EffectiveTerms, ...]) -> "Chip":
+    """Build the patch as a chip with its internal couplings and ports and the Hamiltonians it absorbs.
+
+    Channels and coordinate maps stay with the full chip, so the patch chip
+    holds only the absorbed Hamiltonians.
+    """
+    from quchip.chip.partition import _build_component_chip
+
+    network = None
+    if chip.port_network is not None:
+        members = set(labels)
+        ports = [port.label for port in chip.port_network.ports if members.issuperset(port.resolve_targets(chip))]
+        if ports:
+            try:
+                network = chip.port_network.restrict(ports)
+            except ValueError as error:
+                raise NotImplementedError(
+                    f"Local elimination needs a port network that the patch {list(labels)} owns alone. {error}"
+                ) from error
+    carrier = [device.label for device in chip.devices if device.label != labels[0]][:1] if len(labels) == 1 else []
+    group = [device.label for device in chip.devices if device.label in (*labels, *carrier)]
+    patch = _build_component_chip(chip, clone, 0, group, [], network)
+    patch._effective_terms = tuple(
+        replace(terms, channels=(), projection=None,
+                excitation_changes=None if terms.excitation_changes is None else {})
+        for terms in absorbed
+    )
+    return patch
+
+
+def _single_device_parts(matrix: Any, dims: tuple[int, ...]) -> tuple[Any, list[Any], Any]:
+    """Split a product-space matrix into its mean, its traceless single-device parts and the rest.
+
+    The mean is the normalized trace. The part on a device is the normalized
+    partial trace onto that device minus the mean. The rest has no
+    single-device content, so each of its partial traces onto one device is
+    zero.
+    """
+    xp = concrete_array_module(matrix)
+    total = prod(dims)
+    mean = xp.trace(matrix) / total
+    parts = []
+    rest = matrix - mean * xp.eye(total)
+    for axis, dim in enumerate(dims):
+        before, after = prod(dims[:axis]), prod(dims[axis + 1:])
+        reduced = xp.einsum("iajibj->ab", matrix.reshape(before, dim, after, before, dim, after)) * (dim / total)
+        part = reduced - mean * xp.eye(dim)
+        parts.append(part)
+        rest = rest - xp.kron(xp.kron(xp.eye(before), part), xp.eye(after))
+    return mean, parts, rest
+
+
+def _unique_label(base: str, taken: set[str]) -> str:
+    label, suffix = base, 1
+    while label in taken:
+        label = f"{base}_{suffix}"
+        suffix += 1
+    taken.add(label)
+    return label
+
+
+def _magnitude(matrix: Any) -> float | None:
+    """Return the largest entry magnitude of a concrete matrix, or ``None`` for a traced one."""
+    return None if contains_tracer(matrix) else float(np.max(np.abs(np.asarray(matrix))))
+
+
+def _local_effective_terms(chip: "Chip", mode_label: str, taken: set[str], *, absorbed: tuple[EffectiveTerms, ...],
+                           joined: tuple[EffectiveTerms, ...],
+                           patch: tuple[str, ...], survivors: tuple[str, ...], survivor_dims: tuple[int, ...],
+                           correction: Any, energy_dims: tuple[int, ...], vectors: tuple[Any, ...],
+                           scale: float | None, carried: list[Any], projection: OperatorProjection | None,
+                           notes: tuple[str, ...], conserving: bool) -> tuple[EffectiveTerms, ...]:
+    """Return the chip's effective terms after a local reduction.
+
+    ``correction`` is in the survivors' energy coordinates. Its single-device
+    parts are stored on their own devices, and the rest on the patch
+    survivors. Small single-device shifts are retained. Each carried
+    channel joins the terms of its support. The new map is stored once, on the
+    terms of the patch survivors. Its parents are the maps of the ``joined``
+    terms, which reach the patch. Earlier terms keep their Hamiltonians unless
+    the patch absorbs them. They lose the channels that this step carries and
+    the maps that become parents. Maps of other regions stay in place.
+    """
+    absorbed_ids, joined_ids = {id(terms) for terms in absorbed}, {id(terms) for terms in joined}
+    taken = taken | {terms.label for terms in chip.effective_terms}
+    head_label = _unique_label(f"retained_{mode_label}", taken)
+    kept: list[EffectiveTerms] = []
+    dropped_notes: list[str] = []
+    for terms in chip.effective_terms:
+        holds = id(terms) not in absorbed_ids and _holds_hamiltonian(terms)
+        channels = () if not set(patch).isdisjoint(terms.labels) else terms.channels
+        own_map = None if id(terms) in joined_ids else terms.projection
+        if not holds and not channels and own_map is None:
+            dropped_notes.extend(f"{terms.label}: {note}" for note in terms.notes)
+            continue
+        if own_map is not terms.projection or len(channels) != len(terms.channels):
+            declared, names = terms.excitation_changes, {channel.name for channel in channels}
+            terms = replace(terms, channels=channels, projection=own_map, excitation_changes=None
+                            if declared is None else
+                            {name: changes for name, changes in declared.items() if name in names})
+        kept.append(terms)
+    xp = concrete_array_module(correction)
+    tolerance = None if scale is None or contains_tracer(correction) else float(np.spacing(scale))
+    mean, parts, rest = _single_device_parts(correction, energy_dims)
+    added = []
+    for index, (label, dim, part, vector) in enumerate(zip(survivors, survivor_dims, parts, vectors)):
+        if index == 0:
+            part = part + mean * xp.eye(energy_dims[0])
+        added.append(EffectiveTerms((label,), (dim,), vector @ part @ vector.conj().T,
+                                    label=_unique_label(f"retained_{mode_label}_{label}", taken),
+                                    excitation_changes={} if conserving else None))
+    if len(survivors) == 1:
+        remainder = np.zeros((prod(survivor_dims),) * 2, dtype=complex)
+    else:
+        if tolerance is not None:
+            omitted = np.where(np.maximum(np.abs(rest), np.abs(rest.T)) <= tolerance, rest, 0.0)
+            rest = rest - omitted
+            error = float(np.linalg.norm(omitted, ord="fro"))
+            if error:
+                dropped_notes.append(
+                    f"Local Hamiltonian entries at or below the patch's {tolerance:.6g} GHz floating-point "
+                    f"spacing were omitted; their Frobenius norm is {error:.6g} GHz."
+                )
+        lift = _kron(*vectors)
+        remainder = lift @ rest @ lift.conj().T
+    # Carried channels can cross any earlier map, so their level changes hold
+    # only when every map conserves the total level index.
+    lineage_conserves = conserving and all(
+        t.excitation_changes is not None for t in chip.effective_terms if t.projection is not None
+    )
+    groups: dict[tuple[str, ...], list[Any]] = {}
+    for channel, labels, dims, changes in carried:
+        groups.setdefault(labels, []).append((channel, dims, changes))
+    own = groups.pop(survivors, [])
+    for labels, members in groups.items():
+        dims = members[0][1]
+        added.append(EffectiveTerms(
+            labels, dims, np.zeros((prod(dims),) * 2, dtype=complex), tuple(channel for channel, _, _ in members),
+            label=_unique_label(f"retained_{mode_label}_{'_'.join(labels)}", taken),
+            excitation_changes={channel.name: changes for channel, _, changes in members if changes is not None}
+            if lineage_conserves else None,
+        ))
+    head = EffectiveTerms(
+        survivors, survivor_dims, remainder, tuple(channel for channel, _, _ in own), label=head_label,
+        projection=projection, notes=(*dropped_notes, *notes),
+        excitation_changes={channel.name: changes for channel, _, changes in own if changes is not None}
+        if lineage_conserves else None,
+    )
+    return (*kept, *added, head)
+
+
+def _embed_patch_map(embedding: Any, labels: tuple[str, ...], dims: tuple[int, ...],
+                     target_labels: tuple[str, ...], target_dims: tuple[int, ...],
+                     source: tuple[tuple[str, int], ...], target: tuple[tuple[str, int], ...]) -> Any:
+    """Extend a patch map by the identity on the other devices, in chip order.
+
+    ``source`` and ``target`` list every device of the full source and
+    reduced chips with its dimension.
+    """
+    xp = concrete_array_module(embedding)
+    spectators = tuple((label, dim) for label, dim in source if label not in labels)
+    size = prod(dim for _, dim in spectators)
+    full = xp.kron(xp.asarray(embedding), xp.eye(size, dtype=complex))
+    rows = labels + tuple(label for label, _ in spectators)
+    columns = target_labels + tuple(label for label, _ in spectators)
+    shape = dims + tuple(dim for _, dim in spectators) + target_dims + tuple(dim for _, dim in spectators)
+    order = tuple(rows.index(label) for label, _ in source)
+    order += tuple(len(rows) + columns.index(label) for label, _ in target)
+    full = xp.transpose(full.reshape(shape), order)
+    return full.reshape(prod(dim for _, dim in source), prod(dim for _, dim in target))
 
 
 # A concrete reduction runs on the host, where it compiles no device programs;
@@ -148,7 +447,7 @@ def _in_edge_units(element: Any, unit: Any) -> Any:
     return xp.where(nonzero, xp.real(element / xp.where(nonzero, unit, 1.0)), 0.0)[()]
 
 
-def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
+def reduce_device(chip: "Chip", target: Any, method: str, *, local: bool = False) -> EliminationResult:
     """Adiabatically eliminate a far-detuned device and fold its effect into the survivors.
 
     See :func:`~quchip.chip.transformations.dispatch.eliminate` for the full
@@ -162,6 +461,9 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
         The device to eliminate, as a label string or object.
     method
         The reduction route (``"sw"`` or ``"exact"``), already validated.
+    local
+        Read only the patch around the device. Every numerical step then runs
+        on the patch, and the rest of the chip stays unchanged.
 
     Returns
     -------
@@ -170,6 +472,13 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
     # The registry guarantees that `target` names a device on `chip`, and
     # `eliminate` already validated `method`.
     mode_label = resolve_label(target)
+    if local and method != "sw":
+        raise NotImplementedError(
+            "local=True implements method='sw' only. The exact route diagonalizes the whole chip, so its "
+            "dressed states are not local."
+        )
+    if local and chip.baths:
+        raise NotImplementedError("local=True does not yet transform baths. Use local=False for a chip with baths.")
     touching = [c for c in chip.couplings if mode_label in (c.device_a_label, c.device_b_label)]
     survivors = []
     for c in touching:
@@ -312,11 +621,29 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
     mode_is_frequency_controlled = isinstance(mode, FrequencyControlled) or any(
         isinstance(line, FluxDrive) for line, _ in retarget_plan
     )
-    h, labels, dims = bare_hamiltonian(chip, approximation=approximation)
+    # Every numerical step reads `numeric`: the whole chip, or the patch whose
+    # generator equals the full-chip generator (PHYSICS.md §10.7).
+    numeric, chip_bases, lone = chip, None, False
+    absorbed: tuple[EffectiveTerms, ...] = ()
+    if local:
+        from quchip.engine.assembly import _resolve_system
+
+        chip_bases = _resolve_system(chip, chip.backend).bases
+        patch, absorbed = _local_patch(chip, mode_label, chip_bases)
+        numeric = _patch_chip(chip, reduced, patch, absorbed)
+        lone = len(patch) == 1
+        notes.append(
+            f"Reduced locally from the patch {list(patch)}. Devices, couplings and effective Hamiltonians "
+            "outside it are unchanged, and chi describes the patch alone. Retained channels that act on the "
+            "patch follow its map."
+        )
+    numeric_mode = numeric[mode_label]
+    numeric_touching = [c for c in numeric.couplings if mode_label in (c.device_a_label, c.device_b_label)]
+    h, labels, dims = bare_hamiltonian(numeric, approximation=approximation)
     # A structurally conserving model has no matrix elements between
     # total-excitation sectors; removing their round-off keeps both routes,
     # and every captured map, inside the sectors.
-    sectors = excitation_sectors(dims) if conserves_excitation_number(chip, approximation) else None
+    sectors = excitation_sectors(dims) if conserves_excitation_number(numeric, approximation) else None
     if sectors is not None:
         h = concrete_array_module(h).where(sectors[:, None] == sectors[None, :], h, 0.0)
     # Survivor pairs are keyed in the chip's device order everywhere — the
@@ -345,7 +672,7 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
         for label in labels
     }
 
-    source_bases = chip.resolve(frame="lab").bases
+    source_bases = numeric.resolve(frame="lab").bases
 
     def transform_operator(operator: Any, support_labels: tuple[str, ...]) -> tuple[Any, Any]:
         local = _array(chip.backend.to_array(materialize_expr(operator, chip.backend)))
@@ -358,12 +685,24 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
         return local, reduction.transform_operator(ctx, _array(chip.backend.to_array(embedded)))
 
     # Every collapse operator as the source chip resolves it, including the
-    # captured coordinates of an earlier reduction.
-    contributions = chip._collapse_contributions_with_owners(source_bases)
+    # captured coordinates of an earlier reduction. A local reduction reads
+    # only the removed components and the mode's ports, from the full chip.
+    if local:
+        contributions = chip._collapse_contributions_with_owners(
+            chip_bases, owners=(chip[mode_label], *touching, *affected_ports),
+        )
+        contribution_labels = tuple(device.label for device in chip.devices)
+        removed_owners = {id(chip[mode_label]), *(id(coupling) for coupling in touching)}
+    else:
+        contributions = numeric._collapse_contributions_with_owners(source_bases)
+        contribution_labels = tuple(labels)
+        removed_owners = {id(numeric_mode), *(id(coupling) for coupling in numeric_touching)}
+    affected_port_labels = {port.label for port in affected_ports}
     port_sources: dict[str, tuple[Any, tuple[str, ...]]] = {}
     for operator, _rate, support, _source, _name, _paths, owner in contributions:
-        if any(owner is port for port in affected_ports):
-            port_sources[owner.label] = (operator, tuple(labels[index] for index in support) or tuple(labels))
+        if isinstance(owner, Port) and owner.label in affected_port_labels:
+            port_sources[owner.label] = (operator, tuple(contribution_labels[index] for index in support)
+                                         or contribution_labels)
     transformed_ports = {
         label: transform_operator(operator, support_labels)[1]
         for label, (operator, support_labels) in port_sources.items()
@@ -482,23 +821,24 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
         )
 
     # Retained energy coordinates lift to the survivors' authored coordinates.
-    lift = _kron(*(source_bases[label].energy_vectors for label in survivor_labels))
+    numeric_survivors = [label for label in labels if label != mode_label]
+    lift = _kron(*(source_bases[label].energy_vectors for label in numeric_survivors))
     port_replacements: dict[str, Port] = {}
     if affected_ports:
-        # The transformed boundary acts on every survivor: the reduction mixes
-        # the eliminated mode into all retained coordinates it couples to.
-        port_targets = tuple(survivor_labels) if len(survivor_labels) > 1 else survivor_labels[0]
-        survivor_dims = tuple(chip[label].local_space().dimension for label in survivor_labels)
+        # The transformed boundary acts on every survivor that the reduction
+        # reads: it mixes the eliminated mode into all retained coordinates it couples to.
+        port_targets = tuple(numeric_survivors) if len(numeric_survivors) > 1 else numeric_survivors[0]
+        survivor_dims = tuple(chip[label].local_space().dimension for label in numeric_survivors)
         for port in affected_ports:
             port_operator: Any = lift @ transformed_ports[port.label] @ lift.conj().T
             source_operator, source_labels = port_sources[port.label]
             port_changes = None if sectors is None else authored_excitation_changes(
-                source_operator, source_labels, chip.backend, source_bases,
+                source_operator, source_labels, chip.backend, source_bases if chip_bases is None else chip_bases,
             )
             if port_changes is not None:
                 # Declared so the frame check keeps one band when the payload is traced.
                 port_operator = PhysicsExpr.from_matrix(
-                    port_operator, labels=tuple(survivor_labels), dims=survivor_dims,
+                    port_operator, labels=tuple(numeric_survivors), dims=survivor_dims,
                     name="transformed_port", excitation_changes=port_changes,
                 )
             port_replacements[port.label] = Port(
@@ -519,10 +859,11 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
                 f"scattering through {mode_label!r}, of order rate·|<0|L|1>|²/Δ."
             )
 
-    final = rebuild_chip(
-        chip,
-        devices=reduced_devices,
-        couplings=kept_couplings,
+    kept_numeric = set(numeric_survivors)
+    numeric_final = rebuild_chip(
+        numeric,
+        devices=[reduced[label] for label in numeric_survivors],
+        couplings=[c for c in kept_couplings if kept_numeric.issuperset((c.device_a_label, c.device_b_label))],
         port_replacements=port_replacements,
         effective_terms=(),
         baths=(),
@@ -531,26 +872,58 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
     # Scalar summaries and convenient exchange edges are only a decomposition
     # of this matrix; they must not determine which elements survive.
     retained_h = reduction.retained_hamiltonian(ctx)
-    final_resolved = final.resolve(frame="lab", approximation=approximation)
-    final_matrix = _array(final_resolved.hamiltonian().matrix(backend=final.backend))
-    final_lift = _kron(*(final_resolved.bases[label].vectors for label in survivor_labels))
+    final_resolved = numeric_final.resolve(frame="lab", approximation=approximation)
+    final_matrix = _array(final_resolved.hamiltonian().matrix(backend=numeric_final.backend))
+    final_lift = _kron(*(final_resolved.bases[label].vectors for label in numeric_survivors))
     correction = lift @ retained_h @ lift.conj().T - final_lift @ final_matrix @ final_lift.conj().T
     inherited_channels = []
     channel_changes: dict[str, frozenset[int]] = {}
+    source_lift = _kron(*(source_bases[label].energy_vectors for label in labels))
+    step_embedding = source_lift @ reduction.embedding(ctx) @ lift.conj().T
+    # A local map keeps each earlier map that reaches the patch as a parent,
+    # in the order they apply. Maps of other regions act on other devices, so
+    # they stay on their own effective terms and the partition keeps them with
+    # their devices. The map carries each channel that acts on the patch.
+    # Devices outside the patch keep their coordinates, so the channel keeps
+    # its own support.
+    map_support = patch if local else labels
+    joined = tuple(t for t in chip.effective_terms
+                   if t.projection is not None and not lineage_labels(t.projection).isdisjoint(map_support))
+    parents = lineage(tuple(t.projection for t in joined if t.projection is not None))
+    step = OperatorProjection(tuple(labels), tuple(numeric.authored_dims), tuple(numeric_survivors),
+                              tuple(numeric_final.authored_dims), step_embedding, parents=parents) if local else None
+    carried: list[tuple[CollapseChannel, tuple[str, ...], tuple[int, ...], frozenset[int] | None]] = []
+
+    def carry(operator: Any, support_labels: tuple[str, ...], support_dims: tuple[int, ...], rate: Any,
+              name: str, changes: frozenset[int] | None) -> None:
+        assert step is not None
+        matrix, carried_labels, carried_dims = _in_device_order(
+            chip, *step._embed(_array(operator), support_labels, support_dims),
+        )
+        carried.append((CollapseChannel(matrix, rate, name), carried_labels, carried_dims, changes))
+
     # Internal loss of the eliminated mode as the damping of <a> near vacuum,
     # -2 Re <0|D†[L](a)|1> per channel: lowering counts +rate, raising -rate,
     # pure dephasing +rate.
     internal_rate: Any = 0.0
 
     def inherit_channel(channel: CollapseChannel, support_labels: tuple[str, ...], name: str) -> None:
-        local, transformed = transform_operator(channel.operator, support_labels)
         rate = materialize_expr(channel.rate, chip.backend)
-        inherited_channels.append(CollapseChannel(
-            lift @ transformed @ lift.conj().T,
-            rate, name,
-        ))
+        changes = None
         if sectors is not None:
-            changes = authored_excitation_changes(channel.operator, support_labels, chip.backend, source_bases)
+            changes = authored_excitation_changes(channel.operator, support_labels, chip.backend,
+                                                  source_bases if chip_bases is None else chip_bases)
+        if local:
+            carry(chip.backend.to_array(materialize_expr(channel.operator, chip.backend)), support_labels,
+                  tuple(chip[label].local_space().dimension for label in support_labels), rate, name, changes)
+        if local and support_labels != (mode_label,):
+            return
+        in_energy, transformed = transform_operator(channel.operator, support_labels)
+        if not local:
+            inherited_channels.append(CollapseChannel(
+                lift @ transformed @ lift.conj().T,
+                rate, name,
+            ))
             if changes is not None:
                 channel_changes[name] = changes
         if support_labels == (mode_label,):
@@ -560,21 +933,28 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
             for survivor in touching_labels:
                 row = basis_row(p_index, labels, dims, survivor)
                 effective_params[survivor]["purcell_rate"] += rate * abs(transformed[ground, row]) ** 2
-                effective_params[survivor]["kappa"] += rate * abs(local[0, 1]) ** 2
+                effective_params[survivor]["kappa"] += rate * abs(in_energy[0, 1]) ** 2
             if mode_lowering is not None:
-                jump = local
+                jump = in_energy
                 number = jump.conj().T @ jump
                 adjoint = jump.conj().T @ mode_lowering @ jump - 0.5 * (number @ mode_lowering + mode_lowering @ number)
                 internal_rate = internal_rate - 2.0 * rate * _real(adjoint[0, 1])
 
-    removed_owners = {id(mode), *(id(coupling) for coupling in touching)}
+    mode_owner = chip[mode_label] if local else numeric_mode
     for operator, rate, support, owner_label, name, _paths, owner in contributions:
         if id(owner) in removed_owners or isinstance(owner, EffectiveTerms):
-            support_labels = tuple(labels[index] for index in support) if support else tuple(labels)
+            support_labels = (tuple(contribution_labels[index] for index in support) if support
+                              else contribution_labels)
             inherit_channel(CollapseChannel(operator, rate, name), support_labels,
-                            name if owner is mode else f"{owner_label}.{name}")
-    source_lift = _kron(*(source_bases[label].energy_vectors for label in labels))
-    step_embedding = source_lift @ reduction.embedding(ctx) @ lift.conj().T
+                            name if owner is mode_owner else f"{owner_label}.{name}")
+    if local:
+        # Retained channels are stored in the coordinates before this step.
+        for terms in chip.effective_terms:
+            if terms.channels and not set(patch).isdisjoint(terms.labels):
+                declared = None if sectors is None else terms.excitation_changes
+                for channel in terms.channels:
+                    carry(channel.operator, terms.labels, terms.dims, channel.rate, f"{terms.label}.{channel.name}",
+                          None if declared is None else declared.get(channel.name))
     projected_baths = []
     for bath in chip.baths:
         copied = bath.copy()
@@ -583,28 +963,40 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
             matrices = [_array(chip.backend.to_array(materialize_expr(op, chip.backend)))
                         for op in (lowering, number)]
             if bath._retained is None:
-                for terms in chip.effective_terms:
-                    if terms.projection is not None:
-                        matrices = [_array(chip.backend.to_array(materialize_expr(
-                            terms.projection.apply(op, tuple(labels)), chip.backend))) for op in matrices]
+                transported = [transport_retained_operator(chip, op, tuple(labels), tuple(chip.authored_dims))
+                               for op in matrices]
+                matrices = [op if moved is None else _array(moved[0]) for op, moved in zip(matrices, transported)]
             copied._retained[label] = (frequency, *[step_embedding.conj().T @ op @ step_embedding
                                                    for op in matrices])
         projected_baths.append(copied)
-    projection = OperatorProjection.capture(
-        chip, tuple(survivor_labels), tuple(final.authored_dims),
-        step_embedding,
-    ).with_current_operators(tuple(f"port:{label}" for label in port_replacements))
+    projection = None if lone and not joined else (step if step is not None else OperatorProjection.capture(
+        numeric, tuple(numeric_survivors), tuple(numeric_final.authored_dims), step_embedding,
+    )).with_current_operators(tuple(f"port:{label}" for label in port_replacements))
     order = "second-order" if method == "sw" else "exact projected"
     notes.append(f"Retained the full {order} Hamiltonian correction and each transformed channel "
                  "from the removed components; inherited decay remains collective and separate "
                  "from intrinsic survivor noise.")
-    terms = EffectiveTerms(tuple(survivor_labels), tuple(final.authored_dims), correction,
-                           tuple(inherited_channels), label=f"retained_{mode_label}", projection=projection,
-                           notes=(*inherited_notes(chip), *notes),
-                           excitation_changes=None if sectors is None else channel_changes)
-    final = rebuild_chip(chip, devices=final.devices, couplings=final.couplings,
+    taken = {d.label for d in reduced_devices} | {c.label for c in kept_couplings}
+    if local:
+        effective_terms = _local_effective_terms(
+            chip, mode_label, taken, absorbed=absorbed, joined=joined, patch=tuple(patch),
+            survivors=tuple(numeric_survivors),
+            survivor_dims=tuple(numeric_final.authored_dims),
+            correction=lift.conj().T @ correction @ lift, energy_dims=tuple(dims[labels.index(label)]
+                                                                            for label in numeric_survivors),
+            vectors=tuple(source_bases[label].energy_vectors for label in numeric_survivors),
+            scale=_magnitude(h), carried=carried, projection=projection, notes=tuple(notes),
+            conserving=sectors is not None,
+        )
+    else:
+        terms = EffectiveTerms(tuple(numeric_survivors), tuple(numeric_final.authored_dims), correction,
+                               tuple(inherited_channels), label=_unique_label(f"retained_{mode_label}", taken),
+                               projection=projection, notes=(*inherited_notes(numeric), *notes),
+                               excitation_changes=None if sectors is None else channel_changes)
+        effective_terms = (terms,)
+    final = rebuild_chip(chip, devices=reduced_devices, couplings=kept_couplings,
                          port_replacements=port_replacements,
-                         effective_terms=(*final.effective_terms, terms), baths=projected_baths)
+                         effective_terms=effective_terms, baths=projected_baths)
     if boundary_ports:
         # The transformed port carries the survivors' emission; the eliminated
         # mode's own reflection, S_r(f), stays on the external plane.
@@ -641,14 +1033,31 @@ def reduce_device(chip: "Chip", target: Any, method: str) -> EliminationResult:
         _array(source_bases[label].vectors).conj().T @ _array(source_bases[label].energy_vectors) for label in labels
     )
     target_to_solver = final_lift.conj().T @ lift
-    mapping = ReductionMap(
-        source_labels=tuple(labels), source_dims=tuple(dims),
-        target_labels=tuple(survivor_labels), target_dims=tuple(final_resolved.dims),
-        _backend=chip.backend,
-        _embedding=DeferredValue(
-            lambda: _kron(*source_factors) @ reduction.embedding(ctx) @ target_to_solver.conj().T
-        ),
-    )
+
+    def numeric_map() -> Any:
+        return _kron(*source_factors) @ reduction.embedding(ctx) @ target_to_solver.conj().T
+
+    if chip_bases is None:
+        mapping = ReductionMap(
+            source_labels=tuple(labels), source_dims=tuple(dims),
+            target_labels=tuple(survivor_labels), target_dims=tuple(final_resolved.dims),
+            _backend=chip.backend,
+            _embedding=DeferredValue(numeric_map),
+        )
+    else:
+        # The patch map acts as the identity on the other devices. The full
+        # map is formed only when it is read.
+        source_dims = tuple((d.label, chip_bases[d.label].resolved_dim) for d in chip.devices)
+        target_dims = tuple((label, dim) for label, dim in source_dims if label != mode_label)
+        mapping = ReductionMap(
+            source_labels=tuple(label for label, _ in source_dims), source_dims=tuple(d for _, d in source_dims),
+            target_labels=tuple(label for label, _ in target_dims), target_dims=tuple(d for _, d in target_dims),
+            _backend=chip.backend,
+            _embedding=DeferredValue(lambda: _embed_patch_map(
+                numeric_map(), tuple(labels), tuple(dims), tuple(numeric_survivors), tuple(final_resolved.dims),
+                source_dims, target_dims,
+            )),
+        )
     reattach_equipment(
         chip,
         final,
@@ -668,4 +1077,5 @@ register_elimination_target(EliminationTarget(
     kind="device",
     claims=lambda chip, target: resolve_label(target) in chip.device_map,
     reduce=reduce_device,
+    reduce_local=lambda chip, target, method: reduce_device(chip, target, method, local=True),
 ))

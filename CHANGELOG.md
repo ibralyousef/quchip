@@ -48,6 +48,18 @@ This file records notable user-visible changes to quchip.
 - `PortNetwork.mode_reflection(...)` adds a serializable two-sided reference
   section that reflects like a damped linear mode.
   ([#76](https://github.com/quchip/quchip/issues/76))
+- `eliminate(chip, device, local=True)` computes the SW reduction on a local
+  patch. It retains the full reduction's Hamiltonian, channels, and map.
+  `chi` describes only the patch. Both `active_patch()` entry points forward
+  `local`. Baths and networks that cross the patch boundary remain unsupported.
+  ([#112](https://github.com/quchip/quchip/pull/112))
+- Local elimination stores single-device corrections and transformed channels
+  on their own supports. Ordered maps preserve operator transport without
+  forcing later patches to include every earlier patch. Noisy channels can
+  still spread along the maps. Partitioning keeps each map with its devices.
+  Small single-device shifts are retained. Numerical omissions from joint
+  corrections are recorded with their matrix norms in GHz.
+  ([#113](https://github.com/quchip/quchip/pull/113))
 - Local fitting retains independent ports and their field subgraphs in each
   neighborhood. It rejects cuts through shared feedlines, joint ports, or
   unsupported boundary scattering, rather than discarding their interactions.

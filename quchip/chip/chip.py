@@ -596,14 +596,25 @@ class Chip:
     def _collapse_contributions_with_owners(
         self,
         bases: Mapping[str, Any] | None = None,
+        owners: Sequence[Any] | None = None,
     ) -> list[tuple[Operator, Any, tuple[int, ...], str, str, tuple[str, ...], Any]]:
-        """Return collapse contributions with exact component ownership for assembly."""
+        """Return collapse contributions with exact component ownership for assembly.
+
+        ``owners`` limits the result to the channels of those components.
+        """
         backend = self.backend
         out: list[
             tuple[Operator, Any, tuple[int, ...], str, str, tuple[str, ...], Any]
         ] = []
+        wanted = None if owners is None else {id(owner) for owner in owners}
+
+        def skip(owner: Any) -> bool:
+            return wanted is not None and id(owner) not in wanted
+
         with _backend_context(backend):
             for i, dev in enumerate(self._devices):
+                if skip(dev):
+                    continue
                 out.extend(
                     (
                         channel.operator,
@@ -620,7 +631,7 @@ class Chip:
                 )
             if self.control_equipment is not None:
                 for line in self.control_equipment.lines:
-                    if line.device_label is None:
+                    if line.device_label is None or skip(line):
                         continue
                     idx = self._label_to_index[line.device_label]
                     device = self._devices[idx]
@@ -637,6 +648,8 @@ class Chip:
                             )
                         )
             for coupling in self._couplings:
+                if skip(coupling):
+                    continue
                 idx_a = self._label_to_index[coupling.device_a_label]
                 idx_b = self._label_to_index[coupling.device_b_label]
                 for channel, parameter_paths in coupling._collapse_channels_with_paths():
@@ -652,6 +665,8 @@ class Chip:
                         )
                     )
             for bath in self.baths:
+                if skip(bath):
+                    continue
                 for channel, parameter_paths in bath._collapse_channels_with_paths(self, bases):
                     out.append(
                         (
@@ -665,11 +680,15 @@ class Chip:
                         )
                     )
             for terms in self.effective_terms:
+                if skip(terms):
+                    continue
                 support = tuple(self._label_to_index[label] for label in terms.labels)
                 for channel in terms.channels:
                     out.append((terms.channel_expression(channel), channel.rate, support,
                                 terms.label, channel.name, (), terms))
             for port in self.ports:
+                if skip(port):
+                    continue
                 support = tuple(self._label_to_index[label] for label in port.resolve_targets(self))
                 for channel, parameter_paths in port._collapse_channels_with_paths(self):
                     out.append(
@@ -683,10 +702,8 @@ class Chip:
                             port,
                         )
                     )
-        projected_terms = [terms for terms in self.effective_terms if terms.projection is not None]
-        if projected_terms:
-            from quchip.chip.effective import authored_excitation_changes
-            from quchip.declarative.expr import materialize_expr
+        if any(terms.projection is not None for terms in self.effective_terms):
+            from quchip.chip.effective import retained_operator
 
             projected = []
             labels = tuple(device.label for device in self.devices)
@@ -695,20 +712,12 @@ class Chip:
                     isinstance(owner, Bath) and owner._retained is not None
                 ):
                     operator_labels = tuple(labels[index] for index in support) if support else labels
-                    for terms in projected_terms:
-                        projection = terms.projection
-                        assert projection is not None
-                        if set(operator_labels) <= set(projection.target_labels):
-                            changes = None if terms.excitation_changes is None else authored_excitation_changes(
-                                operator, operator_labels, backend, bases,
-                            )
-                            local = backend.to_array(materialize_expr(operator, backend, local_bases=bases))
-                            owner_key = f"port:{owner.label}" if isinstance(owner, Port) else None
-                            operator = projection.apply(local, operator_labels, owner_key, excitation_changes=changes)
-                            support = tuple(self._label_to_index[label] for label in projection.target_labels)
-                            break
-                        if set(operator_labels) & set(projection.target_labels):
-                            raise NotImplementedError("A collapse operator spans a partial retained projection.")
+                    owner_key = f"port:{owner.label}" if isinstance(owner, Port) else None
+                    retained = retained_operator(self, operator, operator_labels, backend, owner_key,
+                                                 bases=bases, local_bases=bases)
+                    if retained is not None:
+                        operator = retained
+                        support = tuple(self._label_to_index[label] for label in retained.labels)
                 projected.append((operator, rate, support, source, channel_name, paths, owner))
             return projected
         return out
@@ -1674,7 +1683,8 @@ class Chip:
         Hamiltonian and Lindblad channels, including Hamiltonian terms
         generated by SLH composition. Passive field scattering alone does not
         connect subsystems. Drive-crosstalk pairs stay together, so component
-        solves keep their signal transform.
+        solves keep their signal transform. The devices that a captured
+        reduction map acts on also stay together, because the map can mix them.
         """
         from quchip.chip.partition import partition_chip
 

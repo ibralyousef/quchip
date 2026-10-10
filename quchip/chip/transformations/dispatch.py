@@ -67,11 +67,16 @@ class EliminationTarget:
         ``reduce(chip, target, method) -> EliminationResult``: does the
         reduction. ``method`` is the already validated route string. A handler
         that has no concept of a route ignores it.
+    reduce_local
+        The same reduction read from a patch around the target, for
+        ``eliminate(..., local=True)``. ``None`` means the kind has no local
+        reduction.
     """
 
     kind: str
     claims: Callable[[Any, Any], bool]
     reduce: Callable[[Any, Any, str], EliminationResult]
+    reduce_local: Callable[[Any, Any, str], EliminationResult] | None = None
 
 
 _ELIMINATION_TARGETS: list[EliminationTarget] = []
@@ -88,7 +93,7 @@ def register_elimination_target(target: EliminationTarget) -> None:
     _ELIMINATION_TARGETS.append(target)
 
 
-def eliminate(chip: "Chip", target: Any, *, method: str = "sw") -> EliminationResult:
+def eliminate(chip: "Chip", target: Any, *, method: str = "sw", local: bool = False) -> EliminationResult:
     """Reduce a far-detuned device, an edge coupling or effective terms, and return a reduced chip.
 
     ``target`` is resolved against the chip's device, coupling and
@@ -136,6 +141,21 @@ def eliminate(chip: "Chip", target: Any, *, method: str = "sw") -> EliminationRe
         transforms the full chip through that unitary. Surviving noise operators
         follow the captured map, and components keep rate ownership. Control
         operators are not transformed yet.
+    local
+        For a device target with ``method="sw"``, read only a patch around the
+        device. The patch holds the device and every device that shares a
+        coupling, an effective Hamiltonian or a port with it. It also holds the
+        far device of each coupling whose diagonal part depends on such a
+        neighbour's level, as for a ``CrossKerr`` edge. It holds each such effective
+        Hamiltonian and each port pair whose series Hamiltonian acts on the
+        core. It also holds every device that the device's
+        port operators act on. The reduction never resolves the full chip, and
+        devices and couplings outside the patch stay unchanged. Each part of
+        the correction and each transformed channel keeps its own support, so
+        later patches stay local. The result matches full-chip reduction up to
+        recorded numerical omissions. ``chi`` describes only the patch. Chips with baths, and
+        port networks that link a patch port to a port outside the patch raise
+        ``NotImplementedError``.
 
     Returns
     -------
@@ -158,7 +178,11 @@ def eliminate(chip: "Chip", target: Any, *, method: str = "sw") -> EliminationRe
         raise ValueError(f"Unknown method {method!r} for eliminate(); expected {expected}.")
     for spec in _ELIMINATION_TARGETS:
         if spec.claims(chip, target):
-            return spec.reduce(chip, target, method)
+            if not local:
+                return spec.reduce(chip, target, method)
+            if spec.reduce_local is None:
+                raise NotImplementedError(f"local=True does not support {spec.kind} targets.")
+            return spec.reduce_local(chip, target, method)
     raise KeyError(
         f"'{resolve_label(target)}' names no device, coupling or effective terms on chip '{chip.label}'."
     )
