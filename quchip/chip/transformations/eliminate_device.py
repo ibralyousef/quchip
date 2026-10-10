@@ -310,7 +310,7 @@ def _local_effective_terms(chip: "Chip", mode_label: str, taken: set[str], *, ab
 
     ``correction`` is in the survivors' energy coordinates. Its single-device
     parts are stored on their own devices, and the rest on the patch
-    survivors. A concrete part at round-off level is dropped. Each carried
+    survivors. Small single-device shifts are retained. Each carried
     channel joins the terms of its support. The new map is stored once, on the
     terms of the patch survivors. Its parents are the maps of the ``joined``
     terms, which reach the patch. Earlier terms keep their Hamiltonians unless
@@ -342,8 +342,6 @@ def _local_effective_terms(chip: "Chip", mode_label: str, taken: set[str], *, ab
     for index, (label, dim, part, vector) in enumerate(zip(survivors, survivor_dims, parts, vectors)):
         if index == 0:
             part = part + mean * xp.eye(energy_dims[0])
-        if tolerance is not None and np.max(np.abs(part)) <= tolerance:
-            continue
         added.append(EffectiveTerms((label,), (dim,), vector @ part @ vector.conj().T,
                                     label=_unique_label(f"retained_{mode_label}_{label}", taken),
                                     excitation_changes={} if conserving else None))
@@ -884,8 +882,9 @@ def reduce_device(chip: "Chip", target: Any, method: str, *, local: bool = False
     # their devices. The map carries each channel that acts on the patch.
     # Devices outside the patch keep their coordinates, so the channel keeps
     # its own support.
+    map_support = patch if local else labels
     joined = tuple(t for t in chip.effective_terms
-                   if t.projection is not None and not lineage_labels(t.projection).isdisjoint(patch if local else labels))
+                   if t.projection is not None and not lineage_labels(t.projection).isdisjoint(map_support))
     parents = lineage(tuple(t.projection for t in joined if t.projection is not None))
     step = OperatorProjection(tuple(labels), tuple(numeric.authored_dims), tuple(numeric_survivors),
                               tuple(numeric_final.authored_dims), step_embedding, parents=parents) if local else None

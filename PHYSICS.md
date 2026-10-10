@@ -1354,9 +1354,11 @@ by devices outside the patch.
 The correction is split in the energy coordinates of the patch survivors. The part on one survivor is
 the normalized partial trace onto it, minus the mean, and the first survivor's part also holds the
 mean. Each part is an `EffectiveTerms` on its own device. The rest has no single-device content, and it
-acts on all patch survivors. A concrete part whose entries stay below 1000 machine epsilons times the
-largest entry of the patch Hamiltonian is round-off, and the reduction drops it. A traced part is kept.
-A later patch therefore reads a single-device part only when it holds that device.
+acts on all patch survivors. Single-device parts are retained even when their shifts are small.
+The current implementation drops a concrete remainder below 1000 machine epsilons times the largest
+entry of the patch Hamiltonian. A traced remainder is kept. This cutoff is numerical and does not
+prove that a small remainder is round-off. A later patch reads a single-device part only when it
+holds that device.
 
 The reduction transforms the channels of the removed device and couplings. It also carries every
 retained channel that acts on the patch through the new map. Devices outside the patch keep their

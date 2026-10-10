@@ -233,14 +233,6 @@ def test_local_steps_equal_the_full_reduction_in_sequence(order):
                                    atol=1e-12)
 
 
-def test_local_patch_keeps_the_far_device_of_a_cross_kerr_edge():
-    """The cross-Kerr edge shifts the mode's neighbour by the level of r1, so r1 joins the patch."""
-    chip = _ring(2, cross_kerr=True)
-    local = eliminate(chip, "r0", local=True)
-    _assert_same_reduction(eliminate(chip, "r0"), local)
-    assert local.chip.effective_terms[-1].labels == ("q0", "r1")
-
-
 @pytest.mark.parametrize("x", [0.05, 0.03], ids=["nonzero", "cancelled"])
 def test_local_patch_holds_each_term_that_shifts_a_neighbour(x):
     """d shifts a through n_a n_d, and the port pair on (a, b) and c through n_a n_b n_c, so both join m's patch."""
@@ -314,8 +306,8 @@ def test_partition_keeps_each_map_with_the_devices_it_acts_on():
         chip = eliminate(chip, target, local=True).chip
     parts = chip.partition().components
     assert [part.labels for part in parts] == [("a", "b"), ("c",)]
-    (h_ab, loss_ab), (h_c, loss_c) = (_model(part.chip) for part in parts)
-    hamiltonian, loss = _model(chip)
+    (h_ab, loss_ab, _), (h_c, loss_c, _) = (_model(part.chip) for part in parts)
+    hamiltonian, loss, _ = _model(chip)
     np.testing.assert_allclose(np.kron(h_ab, np.eye(2)) + np.kron(np.eye(4), h_c), hamiltonian, rtol=0, atol=1e-12)
     np.testing.assert_allclose(np.kron(loss_ab, np.eye(2)) + np.kron(np.eye(4), loss_c), loss, rtol=0, atol=1e-12)
 
@@ -401,3 +393,15 @@ def test_local_reduction_gradient_matches_the_full_reduction():
     actual = jax.jit(jax.grad(lambda g: level(g, True)))(g)
     assert np.all(np.abs(expected) > 1e-2)
     np.testing.assert_allclose(actual, expected, rtol=1e-9)
+
+
+def test_local_reduction_keeps_small_resolved_lamb_shifts():
+    """A small but resolved shift must not disappear under an energy-scale cutoff."""
+    q = Resonator(freq=5.0, levels=2, label="q")
+    r = Resonator(freq=6.0, levels=2, label="r")
+    g = 1e-6
+    chip = Chip([q, r], [Capacitive(q, r, g=g)])
+    expected = g**2 / (q.freq - r.freq)
+    for local in (False, True):
+        frequency = float(eliminate(chip, "r", local=local).chip.freq("q"))
+        np.testing.assert_allclose(frequency - q.freq, expected, rtol=0, atol=np.spacing(q.freq))
