@@ -164,26 +164,30 @@ def _feedline_chip() -> Chip:
     return Chip([*qubits, *readouts], couplings, port_network=network, frame=5.2, approximation=RWA())
 
 
-# Across every dip, the exact route leaves Purcell dispersion, about 0.4 (g/Δ)²κ/(2πΔ) at the smallest removed Δ.
-# SW also misses the fourth-order shift g⁴/Δ³, which moves S21 at the dip by 8πκ_e g⁴/(κ²Δ³) ≤ 8π g⁴/(κ_eΔ³).
 @pytest.mark.parametrize(
-    ("modes", "options", "bound", "legs", "kappa_over_delta"),
-    [(("r2",), {"method": "exact"}, 2 * (0.04 / 1.465) ** 2 * 0.01 / (2 * np.pi * 1.465),
-      ([], ["r2_transmission"]), 0.01 / (2 * np.pi * 0.099)),
-     (("r2", "r1"), {"method": "exact"}, 2 * (0.04 / 1.232) ** 2 * 0.01 / (2 * np.pi * 1.232),
-      (["r1_transmission"], ["r2_transmission"]), 0.0),
-     (("r2", "r1"), {"method": "sw", "local": True}, 2 * 8 * np.pi * 0.04**4 / (0.01 * 1.232**3),
-      (["r1_transmission"], ["r2_transmission"]), 0.0)],
+    ("modes", "options", "legs", "beyond"),
+    [(("r2",), {"method": "exact"}, ([], ["r2_transmission"]), ("r3",)),
+     (("r2", "r1"), {"method": "exact"}, (["r1_transmission"], ["r2_transmission"]), ()),
+     (("r2", "r1"), {"method": "sw", "local": True}, (["r1_transmission"], ["r2_transmission"]), ())],
     ids=["middle-readout", "middle-then-first-readout", "middle-then-first-readout-local"],
 )
-def test_feedline_readout_elimination_keeps_the_line_transmission(modes, options, bound, legs,
-                                                                  kappa_over_delta) -> None:
+def test_feedline_readout_elimination_keeps_the_line_transmission(modes, options, legs, beyond) -> None:
     """Readouts removed from a shared feedline keep their transmission as one-pass sections."""
     import json
 
     from quchip import VNA
 
     chip = _feedline_chip()
+    legs_by_mode = {edge.device_b_label: edge for edge in chip.couplings}
+    ports_by_mode = {port.resolve_targets(chip)[0]: port for port in chip.ports}
+    detuning = min(abs(chip[mode].freq - chip[legs_by_mode[mode].device_a_label].freq) for mode in modes)
+    g = max(legs_by_mode[mode].g for mode in modes)
+    rate = float(ports_by_mode[modes[-1]].rate_value(chip))
+    # Purcell dispersion for exact reduction; the fourth-order energy shift also limits SW.
+    bound = (2 * (g / detuning)**2 * rate / (2 * np.pi * detuning) if options["method"] == "exact"
+             else 2 * 8 * np.pi * g**4 / (rate * detuning**3))
+    kappa_over_delta = (rate / (2 * np.pi * min(abs(chip[label].freq - chip[modes[-1]].freq) for label in beyond))
+                        if beyond else 0.0)
     reduced_chip = chip
     for mode in modes:
         result = eliminate(reduced_chip, mode, **options)
@@ -199,7 +203,12 @@ def test_feedline_readout_elimination_keeps_the_line_transmission(modes, options
     assert section["is_valid"]
     assert f"{modes[-1]}_transmission κ/Δ={float(section['kappa_over_delta']):.2g} ✓" in result.describe()
 
-    frequencies = np.concatenate([pole + np.array([-1e-3, 0.0, 1e-3]) for pole in (6.5593, 6.6581, 6.7569)])
+    # The readout-like eigenvalue of each isolated RWA pair sets its resonance.
+    poles = []
+    for mode, edge in legs_by_mode.items():
+        fr, fq = chip[mode].freq, chip[edge.device_a_label].freq
+        poles.append((fr + fq + np.hypot(fr - fq, 2 * edge.g)) / 2)
+    frequencies = np.concatenate([pole + np.array([-1e-3, 0.0, 1e-3]) for pole in poles])
     full = np.asarray(VNA(chip).sweep(frequencies).matrix)[:, 0, 0]
     reduced = np.asarray(VNA(restored).sweep(frequencies).matrix)[:, 0, 0]
     # Reducing the line's own Hamiltonian term with the chip moves the kept dips by 8e-3.

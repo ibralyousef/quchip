@@ -331,6 +331,7 @@ serializes.
 `network.mode_transmission(...)` adds a one-pass passive reference section.
 Side 1 to side 2 multiplies the field by the full `S_r(f)`, without a square root.
 Reverse propagation is transparent, so the section acts on one leg only.
+Zero external coupling gives unit transfer, including at resonance.
 Its parameters are `freq` in GHz and `external_rate` and `internal_rate` in 1/ns.
 The internal-loss bath is vacuum. quchip tracks these parameters like those of
 `network.filter(...)`, and the section serializes.

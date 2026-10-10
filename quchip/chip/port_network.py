@@ -407,9 +407,10 @@ def _mode_transmission_transfer(
     """Return the one-pass amplitude transfer of a damped linear mode."""
     xp = select_array_module(contains_tracer((frequency, freq, external_rate, internal_rate)))
     detuning = 2.0 * xp.pi * (xp.asarray(frequency) - freq)
-    return ((internal_rate - external_rate) / 2.0 - 1j * detuning) / (
-        (external_rate + internal_rate) / 2.0 - 1j * detuning
-    )
+    denominator = (external_rate + internal_rate) / 2.0 - 1j * detuning
+    # A disconnected, lossless mode is transparent even at its bare resonance.
+    absent = (denominator == 0.0) & (external_rate == 0.0)
+    return 1.0 - external_rate / xp.where(absent, 1.0, denominator)
 
 
 def _mode_reflection_transfer(
@@ -985,6 +986,7 @@ class PortNetwork:
         Side 1 to side 2 multiplies the field by
         ``S_r(f) = ((κ_i - κ_e)/2 - iΩ) / ((κ_e + κ_i)/2 - iΩ)``,
         with ``Ω = 2π(f - freq)``. Reverse propagation is transparent.
+        With zero external coupling, the section is transparent at every frequency.
         The section acts on one leg and stays outside the Markovian
         ``S``, ``L``, and ``H``. Its internal-loss bath is vacuum.
         Continuous-wave APIs evaluate the transfer at each frequency.

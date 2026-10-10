@@ -1045,36 +1045,27 @@ def reduce_device(chip: "Chip", target: Any, method: str, *, local: bool = False
                 reference_freq=incoming_frequencies[touching_labels[0]],
             )
         network._insert_reference_section(reflection_plane, section, reverse=inbound)
-        frequency_error = ""
-        if method == "sw":
-            frequency_error = ("SW misses frequency shifts beyond second order, of order g⁴/Δ³ with one survivor "
-                               "and 2g_1g_2J/(Δ_1Δ_2) when a coupling J joins two survivors. ")
+        location = f"on plane {reflection_plane!r}"
         if shared_line:
             leg = "inbound" if inbound else "outbound"
-            if method == "sw":
-                frequency_error = (
-                    "SW misses frequency shifts beyond second order. With one survivor, their scale is g⁴/Δ³. "
-                    "A coupling J between two survivors adds shifts of order 2g_1g_2J/(Δ_1Δ_2). "
-                )
-            notes.append(
-                f"Kept the transmission of {mode_label!r} as reference section {section_label!r} "
-                f"on the {leg} leg of plane {reflection_plane!r}. "
-                "It uses the dressed transition and mode-weighted external and internal rates. "
-                "The section drops damping from survivor channels, of order (g/Δ)²γ_s. "
-                "Purcell dispersion leaves a scattering residual of order (g/Δ)²κ_e/Δ. "
-                f"{frequency_error}The section's internal-loss bath is vacuum. "
-                "The leg does not change the weak-probe response from the line input. "
+            location = f"on the {leg} leg of plane {reflection_plane!r}"
+        note = (
+            f"Kept the {section_kind} of {mode_label!r} as reference section {section_label!r} {location}. "
+            "It uses the dressed transition and mode-weighted external and internal rates. "
+            "The section drops damping from survivor channels, of order (g/Δ)²γ_s. "
+            "Purcell dispersion leaves a scattering residual of order (g/Δ)²κ_e/(2π|Δ|). "
+        )
+        if method == "sw":
+            note += ("SW misses frequency shifts beyond second order, of order g⁴/Δ³ with one survivor "
+                     "and 2g_1g_2J/(Δ_1Δ_2) when a coupling J joins two survivors. ")
+        note += "The section's internal-loss bath is vacuum."
+        if shared_line:
+            note += (
+                " Either leg preserves the weak-probe response from the line input. "
                 "Near kept-port frequencies beyond the section, emitted or received fields err by up to "
                 "the reported kappa_over_delta."
             )
-        else:
-            notes.append(
-                f"Kept the reflection of {mode_label!r} on plane {reflection_plane!r} as reference section "
-                f"{section_label!r}, using its dressed transition and mode-weighted external and internal rates. "
-                "The section drops damping from survivor channels, of order (g/Δ)²γ_s. "
-                "Purcell dispersion leaves a scattering residual of order (g/Δ)²κ_e/Δ. "
-                f"{frequency_error}The section's internal-loss bath is vacuum."
-            )
+        notes.append(note)
     source_factors = tuple(
         _array(source_bases[label].vectors).conj().T @ _array(source_bases[label].energy_vectors) for label in labels
     )
