@@ -1034,3 +1034,14 @@ def test_port_tones_keep_the_sign_of_their_bands() -> None:
 
     assert signed.coefficients == (("a", 1), ("b", -2)) and signed.freq == -5.0
     assert unsigned.coefficients == (("a", -1), ("b", 2)) and unsigned.freq == 5.0
+
+
+@pytest.mark.unit
+def test_disconnected_mode_transmission_is_transparent_at_resonance() -> None:
+    """A mode with no coupling to the line leaves the incident field unchanged."""
+    from quchip.chip.port_network import _mode_transmission_transfer
+
+    frequencies = np.array([5.9, 6.0, 6.1])
+    with np.errstate(invalid="raise", divide="raise"):
+        transfer = _mode_transmission_transfer(frequencies, freq=6.0, external_rate=0.0)
+    np.testing.assert_array_equal(transfer, np.ones(3))

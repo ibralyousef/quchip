@@ -8,12 +8,12 @@ This file records notable user-visible changes to quchip.
 
 #### Changes and migration
 
-- `eliminate()` keeps a port-coupled mode's reflection as a
+- For a port alone on its plane, `eliminate()` keeps the mode's reflection as a
   `PortNetwork.mode_reflection(...)` reference section. It uses the dressed
   transition and scales both rates by the dressed lowering weight. Residual
   errors include Purcell dispersion, omitted survivor damping, and higher-order
-  energy shifts for SW. Several ports on the mode or shared fields on its
-  plane remain unsupported.
+  energy shifts for SW. Several ports on the mode or fields outside its
+  series path remain unsupported.
   ([#76](https://github.com/quchip/quchip/issues/76),
   [#115](https://github.com/quchip/quchip/pull/115))
 - Capacitive couplings use each device's declared charge operator, as charge
@@ -39,6 +39,11 @@ This file records notable user-visible changes to quchip.
 
 #### New features
 
+- `eliminate()` removes a readout whose port shares a feedline with other ports.
+  `PortNetwork.mode_transmission(...)` keeps its dressed transmission as a
+  one-pass reference section. The result reports a dispersive field-error scale
+  for kept ports beyond the section as `kappa_over_delta`, not a strict bound.
+  ([#116](https://github.com/quchip/quchip/pull/116))
 - You can eliminate port-coupled modes on chips with more than two devices. The
   transformed port acts jointly on every survivor. Stationary-tone frame
   planning keeps each port band's sign, so VNA accepts the joint operator. A
@@ -73,6 +78,9 @@ This file records notable user-visible changes to quchip.
 
 #### Fixes
 
+- Repeated elimination keeps internal loss in the removed mode's reference
+  section, including channels carried onto several devices by earlier steps.
+  ([#116](https://github.com/quchip/quchip/pull/116))
 - `eliminate(..., method="exact")` of a chip whose approximation conserves total
   excitation number, such as `RWA()`, now diagonalizes each excitation sector
   separately. Retained terms no longer carry ~1e-12 entries between sectors,

@@ -150,23 +150,76 @@ def test_eliminate_rejects_port_connected_nonlinear_target() -> None:
         eliminate(chip, "q")
 
 
-def test_eliminate_rejects_port_that_generates_a_cascade_hamiltonian() -> None:
-    """A field reduction cannot double-count an active cascade Hamiltonian."""
-    qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="q")
-    resonator = Resonator(freq=6.0, levels=2, label="r")
-    network = PortNetwork(label="active_line")
-    readout = network.port("readout", target=resonator, rate=0.03)
-    downstream = network.port("downstream", target=qubit, rate=0.02)
-    network.cascade(readout, downstream)
-    network.expose("feedline", input=readout.input, output=downstream.output)
-    chip = Chip(
-        [qubit, resonator],
-        [Capacitive(qubit, resonator, g=0.04, label="qr")],
-        port_network=network,
-    )
+def _feedline_chip() -> Chip:
+    """Three qubits read out through resonators in series on one feedline."""
+    qubits = [DuffingTransmon(freq=freq, anharmonicity=-0.26, levels=2, label=f"q{index}")
+              for index, freq in enumerate((5.326, 5.192, 5.06), start=1)]
+    readouts = [Resonator(freq=freq, levels=2, label=f"r{index}", internal_quality_factor=1e4)
+                for index, freq in enumerate((6.558, 6.657, 6.756), start=1)]
+    network = PortNetwork(label="feed")
+    ports = [network.port(f"p{index}", target=readout, rate=0.01) for index, readout in enumerate(readouts, start=1)]
+    network.cascade(*ports)
+    network.expose("line", input=ports[0].input, output=ports[-1].output)
+    couplings = [Capacitive(qubit, readout, g=0.04) for qubit, readout in zip(qubits, readouts)]
+    return Chip([*qubits, *readouts], couplings, port_network=network, frame=5.2, approximation=RWA())
 
-    with pytest.raises(NotImplementedError, match="cascade-generated Hamiltonian"):
-        eliminate(chip, "r")
+
+@pytest.mark.parametrize(
+    ("modes", "options", "legs", "beyond"),
+    [(("r2",), {"method": "exact"}, ([], ["r2_transmission"]), ("r3",)),
+     (("r2", "r1"), {"method": "exact"}, (["r1_transmission"], ["r2_transmission"]), ()),
+     (("r2", "r1"), {"method": "sw", "local": True}, (["r1_transmission"], ["r2_transmission"]), ())],
+    ids=["middle-readout", "middle-then-first-readout", "middle-then-first-readout-local"],
+)
+def test_feedline_readout_elimination_keeps_the_line_transmission(modes, options, legs, beyond) -> None:
+    """Readouts removed from a shared feedline keep their transmission as one-pass sections."""
+    import json
+
+    from quchip import VNA
+
+    chip = _feedline_chip()
+    legs_by_mode = {edge.device_b_label: edge for edge in chip.couplings}
+    ports_by_mode = {port.resolve_targets(chip)[0]: port for port in chip.ports}
+    detuning = min(abs(chip[mode].freq - chip[legs_by_mode[mode].device_a_label].freq) for mode in modes)
+    g = max(legs_by_mode[mode].g for mode in modes)
+    rate = float(ports_by_mode[modes[-1]].rate_value(chip))
+    # Purcell dispersion for exact reduction; the fourth-order energy shift also limits SW.
+    bound = (2 * (g / detuning)**2 * rate / (2 * np.pi * detuning) if options["method"] == "exact"
+             else 2 * 8 * np.pi * g**4 / (rate * detuning**3))
+    last_edge = legs_by_mode[modes[-1]]
+    mode_freq = chip[modes[-1]].freq
+    last_detuning = mode_freq - chip[last_edge.device_a_label].freq
+    # The isolated RWA pair gives the removed mode's dressed lowering weight.
+    weight = ((1 + last_detuning / np.hypot(last_detuning, 2 * last_edge.g)) / 2
+              if options["method"] == "exact" else np.cos(last_edge.g / last_detuning)**2)
+    kappa_over_delta = (weight * rate / (2 * np.pi * min(abs(chip[label].freq - mode_freq) for label in beyond))
+                        if beyond else 0.0)
+    reduced_chip = chip
+    for mode in modes:
+        result = eliminate(reduced_chip, mode, **options)
+        reduced_chip = result.chip
+    restored = Chip.from_dict(json.loads(json.dumps(reduced_chip.to_dict())))
+
+    # A section filters the outbound leg, unless kept readouts lie only downstream of it.
+    plane = restored.resolve().slh.external_channels[0].reference
+    assert ([element.label for element in plane.inbound], [element.label for element in plane.outbound]) == legs
+    # The diagnostic uses incoming detunings, so it is a scale rather than a strict field-error bound.
+    section = result.validity[f"{modes[-1]}_transmission"]
+    assert section["kappa_over_delta"] == pytest.approx(kappa_over_delta, rel=1e-12, abs=1e-12)
+    assert section["is_valid"]
+    assert f"{modes[-1]}_transmission κ/Δ={float(section['kappa_over_delta']):.2g} ✓" in result.describe()
+
+    # The readout-like eigenvalue of each isolated RWA pair sets its resonance.
+    poles = []
+    for mode, edge in legs_by_mode.items():
+        fr, fq = chip[mode].freq, chip[edge.device_a_label].freq
+        poles.append((fr + fq + np.hypot(fr - fq, 2 * edge.g)) / 2)
+    frequencies = np.concatenate([pole + np.array([-1e-3, 0.0, 1e-3]) for pole in poles])
+    full = np.asarray(VNA(chip).sweep(frequencies).matrix)[:, 0, 0]
+    reduced = np.asarray(VNA(restored).sweep(frequencies).matrix)[:, 0, 0]
+    # Reducing the line's own Hamiltonian term with the chip moves the kept dips by 8e-3.
+    # A second removal that drops its readout's internal loss errs by 0.6 at that dip.
+    assert np.max(np.abs(full - reduced)) < bound
 
 
 def _bus_readout_chip(port_count: int = 1) -> Chip:
