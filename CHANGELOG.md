@@ -16,6 +16,12 @@ This file records notable user-visible changes to quchip.
   correction of order (g/Δ)²κ/Δ (8e-5). A mode with several ports, or a port
   whose plane also carries other fields, now raises, so keep such a mode in the
   model. ([#76](https://github.com/quchip/quchip/issues/76))
+- `pulse.<i>.detuning` now names the carrier detuning. A custom envelope
+  parameter named `detuning` moves to `pulse.<i>.envelope.detuning`, like one
+  named `phase`. Code that rebinds or sweeps `pulse.<i>.detuning` for such an
+  envelope now adds a carrier offset and keeps the envelope's value. Use the
+  new path with `with_params()` and `QuantumSequence.vary()`.
+  ([#106](https://github.com/quchip/quchip/pull/106))
 
 #### New features
 
@@ -28,6 +34,12 @@ This file records notable user-visible changes to quchip.
 - `PortNetwork.mode_reflection(...)` adds a serializable two-sided reference
   section that reflects like a damped linear mode.
   ([#76](https://github.com/quchip/quchip/issues/76))
+- `QuantumSequence.schedule()`, `charge()` and `phase()` accept `detuning=`, a
+  carrier offset in GHz referenced to the pulse start. The pulse is then the
+  same in its frame at every start time, so a detuned calibrated gate keeps its
+  rotation axis when it moves. `pulse.<i>.detuning` rebinds, sweeps and
+  differentiates like `freq`. A carrier at `freq = f + δ` stays a fixed
+  oscillator. ([#106](https://github.com/quchip/quchip/pull/106))
 
 #### Fixes
 
@@ -53,6 +65,16 @@ This file records notable user-visible changes to quchip.
   assemble a superoperator whose estimated peak exceeds the available memory.
   Previously, the operating system killed them. The dynamiqs stationary Liouvillian
   uses the same check. ([#80](https://github.com/quchip/quchip/issues/80))
+- QuTiP preserves envelope steps listed in `sampling_times()` after pulse
+  starts and line delays, within floating-point precision. Previously, these
+  steps could become interpolation ramps. Unlisted steps still require explicit
+  feature times. Pulse edges at zero no longer cause interpolation overflow
+  warnings when the solve starts before zero.
+  ([#104](https://github.com/quchip/quchip/pull/104))
+- Carrier pulses accept `frame=` to select the device whose virtual-Z phase
+  they follow. For cross-resonance control, set the target qubit as the frame
+  of both the cross-resonance and cancellation tones. The default remains the
+  driven device. ([#105](https://github.com/quchip/quchip/pull/105))
 
 #### Performance
 
