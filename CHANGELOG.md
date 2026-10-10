@@ -208,6 +208,7 @@ This file records notable user-visible changes to quchip.
 - Correct dispersive signs, readout rate definitions, VNA phase notation, and
   reduction limits. Document device and bath models, convergence requirements,
   and parametric control. Add primary references for the physical conventions.
+  Align guide calculations, fitting targets, and plots with ground-positive Z.
   ([#122](https://github.com/quchip/quchip/pull/122))
 - The NV-centre guide is removed.
 - The example notebooks and the guides are re-executed against the current

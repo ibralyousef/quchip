@@ -63,9 +63,11 @@ Resonator frequency: 7.001249 GHz
 Conditional resonator pull: -0.277 MHz
 ```
 
-The full conditional pull is $E_{11}-E_{10}-E_{01}+E_{00}$. Its half is the
-usual $\chi$ in the sigma-z dispersive Hamiltonian. `chip.kerr_matrix()` collects
-these full pulls off-diagonal and dressed anharmonicities on the diagonal.
+The full conditional pull is $E_{11}-E_{10}-E_{01}+E_{00}$.
+For quchip's $Z=|0\rangle\langle0|-|1\rangle\langle1|$, the coefficient
+of $Z n_r$ is negative half this pull: $\chi_Z=-\mathrm{dispersive\_shift}/2$.
+`chip.kerr_matrix()` collects full pulls off-diagonal and dressed
+anharmonicities on the diagonal.
 
 ## Change a parameter
 
