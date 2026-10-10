@@ -57,21 +57,48 @@ Authored `LocalOps` operators, including `op.sigma_z` in a Hamiltonian declarati
 For `Capacitive`:
 
 ```text
-full: g * (a + a†)(b + b†)
+full: g * Q_a Q_b
+```
+
+`Q` is each endpoint's charge operator, the same operator that `ChargeDrive` uses. Between two Fock
+devices, `Q = i(a − a†)`:
+
+```text
+full: g * i(a − a†) * i(b − b†)
+    = g * (a†b + ab†) − g * (ab + a†b†)
 ```
 
 `interaction_hamiltonian()` always returns this full form, and you never author the RWA form `g * (a†b + ab†)` directly. The RWA form is what remains after the chip masks out, or the engine filters, the bands that change the total excitation.
 
-`a + a†` is the charge-like operator of a `FockSpace` endpoint. On a `ChargeSpace` or
-`PhaseGridSpace` endpoint (`ChargeBasisTransmon`, `Fluxonium`), the charge-like operator is `n`. So
-the same declaration authors `g * n_a n_b`, or `g * (a + a†) n_b` for a mixed pair
-(`EndpointOps.charge`, [`quchip/declarative/ops.py`](quchip/declarative/ops.py)). The two operators
-have different matrix elements. For a transmon, `<0|a + a†|1> = 1`, but
-`<0|n|1> ≈ (E_J/8E_C)^{1/4}/√2`. One numerical `g` is therefore not one physical coupling across
-bases. Match models across bases through dressed quantities (exchange, χ, ZZ), not through `g`.
+A device declares its charge operator with `charge_coupling_operator()`, and `EndpointOps.charge`
+([`quchip/declarative/ops.py`](quchip/declarative/ops.py)) returns it. On a device without that
+method, the local space sets the operator: `a + a†` on a `FockSpace`, and `n` on a `ChargeSpace` or
+`PhaseGridSpace`. The built-in devices declare these operators:
 
-`ChargeDrive` on a Fock device addresses the quadrature `i(a − a†)`, whereas the coupling charge
-operator is `a + a†`. Both operators are charge-like and differ by a phase convention (§2.3).
+| Device | Charge operator `Q` |
+| --- | --- |
+| `DuffingTransmon`, `Resonator`, `KerrCavity`, `Qubit` | `i(a − a†)` |
+| `FluxTunableTransmon` | `s(Φ) i(a − a†)` |
+| `ChargeBasisTransmon`, `Fluxonium` | `n` |
+| `EigenbasisDevice` | the supplied `charge_operator` |
+
+At fixed E_C, the charge zero-point amplitude of a transmon scales as `E_J^{1/4}` (Koch et al.,
+PRA 76, 042319 (2007), §III). The `FluxTunableTransmon` factor
+
+```text
+s(Φ) = (E_J(Φ)/E_J,max)^{1/4} = (cos²(πΦ) + d² sin²(πΦ))^{1/8}
+```
+
+takes it relative to Φ = 0, so `g` and the `ChargeDrive` amplitude refer to the sweet spot. A chip
+at `flux_bias = 0` therefore keeps its exchange, and the exchange decreases as `flux_bias` moves
+away from 0. The phase operator is `(a + a†)/s(Φ)`. `s` follows the static `flux_bias`. A
+`FluxDrive` pulse changes only the device frequency (§6.2), so `s` keeps its static value during
+the pulse.
+
+The charge operators have different matrix elements. `|<0|Q|1>|` is 1 on a `DuffingTransmon` or a
+`Resonator` and `s(Φ)` on a `FluxTunableTransmon`. On a `ChargeBasisTransmon`,
+`|<0|n|1>| ≈ (E_J/8E_C)^{1/4}/√2`. One numerical `g` is therefore not one physical coupling across
+bases. Match models across bases through dressed quantities (exchange, χ, ZZ), not through `g`.
 
 ### 2.3 Chip and sequence Hamiltonians
 
@@ -395,6 +422,20 @@ Each device authors its Hamiltonian and named operators in a `LocalSpace`. The b
 
 `Chip(..., basis="native")` keeps each device's authored local coordinate basis and dimension. `basis="eigen"` diagonalizes each device's exact authored local Hamiltonian. It then projects all Hamiltonians, coupling and drive operators, states, observables, and collapse operators into the retained local energy subspace. A device can override the chip-wide policy with its own `basis` and, where necessary, select the retained energy dimension with `projection_levels`.
 
+A multi-device operator can project factor by factor when it is a sum of
+scalar-weighted single-device products:
+
+```text
+V†(A ⊗ B)V = (V_a† A V_a) ⊗ (V_b† B V_b).
+```
+
+Products on one device multiply before projection. The truncated projector
+`V_a V_a†` is not the identity in the authored space. A product of sums can
+expand into many terms. The engine estimates memory for factored and dense
+projection, then selects the smaller route. Opaque multi-device operators use
+the dense route. Both routes check available memory before projection. These
+estimates cover concrete forward calculations, not reverse-mode storage.
+
 Resolution records each fixed authored-to-solver transformation in `EngineResult.bases`. Local energy ordering differs from whole-chip dressing: `Chip.dress()` diagonalizes the coupled static chip for analysis, whereas local-basis resolution defines the tensor factors that go through the engine and backends.
 
 Truncation diagnostics sample the component's declared boundary projector at the
@@ -622,6 +663,28 @@ carrier produce a drive modulation only after `QuantumSequence.schedule()`.
 owns the pulse start, carrier, and global phase. You can therefore place and
 phase-rotate the same shape without changing its physics definition.
 
+Each carrier pulse follows the phase reference of one device, its frame.
+`QuantumSequence.vz(device, θ)` emits no pulse. It adds θ to the phase of every
+later carrier pulse in that device's frame, on any line (McKay et al., PRA 96,
+022330 (2017)). The frame defaults to the device that the pulse's line drives.
+A cross-resonance tone runs on the control's line at the target's frequency.
+Its phase sets the axis of the target's conditional rotation, so the pulse
+names the target as its frame with `frame=`. Baseband pulses have no carrier
+and follow no frame.
+
+A pulse's `detuning` δ offsets its carrier from `freq`, referenced to the pulse
+start `t0`:
+
+```text
+s(t) = E(t - t0) exp(iφ) exp(-2πi f t) exp(-2πi δ (t - t0))
+```
+
+`freq` stays the frame frequency, so the pulse is the same in that frame at
+every start time. A carrier at `freq = f + δ` is a fixed oscillator instead.
+Relative to the frame at `f`, its phase at the pulse start is `φ - 2πδ t0`. Its
+rotation axis therefore turns when the pulse moves. Scheduling owns the offset,
+as it owns the carrier, so every envelope supports it.
+
 Local eigenbasis projection uses the static authored Hamiltonian at the
 solve's operating point. The engine projects component-owned
 time-dependent terms into that fixed basis. quchip does not construct an
@@ -637,11 +700,11 @@ The chip owns one explicit approximation strategy. `Exact()` keeps every term in
 
 ### 6.1 Static operator bands
 
-For `Capacitive`:
+For `Capacitive` between two Fock devices:
 
 ```text
-full: g * (a + a†)(b + b†)
-     = g * (a†b + ab†) + g * (ab + a†b†)
+full: g * i(a − a†) * i(b − b†)
+    = g * (a†b + ab†) − g * (ab + a†b†)
 ```
 
 - `a†b + ab†` has total excitation weight zero and stays under `RWA()`
@@ -1173,18 +1236,31 @@ marks numerical outputs as invalid. The working-precision threshold only selects
 and never changes a nonzero coupling into zero. Exact reduction does not construct an unused SW
 generator. Survivor parameters come from indexing `H_eff`: `freq_after(s) = E(1_s) − E(0)`, and the
 pair exchange is the `<1_a|H_eff|1_b>` element. Authored direct edges stay unchanged. A separate
-mediated edge, named by `effective_params["exchange"]["coupling"]`, carries the real exchange matrix
-element of `H_eff − P H P`.
-
-The complete retained correction carries all remaining matrix elements. Sequential shifts and
-detunings use the incoming Hamiltonian's diagonal, including earlier retained corrections. With `J`,
-the bridge reduction records its linearization
+mediated edge, named by `effective_params["exchange"]["coupling"]`, carries the exchange element
+`M_ab` of `H_eff − P H P` in the units of an edge authored between the survivors:
 
 ```text
-dJ/domega_c = (g_a*g_b/2)(1/Delta_a^2 + 1/Delta_b^2)
+j_eff = Re(M_ab / u_ab),    u_ab = <1_a 0_b|H_edge|0_a 1_b> per unit edge strength
 ```
 
-(the weight that the flux-drive retarget rule uses, §11). Per-element virtual-state attribution (`pathways`) is `(1/2) V_ik V_kj (1/(E_i−E_k) + 1/(E_j−E_k))` summed over intermediate `|k>`, with the same guarded denominator.
+A capacitive edge has `u_ab = conj(<0|Q_a|1>) <0|Q_b|1>`, with `Q_s` the survivor's charge operator
+in its energy basis. Duffing and resonator survivors have `u_ab = 1`. A `ChargeBasisTransmon` has
+`|<0|n|1>| ≠ 1`, and a `Fluxonium` has an imaginary `<0|n|1>`. A first-transition exchange edge has
+`u_ab = 1`. If `u_ab = 0`, the edge has zero strength.
+
+The complete retained correction carries all remaining matrix elements, including any part of
+`M_ab` that the edge's real strength cannot carry. Sequential shifts and detunings use the incoming
+Hamiltonian's diagonal, including earlier retained corrections. With `J`, the bridge reduction
+records its linearization in the same edge units, from the resolved leg elements `L_s = <1_s|H|1_c>`:
+
+```text
+dJ/domega_c = Re(L_a conj(L_b) / u_ab) (1/Delta_a^2 + 1/Delta_b^2) / 2
+```
+
+This is the weight that the flux-drive retarget rule uses (§11). It varies the coupler's
+first transition while holding the charge matrix elements fixed. Capacitive legs give
+`L_a conj(L_b) / u_ab = g_a g_b |<0|Q_c|1>|^2`, so a resonator or Duffing coupler gives
+`(g_a*g_b/2)(1/Delta_a^2 + 1/Delta_b^2)`. Per-element virtual-state attribution (`pathways`) is `(1/2) V_ik V_kj (1/(E_i−E_k) + 1/(E_j−E_k))` summed over intermediate `|k>`, with the same guarded denominator.
 
 ### 10.4 The exact route (`method="exact"`)
 
@@ -1278,9 +1354,13 @@ cascade-generated Hamiltonian.
 The result's `notes` record that the projection is exact for the
 *spectrum* but approximate for *dissipation*, because the discarded
 `Q`-block dynamics also dephase and decay. For each eliminated coupling,
-`validity` reports `g_over_delta` (2nd-order smallness; `is_valid` gates
-at `< 0.1`) and `min_block_gap`, the smallest bare-energy gap that the
-Sylvester generator crossed. A small gap with a nonzero matrix element is
+`validity` reports `g_over_delta` and `min_block_gap`. `g_over_delta` is
+the 2nd-order smallness `|<1_s|H|1_c>| / |Delta|`, the resolved exchange
+element over the bare detuning, and `is_valid` requires it below 0.1.
+Parallel couplings between the same two devices each report their
+combined element.
+`min_block_gap` is the smallest bare-energy gap that the Sylvester
+generator crossed. A small gap with a nonzero matrix element is
 the failure mode of the perturbative expansion, even when every `g/Delta`
 is small.
 
