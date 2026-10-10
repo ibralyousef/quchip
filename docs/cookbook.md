@@ -49,7 +49,7 @@ carrier and state preparation. `chip.resolve(frame="lab", approximation=...)`
 gives a snapshot whose `dress()` returns the corresponding eigensystem.
 
 `dispersive_shift(q, r)` returns the full conditional resonator pull. Divide by
-two for the usual sigma-z coefficient χ. `kerr_matrix()` collects full pulls
+negative two for the coefficient of `Z=|0><0|-|1><1|` times resonator number. `kerr_matrix()` collects full pulls
 off diagonal and dressed anharmonicities on the diagonal.
 
 Inspect `unresolved_hamiltonian()` for the declared expression and

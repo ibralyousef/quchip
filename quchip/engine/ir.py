@@ -1885,12 +1885,6 @@ class HamiltonianTemplate:
     coherent_terms: tuple[Any, ...] = ()            # tuple[assembly.CompiledCoherentTerm, ...]
     reference_drive_ops: tuple[Any, ...] = ()       # tuple[DriveOp, ...]
     delivered_keys: frozenset[SignalKey] = frozenset()
-    #: Single-tone weight-zero bands dropped structurally under RWA during engine assembly.
-    #: time (:func:`~quchip.engine.assembly._compile_drive_terms`).
-    #: The drop decision needs no drive frequency; resolving each entry into
-    #: a :class:`DroppedTerm` does, so this stays a pointer
-    #: (``tuple[assembly._StructuralDrop, ...]``) until instantiation.
-    weight_zero_drops: tuple[Any, ...] = ()
 
 
 # ── Frame Types ─────────────────────────────────────────────────────

@@ -125,7 +125,7 @@ class VNA:
     To select a subset, pass exposed port objects or their labels as ``ports``. A bare
     label string is rejected.
 
-    S-parameters follow the engineering ``e^{+jωt}`` convention, where ``j = −i``. Probe
+    S-parameters follow the engineering ``e^{+jωt}`` convention, where ``j = i``. Probe
     and pump amplitudes, returned fields, correlations, and IQ statistics use this
     convention, while internal mode observables keep the physics convention.
 

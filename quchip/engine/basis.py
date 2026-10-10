@@ -33,8 +33,9 @@ def _eigenpairs_jvp(
     The rule Hermitianizes ``dH`` and evaluates
     ``dλ_i = <v_i|dH|v_i>`` and
     ``dv_i = Σ_{j≠i} v_j <v_j|dH|v_i> / (λ_i − λ_j)`` over the full
-    eigensystem. Gaps at or below ``1e-9·(λ_max − λ_min)`` contribute zero;
-    the tolerance is independent of the energy origin. The nested
+    eigensystem. Gaps at or below ``N eps (λ_max − λ_min)`` contribute zero.
+    Here, ``N`` is the dimension and ``eps`` is the eigenvalue dtype precision.
+    The tolerance is independent of the energy origin. The nested
     ``where`` also keeps the reciprocal off the masked branch. The diagonal
     connection is zero, fixing the parallel-transport gauge
     ``v_i† dv_i = 0``, and eigenvalue tangents are real.
@@ -63,7 +64,7 @@ def _masked_connection(values: Any, vectors: Any, dmatrix: Any, energies: Any, c
     hermitian = 0.5 * (dmatrix + dmatrix.conj().T)
     overlaps = vectors.conj().T @ hermitian @ columns
     gaps = energies[None, :] - values[:, None]
-    tolerance = 1e-9 * (values[-1] - values[0])
+    tolerance = values.shape[0] * jnp.finfo(values.dtype).eps * (values[-1] - values[0])
     resolved = jnp.abs(gaps) > tolerance
     inverse_gaps = jnp.where(resolved, 1.0 / jnp.where(resolved, gaps, 1.0), 0.0)
     return overlaps, vectors @ (inverse_gaps * overlaps)

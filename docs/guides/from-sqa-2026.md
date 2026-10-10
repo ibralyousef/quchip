@@ -117,7 +117,8 @@ valid: True
 
 ## Differentiate a spectral fitting objective
 
-The second residual uses the common sigma-z convention
+The second residual uses the excited-positive convention,
+$\sigma_z=|1\rangle\langle1|-|0\rangle\langle0|$, with
 $\chi_{\sigma_z}=\left(E_{11}-E_{10}-E_{01}+E_{00}\right)/2$.
 `dispersive_shift()` itself returns the full pull in the numerator.
 

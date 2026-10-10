@@ -8,6 +8,16 @@ This file records notable user-visible changes to quchip.
 
 #### Changes and migration
 
+- Custom `RWA(keep_bands=...)` selections must contain every adjoint band.
+  Add each tuple's negation to preserve Hermiticity. Asymmetric selections
+  now raise instead of producing non-Hermitian Hamiltonians.
+- CR susceptibility now includes real-carrier halving. `IX_per_amplitude` and
+  `ZX_per_amplitude` are half their previous values, while raw matrix elements
+  stay unchanged. Recalculate gate-time estimates from the corrected rates.
+- RWA retains longitudinal drive modulation, including explicit zero-frequency
+  carriers. Carrier-driven diagonal terms previously disappeared.
+
+
 - For a port alone on its plane, `eliminate()` keeps the mode's reflection as a
   `PortNetwork.mode_reflection(...)` reference section. It uses the dressed
   transition and scales both rates by the dressed lowering weight. Residual
@@ -38,6 +48,11 @@ This file records notable user-visible changes to quchip.
   ([#106](https://github.com/quchip/quchip/pull/106))
 
 #### New features
+
+- Dispersive readout accepts `kappa_detected` and `efficiency`. Total linewidth
+  controls pointer states and dephasing. Observed loss controls detected SNR.
+  Defaults preserve ideal collection. Invalid concrete input domains raise.
+
 
 - `eliminate()` removes a readout whose port shares a feedline with other ports.
   `PortNetwork.mode_transmission(...)` keeps its dressed transmission as a
@@ -77,6 +92,11 @@ This file records notable user-visible changes to quchip.
   oscillator. ([#106](https://github.com/quchip/quchip/pull/106))
 
 #### Fixes
+
+- Local eigenvector derivatives retain resolved small-gap responses. Their
+  cutoff now uses matrix dimension and floating-point precision instead of
+  `1e-9` of the spectral span. Degenerate eigenvector derivatives remain undefined.
+
 
 - Repeated elimination keeps internal loss in the removed mode's reference
   section, including channels carried onto several devices by earlier steps.
@@ -185,6 +205,11 @@ This file records notable user-visible changes to quchip.
   keyword but can ignore it.
 
 #### Documentation and examples
+
+- Correct dispersive signs, readout rate definitions, VNA phase notation, and
+  reduction limits. Document device and bath models, convergence requirements,
+  and parametric control. Add primary references for the physical conventions.
+
 
 - The NV-centre guide is removed.
 - The example notebooks and the guides are re-executed against the current

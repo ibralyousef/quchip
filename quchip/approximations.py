@@ -25,6 +25,8 @@ def _freeze_bands(value: Iterable[tuple[int, ...]] | None) -> frozenset[tuple[in
     )
     if not valid:
         raise TypeError("keep_bands must be an iterable of non-empty integer tuples.")
+    if any(tuple(-weight for weight in band) not in bands for band in bands):
+        raise ValueError("keep_bands must include the adjoint of every band (all weights negated).")
     return bands
 
 
@@ -105,7 +107,9 @@ class RWA(Approximation):
     ----------
     keep_bands : iterable of tuple[int, ...] or None, default None
         Operator-band weights to keep. ``None`` keeps only bands whose weights
-        sum to zero. Supplied tuples must be non-empty and integral.
+        sum to zero. Tuples follow the operator support order. Each tuple must
+        be non-empty and integral, with its negated tuple also present.
+        This adjoint closure preserves Hermiticity.
 
     References
     ----------
