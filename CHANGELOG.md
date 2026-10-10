@@ -16,6 +16,26 @@ This file records notable user-visible changes to quchip.
   series path remain unsupported.
   ([#76](https://github.com/quchip/quchip/issues/76),
   [#115](https://github.com/quchip/quchip/pull/115))
+- Capacitive couplings use each device's declared charge operator, as charge
+  drives do. For ordinary Fock devices, this changes `a + a†` to `i(a − a†)`.
+  Exchange terms retain their sign; counter-rotating terms change sign.
+  Driven `Exact()` results and mixed-basis exchange phases can change.
+  `EigenbasisDevice` now requires `charge_operator` for capacitive coupling.
+  ([#108](https://github.com/quchip/quchip/pull/108))
+- `FluxTunableTransmon` scales charge by `s = (E_J(Φ)/E_J,max)^(1/4)` and phase
+  by `1/s`. Coupling strengths and charge-drive amplitudes now refer to the
+  sweet spot. To retain a calibration at another static bias, divide `g` by
+  each flux-tunable endpoint's `s`, and charge-drive amplitude by its target's
+  `s`. Phase-drive amplitudes require multiplication by `s`. Named charge and
+  phase observables and port operators use these scales. A `FluxDrive` pulse
+  still changes frequency only; it does not vary the charge scale in time.
+  ([#108](https://github.com/quchip/quchip/pull/108))
+- `pulse.<i>.detuning` now names the carrier detuning. A custom envelope
+  parameter named `detuning` moves to `pulse.<i>.envelope.detuning`, like one
+  named `phase`. Code that rebinds or sweeps `pulse.<i>.detuning` for such an
+  envelope now adds a carrier offset and keeps the envelope's value. Use the
+  new path with `with_params()` and `QuantumSequence.vary()`.
+  ([#106](https://github.com/quchip/quchip/pull/106))
 
 #### New features
 
@@ -45,6 +65,16 @@ This file records notable user-visible changes to quchip.
   Small single-device shifts are retained. Numerical omissions from joint
   corrections are recorded with their matrix norms in GHz.
   ([#113](https://github.com/quchip/quchip/pull/113))
+- Local fitting retains independent ports and their field subgraphs in each
+  neighborhood. It rejects cuts through shared feedlines, joint ports, or
+  unsupported boundary scattering, rather than discarding their interactions.
+  ([#109](https://github.com/quchip/quchip/pull/109))
+- `QuantumSequence.schedule()`, `charge()` and `phase()` accept `detuning=`, a
+  carrier offset in GHz referenced to the pulse start. The pulse is then the
+  same in its frame at every start time, so a detuned calibrated gate keeps its
+  rotation axis when it moves. `pulse.<i>.detuning` rebinds, sweeps and
+  differentiates like `freq`. A carrier at `freq = f + δ` stays a fixed
+  oscillator. ([#106](https://github.com/quchip/quchip/pull/106))
 
 #### Fixes
 
@@ -80,9 +110,24 @@ This file records notable user-visible changes to quchip.
   now uses resolved exchange rather than authored strength. Parallel device
   couplings report their combined exchange.
   ([#111](https://github.com/quchip/quchip/pull/111))
+- QuTiP preserves envelope steps listed in `sampling_times()` after pulse
+  starts and line delays, within floating-point precision. Previously, these
+  steps could become interpolation ramps. Unlisted steps still require explicit
+  feature times. Pulse edges at zero no longer cause interpolation overflow
+  warnings when the solve starts before zero.
+  ([#104](https://github.com/quchip/quchip/pull/104))
+- Carrier pulses accept `frame=` to select the device whose virtual-Z phase
+  they follow. For cross-resonance control, set the target qubit as the frame
+  of both the cross-resonance and cancellation tones. The default remains the
+  driven device. ([#105](https://github.com/quchip/quchip/pull/105))
 
 #### Performance
 
+- Multi-device operators can project factor by factor into local eigenbases,
+  avoiding the dense authored product space. Coupled default fluxoniums no
+  longer require that allocation. The engine selects the smaller estimated
+  projection route and checks available memory before allocation.
+  ([#107](https://github.com/quchip/quchip/pull/107))
 - `VNA.sweep()` solves weak-probe scattering of pump-free chips that conserve
   total excitation number in their one-excitation block, if every input is
   vacuum. These chips include Duffing transmons, pure dephasing, and reduced
@@ -126,6 +171,11 @@ This file records notable user-visible changes to quchip.
   participating port lowers total excitation by one. The cascade Hamiltonian
   then conserves excitation, including after supported exact reductions.
   ([#110](https://github.com/quchip/quchip/pull/110))
+- Labeled dressed queries of conserving chips assemble and diagonalize only
+  the required excitation sectors. Weak-probe VNA uses the same block
+  assembly. `fit_a_dress()` applies `max_hilbert_dim` to the largest matrix
+  it diagonalizes. Full spectra, dressed states, and `dress()` retain the
+  full-space route. ([#114](https://github.com/quchip/quchip/pull/114))
 
 #### Compatibility
 
