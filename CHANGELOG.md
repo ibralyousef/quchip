@@ -37,6 +37,8 @@ This file records notable user-visible changes to quchip.
   on their own supports. Ordered maps preserve operator transport without
   forcing later patches to include every earlier patch. Noisy channels can
   still spread along the maps. Partitioning keeps each map with its devices.
+  Small single-device shifts are retained. Numerical omissions from joint
+  corrections are recorded with their matrix norms in GHz.
   ([#113](https://github.com/quchip/quchip/pull/113))
 
 #### Fixes

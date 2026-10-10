@@ -152,8 +152,8 @@ def eliminate(chip: "Chip", target: Any, *, method: str = "sw", local: bool = Fa
         port operators act on. The reduction never resolves the full chip, and
         devices and couplings outside the patch stay unchanged. Each part of
         the correction and each transformed channel keeps its own support, so
-        later patches stay local. The result equals the full-chip reduction,
-        apart from ``chi``, which describes the patch. Chips with baths, and
+        later patches stay local. The result matches full-chip reduction up to
+        recorded numerical omissions. ``chi`` describes only the patch. Chips with baths, and
         port networks that link a patch port to a port outside the patch raise
         ``NotImplementedError``.
 

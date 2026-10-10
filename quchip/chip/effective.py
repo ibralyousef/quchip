@@ -130,17 +130,17 @@ class OperatorProjection:
 
     @classmethod
     def capture(cls, chip: Any, target_labels: tuple[str, ...], target_dims: tuple[int, ...],
-                embedding: Any, *, compose: bool = True) -> OperatorProjection:
+                embedding: Any) -> OperatorProjection:
         """Compose a reduction with the source's already captured operator coordinates.
 
         ``embedding`` maps the targets into the product space of all of
-        ``chip``'s devices. With ``compose``, one earlier map over all of them
-        is multiplied in. Otherwise the earlier maps become parents, in the
+        ``chip``'s devices. One earlier map over all of them is multiplied
+        in. Otherwise the earlier maps become parents, in the
         order they apply, and keep their own embeddings.
         """
         labels, dims = tuple(d.label for d in chip.devices), tuple(chip.authored_dims)
         previous = tuple(t.projection for t in chip.effective_terms if t.projection is not None)
-        if not (compose and len(previous) == 1 and previous[0].target_labels == labels):
+        if not (len(previous) == 1 and previous[0].target_labels == labels):
             return cls(labels, dims, target_labels, target_dims, embedding, parents=lineage(previous))
         parent = previous[0]
 

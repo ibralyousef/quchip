@@ -1345,8 +1345,8 @@ denominators, so the second-order reduction leaves it unchanged.
 
 With this patch, the full-chip generator is the patch generator times the identity on the other
 devices. A coupling from the patch to other devices keeps the mode's level, so it adds nothing to
-`P [S, V] P`. The retained Hamiltonian, the transformed channels and the captured map therefore equal
-those of the full-chip reduction. Every numerical step reads the patch as a sub-chip, so its cost
+`P [S, V] P`. In exact arithmetic, the retained Hamiltonian, transformed channels, and captured map
+equal those of the full-chip reduction. The numerical omission described below limits this equivalence. Every numerical step reads the patch as a sub-chip, so its cost
 follows the patch's product space and the supports of the channels that it carries. Devices and
 couplings outside the patch stay unchanged. `chi` comes from the patch spectrum, so it omits dressing
 by devices outside the patch.
@@ -1355,10 +1355,12 @@ The correction is split in the energy coordinates of the patch survivors. The pa
 the normalized partial trace onto it, minus the mean, and the first survivor's part also holds the
 mean. Each part is an `EffectiveTerms` on its own device. The rest has no single-device content, and it
 acts on all patch survivors. Single-device parts are retained even when their shifts are small.
-The current implementation drops a concrete remainder below 1000 machine epsilons times the largest
-entry of the patch Hamiltonian. A traced remainder is kept. This cutoff is numerical and does not
-prove that a small remainder is round-off. A later patch reads a single-device part only when it
-holds that device.
+For a concrete remainder, an entry and its transpose partner are omitted only if both are at or below
+one floating-point spacing of the patch Hamiltonian's largest entry. This numerical cleanup prevents
+unresolved diagonal residues from expanding later patches. Smallness alone does not prove round-off.
+The retained terms record the spacing and the Frobenius norm of the omitted matrix, in GHz.
+That norm bounds the change in each eigenvalue from this omission alone. Traced remainders are kept.
+A later patch reads a single-device part only when it holds that device.
 
 The reduction transforms the channels of the removed device and couplings. It also carries every
 retained channel that acts on the patch through the new map. Devices outside the patch keep their

@@ -295,11 +295,6 @@ def _magnitude(matrix: Any) -> float | None:
     return None if contains_tracer(matrix) else float(np.max(np.abs(np.asarray(matrix))))
 
 
-# A concrete part of a local correction whose entries stay below this
-# multiple of the patch Hamiltonian's largest entry is round-off.
-_ROUND_OFF = 1e3 * float(np.finfo(float).eps)
-
-
 def _local_effective_terms(chip: "Chip", mode_label: str, taken: set[str], *, absorbed: tuple[EffectiveTerms, ...],
                            joined: tuple[EffectiveTerms, ...],
                            patch: tuple[str, ...], survivors: tuple[str, ...], survivor_dims: tuple[int, ...],
@@ -336,7 +331,7 @@ def _local_effective_terms(chip: "Chip", mode_label: str, taken: set[str], *, ab
                             {name: changes for name, changes in declared.items() if name in names})
         kept.append(terms)
     xp = concrete_array_module(correction)
-    tolerance = None if scale is None or contains_tracer(correction) else _ROUND_OFF * scale
+    tolerance = None if scale is None or contains_tracer(correction) else float(np.spacing(scale))
     mean, parts, rest = _single_device_parts(correction, energy_dims)
     added = []
     for index, (label, dim, part, vector) in enumerate(zip(survivors, survivor_dims, parts, vectors)):
@@ -345,9 +340,18 @@ def _local_effective_terms(chip: "Chip", mode_label: str, taken: set[str], *, ab
         added.append(EffectiveTerms((label,), (dim,), vector @ part @ vector.conj().T,
                                     label=_unique_label(f"retained_{mode_label}_{label}", taken),
                                     excitation_changes={} if conserving else None))
-    if len(survivors) == 1 or (tolerance is not None and np.max(np.abs(rest)) <= tolerance):
+    if len(survivors) == 1:
         remainder = np.zeros((prod(survivor_dims),) * 2, dtype=complex)
     else:
+        if tolerance is not None:
+            omitted = np.where(np.maximum(np.abs(rest), np.abs(rest.T)) <= tolerance, rest, 0.0)
+            rest = rest - omitted
+            error = float(np.linalg.norm(omitted, ord="fro"))
+            if error:
+                dropped_notes.append(
+                    f"Local Hamiltonian entries at or below the patch's {tolerance:.6g} GHz floating-point "
+                    f"spacing were omitted; their Frobenius norm is {error:.6g} GHz."
+                )
         lift = _kron(*vectors)
         remainder = lift @ rest @ lift.conj().T
     # Carried channels can cross any earlier map, so their level changes hold
