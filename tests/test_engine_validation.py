@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from quchip.approximations import RWA
-
 from dataclasses import replace
 
 import numpy as np
@@ -173,38 +171,6 @@ def test_symbolic_drive_channel_reaches_engine_without_custom_dispatch():
         result.hamiltonian().matrix(t=2.0, backend=chip.backend),
     )
     assert r"f_{drive,0}\!\left(t\right)" in result.latex()
-
-
-class TestWeightZeroRwaDrop:
-    """A carrier-driven weight-zero band has an explicit audit record."""
-
-    def test_dropped_term_records_band_weights_zero(self):
-        """The audit record for a carrier-driven weight-zero drop preserves its frequency."""
-        from quchip.engine.assembly import _weight_zero_dropped_term
-
-        record = _weight_zero_dropped_term(source="d0", device_label="q0", drive_freq=-5.0)
-        assert record.band_weights == (0,)
-        assert record.frequency == pytest.approx(5.0)
-        assert record.source == "d0"
-
-    def test_dropped_term_raises_when_carrier_is_none(self):
-        from quchip.engine.assembly import _weight_zero_dropped_term
-
-        with pytest.raises(ValueError, match="carrier frequency"):
-            _weight_zero_dropped_term(source="d0", device_label="q0", drive_freq=None)
-
-    def test_drive_coefficient_rejects_a_bypassed_weight_zero_drop(self):
-        from quchip.engine.ir import Constant, RealPart
-        from quchip.engine.approximations import resolve_drive_program
-
-        with pytest.raises(ValueError, match="weight-zero"):
-            resolve_drive_program(
-                RWA(),
-                RealPart(Constant(1.0 + 0j)),
-                weight=0,
-                frame_frequency=0.0,
-                has_carrier=True,
-            )
 
 
 class TestRelativeBandPruning:

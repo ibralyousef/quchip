@@ -104,21 +104,6 @@ if TYPE_CHECKING:
     from quchip.engine.ir import ControlOp
 
 
-def _weight_zero_dropped_term(*, source: str, device_label: str, drive_freq: Any) -> DroppedTerm:
-    """Describe a carrier-driven weight-zero band dropped by band RWA."""
-    if drive_freq is None:
-        raise ValueError(
-            f"Carrier-driven weight-zero band on '{device_label}' (drive '{source}') has no carrier frequency."
-        )
-    return DroppedTerm(
-        source=source,
-        operator=f"drive band w=+0 on {device_label}",
-        reason="no frame rotation cancels either carrier sideband under band RWA",
-        band_weights=(0,),
-        frequency=abs(drive_freq),
-    )
-
-
 # -- Static Hamiltonian --------------------------------------------------
 
 
@@ -1248,19 +1233,6 @@ class CompiledCoherentTerm:
 
 
 @dataclass(frozen=True)
-class _StructuralDrop:
-    """Template-cached pointer to a carrier-driven weight-zero band drop.
-
-    The structural decision needs no concrete carrier value. This pointer is
-    resolved into a :class:`~quchip.engine.ir.DroppedTerm` after variant signal
-    construction.
-    """
-
-    delivered_key: SignalKey
-    device_label: str
-
-
-@dataclass(frozen=True)
 class _ResolvedDriveBand:
     operator: Operator
     hamiltonian_term_index: int
@@ -1269,7 +1241,6 @@ class _ResolvedDriveBand:
     filter_signal_bands: bool
     origin: TermOrigin
     tag: str
-    target_label: str
 
 
 def drive_bands(
@@ -1354,7 +1325,6 @@ def _resolved_drive_bands(
                 filter_signal_bands=single and approximation.filters_terms,
                 origin=origin,
                 tag=tag,
-                target_label=target.label,
             )
         )
     # Equal frame frequencies share one scalar program. Merge their matrices
@@ -1384,7 +1354,7 @@ def _compile_drive_terms(
     dims: tuple[int, ...],
     subsystem_labels: tuple[str, ...],
     approximation: Approximation,
-) -> tuple[tuple[CompiledDriveTerm, ...], tuple[_StructuralDrop, ...]]:
+) -> tuple[CompiledDriveTerm, ...]:
     """Band-decompose each drive channel into pre-embedded, 2π-scaled drive terms.
 
     For each authored Hamiltonian term the operator is split into
@@ -1394,15 +1364,13 @@ def _compile_drive_terms(
     ``exp(−i w ω_ref t)``, which
     is the standard rotating-wave form for a driven multi-level system
     (Jaynes & Cummings 1963; Scully & Zubairy, *Quantum Optics*, §5). A
-    carrier-driven band at weight zero under ``RWA()`` is dropped because no
-    operator-frame phase can cancel either sideband. A
-    :class:`_StructuralDrop` pointer carries that decision to instantiation.
+    weight-zero band keeps the complete signal and describes longitudinal
+    modulation. Nonzero weights select the corresponding carrier sideband.
 
     The resulting :class:`CompiledDriveTerm` is template-cached so
     homogeneous sweeps only rebuild signal-program leaves, not operators.
     """
     compiled: list[CompiledDriveTerm] = []
-    structural_drops: list[_StructuralDrop] = []
     # A line's bands do not depend on the signal it delivers: every pulse and
     # crosstalk path reaching the line shares one operator per band, which
     # lets backends apply it once.
@@ -1426,18 +1394,6 @@ def _compile_drive_terms(
                 )
             ]
         for band, operator in line_bands[line]:
-            if (
-                band.filter_signal_bands
-                and delivered.signal.carrier is not None
-                and band.weight == 0
-            ):
-                structural_drops.append(
-                    _StructuralDrop(
-                        delivered_key=delivered_key,
-                        device_label=band.target_label,
-                    )
-                )
-                continue
             compiled.append(
                 CompiledDriveTerm(
                     operator=operator,
@@ -1450,7 +1406,7 @@ def _compile_drive_terms(
                     tag="crosstalk" if delivered.origin == "crosstalk" else band.tag,
                 )
             )
-    return tuple(compiled), tuple(structural_drops)
+    return tuple(compiled)
 
 
 def _build_delivered_signals(
@@ -1735,7 +1691,7 @@ def _template_from_engine_result(
     dims = base_result.dims
     subsystem_labels = tuple(device.label for device in chip.devices)
     delivered = _build_delivered_signals(chip, drive_ops)
-    drive_terms, weight_zero_drops = _compile_drive_terms(
+    drive_terms = _compile_drive_terms(
         chip,
         delivered,
         resolved_frame,
@@ -1752,7 +1708,6 @@ def _template_from_engine_result(
         coherent_terms=coherent_terms,
         reference_drive_ops=tuple(drive_ops),
         delivered_keys=frozenset(delivered),
-        weight_zero_drops=weight_zero_drops,
     )
 
 
@@ -1989,18 +1944,6 @@ def instantiate_engine_result(
                                   + (1 if compiled.weight > 0 else -1) * compiled.device_frame_freq),
                 )
             )
-
-    # Structural weight-zero drops carry no concrete frequency at compile
-    # time; resolve each pointer against its delivered variant signal now.
-    for drop in template.weight_zero_drops:
-        item = delivered[drop.delivered_key]
-        fresh_dropped.append(
-            _weight_zero_dropped_term(
-                source=item.drive.label,
-                device_label=drop.device_label,
-                drive_freq=item.signal.carrier,
-            )
-        )
 
     applied_drive_terms = tuple(
         replace(

@@ -8,6 +8,17 @@ This file records notable user-visible changes to quchip.
 
 #### Changes and migration
 
+- Custom `RWA(keep_bands=...)` selections must contain every adjoint band.
+  Add each tuple's negation to preserve Hermiticity. Asymmetric selections
+  now raise instead of producing non-Hermitian Hamiltonians.
+  ([#122](https://github.com/quchip/quchip/pull/122))
+- CR susceptibility now includes real-carrier halving. `IX_per_amplitude` and
+  `ZX_per_amplitude` are half their previous values, while raw matrix elements
+  stay unchanged. Recalculate gate-time estimates from the corrected rates.
+  ([#122](https://github.com/quchip/quchip/pull/122))
+- RWA retains longitudinal drive modulation, including explicit zero-frequency
+  carriers. Carrier-driven diagonal terms previously disappeared.
+  ([#122](https://github.com/quchip/quchip/pull/122))
 - For a port alone on its plane, `eliminate()` keeps the mode's reflection as a
   `PortNetwork.mode_reflection(...)` reference section. It uses the dressed
   transition and scales both rates by the dressed lowering weight. Residual
@@ -39,6 +50,10 @@ This file records notable user-visible changes to quchip.
 
 #### New features
 
+- Dispersive readout accepts `kappa_detected` and `efficiency`. Total linewidth
+  controls pointer states and dephasing. Observed loss controls detected SNR.
+  Defaults preserve ideal collection. Invalid concrete input domains raise.
+  ([#122](https://github.com/quchip/quchip/pull/122))
 - `eliminate()` removes a readout whose port shares a feedline with other ports.
   `PortNetwork.mode_transmission(...)` keeps its dressed transmission as a
   one-pass reference section. The result reports a dispersive field-error scale
@@ -78,6 +93,10 @@ This file records notable user-visible changes to quchip.
 
 #### Fixes
 
+- Local eigenvector derivatives retain resolved small-gap responses. Their
+  cutoff now uses matrix dimension and floating-point precision instead of
+  `1e-9` of the spectral span. Degenerate eigenvector derivatives remain undefined.
+  ([#122](https://github.com/quchip/quchip/pull/122))
 - Repeated elimination keeps internal loss in the removed mode's reference
   section, including channels carried onto several devices by earlier steps.
   ([#116](https://github.com/quchip/quchip/pull/116))
@@ -186,6 +205,11 @@ This file records notable user-visible changes to quchip.
 
 #### Documentation and examples
 
+- Correct dispersive signs, readout rate definitions, VNA phase notation, and
+  reduction limits. Document device and bath models, convergence requirements,
+  and parametric control. Add primary references for the physical conventions.
+  Align guide calculations, fitting targets, and plots with ground-positive Z.
+  ([#122](https://github.com/quchip/quchip/pull/122))
 - The NV-centre guide is removed.
 - The example notebooks and the guides are re-executed against the current
   code. The transmon avoided crossing in example 01 now reports the RWA

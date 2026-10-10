@@ -245,7 +245,8 @@ class OutputSpectrumResult:
     steady_state : SteadyStateResult
         Captured stationary state used for the spectra.
     fourier_convention : str
-        Definition of the reported two-sided spectrum.
+        Definition of the reported two-sided spectrum. The engineering
+        correlation is the conjugate of the internal physics correlation.
     """
 
     port: str
@@ -257,7 +258,7 @@ class OutputSpectrumResult:
     signal_coherent_flux: Any
     signal_incoherent_flux: Any
     steady_state: Any
-    fourier_convention: str = "2 Re integral_0^inf d tau exp(-j 2 pi f tau) C(tau); engineering j = -i"
+    fourier_convention: str = "2 Re integral_0^inf d tau exp(-j 2 pi f tau) C_engineering(tau), j = i"
 
 
 @dataclass(frozen=True)
