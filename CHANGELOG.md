@@ -33,6 +33,11 @@ This file records notable user-visible changes to quchip.
   `chi` describes only the patch. Both `active_patch()` entry points forward
   `local`. Baths and networks that cross the patch boundary remain unsupported.
   ([#112](https://github.com/quchip/quchip/pull/112))
+- Local elimination stores single-device corrections and transformed channels
+  on their own supports. Ordered maps preserve operator transport without
+  forcing later patches to include every earlier patch. Noisy channels can
+  still spread along the maps.
+  ([#113](https://github.com/quchip/quchip/pull/113))
 
 #### Fixes
 
