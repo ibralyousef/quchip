@@ -57,21 +57,48 @@ Authored `LocalOps` operators, including `op.sigma_z` in a Hamiltonian declarati
 For `Capacitive`:
 
 ```text
-full: g * (a + a†)(b + b†)
+full: g * Q_a Q_b
+```
+
+`Q` is each endpoint's charge operator, the same operator that `ChargeDrive` uses. Between two Fock
+devices, `Q = i(a − a†)`:
+
+```text
+full: g * i(a − a†) * i(b − b†)
+    = g * (a†b + ab†) − g * (ab + a†b†)
 ```
 
 `interaction_hamiltonian()` always returns this full form, and you never author the RWA form `g * (a†b + ab†)` directly. The RWA form is what remains after the chip masks out, or the engine filters, the bands that change the total excitation.
 
-`a + a†` is the charge-like operator of a `FockSpace` endpoint. On a `ChargeSpace` or
-`PhaseGridSpace` endpoint (`ChargeBasisTransmon`, `Fluxonium`), the charge-like operator is `n`. So
-the same declaration authors `g * n_a n_b`, or `g * (a + a†) n_b` for a mixed pair
-(`EndpointOps.charge`, [`quchip/declarative/ops.py`](quchip/declarative/ops.py)). The two operators
-have different matrix elements. For a transmon, `<0|a + a†|1> = 1`, but
-`<0|n|1> ≈ (E_J/8E_C)^{1/4}/√2`. One numerical `g` is therefore not one physical coupling across
-bases. Match models across bases through dressed quantities (exchange, χ, ZZ), not through `g`.
+A device declares its charge operator with `charge_coupling_operator()`, and `EndpointOps.charge`
+([`quchip/declarative/ops.py`](quchip/declarative/ops.py)) returns it. On a device without that
+method, the local space sets the operator: `a + a†` on a `FockSpace`, and `n` on a `ChargeSpace` or
+`PhaseGridSpace`. The built-in devices declare these operators:
 
-`ChargeDrive` on a Fock device addresses the quadrature `i(a − a†)`, whereas the coupling charge
-operator is `a + a†`. Both operators are charge-like and differ by a phase convention (§2.3).
+| Device | Charge operator `Q` |
+| --- | --- |
+| `DuffingTransmon`, `Resonator`, `KerrCavity`, `Qubit` | `i(a − a†)` |
+| `FluxTunableTransmon` | `s(Φ) i(a − a†)` |
+| `ChargeBasisTransmon`, `Fluxonium` | `n` |
+| `EigenbasisDevice` | the supplied `charge_operator` |
+
+At fixed E_C, the charge zero-point amplitude of a transmon scales as `E_J^{1/4}` (Koch et al.,
+PRA 76, 042319 (2007), §III). The `FluxTunableTransmon` factor
+
+```text
+s(Φ) = (E_J(Φ)/E_J,max)^{1/4} = (cos²(πΦ) + d² sin²(πΦ))^{1/8}
+```
+
+takes it relative to Φ = 0, so `g` and the `ChargeDrive` amplitude refer to the sweet spot. A chip
+at `flux_bias = 0` therefore keeps its exchange, and the exchange decreases as `flux_bias` moves
+away from 0. The phase operator is `(a + a†)/s(Φ)`. `s` follows the static `flux_bias`. A
+`FluxDrive` pulse changes only the device frequency (§6.2), so `s` keeps its static value during
+the pulse.
+
+The charge operators have different matrix elements. `|<0|Q|1>|` is 1 on a `DuffingTransmon` or a
+`Resonator` and `s(Φ)` on a `FluxTunableTransmon`. On a `ChargeBasisTransmon`,
+`|<0|n|1>| ≈ (E_J/8E_C)^{1/4}/√2`. One numerical `g` is therefore not one physical coupling across
+bases. Match models across bases through dressed quantities (exchange, χ, ZZ), not through `g`.
 
 ### 2.3 Chip and sequence Hamiltonians
 
@@ -395,6 +422,20 @@ Each device authors its Hamiltonian and named operators in a `LocalSpace`. The b
 
 `Chip(..., basis="native")` keeps each device's authored local coordinate basis and dimension. `basis="eigen"` diagonalizes each device's exact authored local Hamiltonian. It then projects all Hamiltonians, coupling and drive operators, states, observables, and collapse operators into the retained local energy subspace. A device can override the chip-wide policy with its own `basis` and, where necessary, select the retained energy dimension with `projection_levels`.
 
+A multi-device operator can project factor by factor when it is a sum of
+scalar-weighted single-device products:
+
+```text
+V†(A ⊗ B)V = (V_a† A V_a) ⊗ (V_b† B V_b).
+```
+
+Products on one device multiply before projection. The truncated projector
+`V_a V_a†` is not the identity in the authored space. A product of sums can
+expand into many terms. The engine estimates memory for factored and dense
+projection, then selects the smaller route. Opaque multi-device operators use
+the dense route. Both routes check available memory before projection. These
+estimates cover concrete forward calculations, not reverse-mode storage.
+
 Resolution records each fixed authored-to-solver transformation in `EngineResult.bases`. Local energy ordering differs from whole-chip dressing: `Chip.dress()` diagonalizes the coupled static chip for analysis, whereas local-basis resolution defines the tensor factors that go through the engine and backends.
 
 Truncation diagnostics sample the component's declared boundary projector at the
@@ -622,6 +663,28 @@ carrier produce a drive modulation only after `QuantumSequence.schedule()`.
 owns the pulse start, carrier, and global phase. You can therefore place and
 phase-rotate the same shape without changing its physics definition.
 
+Each carrier pulse follows the phase reference of one device, its frame.
+`QuantumSequence.vz(device, θ)` emits no pulse. It adds θ to the phase of every
+later carrier pulse in that device's frame, on any line (McKay et al., PRA 96,
+022330 (2017)). The frame defaults to the device that the pulse's line drives.
+A cross-resonance tone runs on the control's line at the target's frequency.
+Its phase sets the axis of the target's conditional rotation, so the pulse
+names the target as its frame with `frame=`. Baseband pulses have no carrier
+and follow no frame.
+
+A pulse's `detuning` δ offsets its carrier from `freq`, referenced to the pulse
+start `t0`:
+
+```text
+s(t) = E(t - t0) exp(iφ) exp(-2πi f t) exp(-2πi δ (t - t0))
+```
+
+`freq` stays the frame frequency, so the pulse is the same in that frame at
+every start time. A carrier at `freq = f + δ` is a fixed oscillator instead.
+Relative to the frame at `f`, its phase at the pulse start is `φ - 2πδ t0`. Its
+rotation axis therefore turns when the pulse moves. Scheduling owns the offset,
+as it owns the carrier, so every envelope supports it.
+
 Local eigenbasis projection uses the static authored Hamiltonian at the
 solve's operating point. The engine projects component-owned
 time-dependent terms into that fixed basis. quchip does not construct an
@@ -637,11 +700,11 @@ The chip owns one explicit approximation strategy. `Exact()` keeps every term in
 
 ### 6.1 Static operator bands
 
-For `Capacitive`:
+For `Capacitive` between two Fock devices:
 
 ```text
-full: g * (a + a†)(b + b†)
-     = g * (a†b + ab†) + g * (ab + a†b†)
+full: g * i(a − a†) * i(b − b†)
+    = g * (a†b + ab†) − g * (ab + a†b†)
 ```
 
 - `a†b + ab†` has total excitation weight zero and stays under `RWA()`
@@ -780,9 +843,10 @@ The engine then applies the inbound and outbound factors to that response.
 `VNA.sweep()` extends this form to pump-free models that conserve the total
 energy-level index `N` but are not harmonic, e.g. Duffing transmons, pure
 dephasing, or reduced chips with retained terms. The resolved static Hamiltonian
-must conserve `N` (an approximation such as `RWA()` that keeps only zero-total
-bands, declared retained terms, and no cascade-generated term). Every port must
-lower `N` by one. Every other channel must lower `N` by one or conserve it.
+must conserve `N`. The approximation must keep only zero-total bands, as `RWA()`
+does, and retained terms must declare conservation. Every port must lower `N` by
+one. A cascade-generated term `Im(L2^dagger S2 L1)`, as on a shared feedline,
+then also conserves `N`. Every other channel must lower `N` by one or conserve it.
 Every input must be vacuum. The vacuum is then stationary, and to first order in
 the probe the coherences `|1_j><0|` stay in the one-excitation block. The engine
 projects the lab-frame model onto the vacuum `|0>` and the states `|1_j>` that
@@ -797,8 +861,10 @@ where `X_1 = <1|X|1>` is the one-excitation block. A lowering channel has
 `(L^dagger L)_1 = C^dagger C` and `c = (L)_1 = 0`, which gives the harmonic `A`
 again. The response then follows from the same mode-space formula. It is exact for
 an infinitesimal probe, independent of anharmonicities, cross-Kerr terms and
-cutoffs, and its size is the number of devices. VNA diagnostics name the route
-`"vacuum_response"`. Finite-power and noisy measurements keep the harmonic
+cutoffs, and its size is the number of devices. The engine builds both blocks
+from the terms' and channels' local operators, as for the sectors of §9.
+It does not embed each local operator into the full product space. VNA diagnostics name the
+route `"vacuum_response"`. Finite-power and noisy measurements keep the harmonic
 condition above, because only a harmonic model responds linearly at finite
 amplitude.
 
@@ -984,7 +1050,25 @@ Sources: [`quchip/chip/chip.py`](quchip/chip/chip.py), [`quchip/chip/analysis.py
 - assignment overlaps and labels below the requested overlap threshold
 - the dressed eigenvector matrix used by dressed-basis analysis
 
-`Chip.freq()` evaluates dressed `0 -> 1` frequencies through the traceable array-labeling cache, and `DressedResult` does not store them. Frequencies, states, Kerr shifts and drive matrix elements all use the chip's approximation, so `RWA(keep_bands=...)` applies here too. Choose `Exact()` to include counter-rotating bands and their Bloch–Siegert shifts.
+`Chip.freq()` evaluates dressed `0 -> 1` frequencies through a traceable labeled eigensystem, and `DressedResult` does not store them. Frequencies, states, Kerr shifts and drive matrix elements all use the chip's approximation, so `RWA(keep_bands=...)` applies here too. Choose `Exact()` to include counter-rotating bands and their Bloch–Siegert shifts.
+
+When the static model conserves the total energy-level index `N`, labeled queries
+diagonalize only the excitation sectors of their labels. The conditions are those
+of the exact route in §10.4. The sector of `N` holds the product states whose
+levels sum to `N`. Each term's local operator on its own support fills the sector
+block, and two states couple only when they agree outside that support. The engine
+assigns labels within each block with the same overlap rule as the full
+eigensystem. `Chip.energy()`, `Chip.freq()`, `Chip.transition_frequency()`,
+`Chip.dispersive_shift()`, `Chip.dressed_anharmonicity()`, `Chip.kerr_matrix()`,
+`Chip.effective_subspace_hamiltonian()` and `effective_hamiltonian()` take this
+route. Ground-conditioned first transitions and single-excitation exchange need
+`N <= 1`. Ground-conditioned anharmonicities, ZZ and dispersive shifts need
+`N <= 2`. Other conditioned transitions use the sectors of their specified labels.
+Large authored supports can still require large local matrices.
+Traced blocks use differentiable eigensolves.
+Derivatives require separated eigenvalues and a locally stable assignment. `Chip.dress()`, `Chip.dressed_spectrum()`, `Chip.state()` and
+dressed-basis operators still diagonalize the complete chip. Other chips keep
+that route for every query.
 
 `Chip.dress()` is always intrinsic static lab-frame analysis and is not part of
 the runtime frame transform. A resolved `EngineResult` also provides `dress()`,
@@ -1066,8 +1150,9 @@ This convention follows the effective-Hamiltonian decompositions of Magesan and 
 
 ### 9.3 Dressed Kerr matrix
 
-`Chip.kerr_matrix()` evaluates one labeled eigensystem and returns a symmetric
-matrix in `chip.devices` order. For distinct devices,
+`Chip.kerr_matrix()` reads one labeled dressed spectrum and returns a symmetric
+matrix in `chip.devices` order. A conserving chip supplies it from its sectors
+with `N <= 2` (§9). For distinct devices,
 
 ```text
 K[i,j] = E(1_i,1_j) - E(1_i) - E(1_j) + E(0),
@@ -1217,8 +1302,9 @@ When `chip.approximation` keeps only bands of zero total weight, as `RWA()` does
 conserves the total energy-level index. The exact route then diagonalizes each total-excitation
 sector separately, so its retained Hamiltonian, jump operators and coordinate map have exact zeros
 between sectors, with no round-off from near-degeneracies across sectors. This requires earlier
-retained terms to declare the same conservation and no cascade-generated network Hamiltonian to be
-present. Otherwise, the route diagonalizes the full matrix.
+retained terms to declare the same conservation. Each port pair that generates a cascade
+Hamiltonian, as on a shared feedline, must lower the index by one at both ports. Otherwise, the
+route diagonalizes the full matrix.
 
 `method="exact"` validates the ground, the single excitations of touching survivors, and their pair
 excitations. Each diagnostic label needs a distinct majority dressed eigenstate, and the full
@@ -1259,22 +1345,58 @@ concrete values and under `jax.grad` or `jax.jit`.
 
 Consider an external default port on a declared harmonic Fock mode. The complete
 `c_eff` matrix becomes that port's joint operator on every survivor, in their
-authored coordinates. The port's rate, phase, scalar scattering and existing
-reference sections are kept. The eliminated mode's own reflection,
+authored coordinates. The reduction keeps the port's rate, phase, scalar
+scattering and existing reference sections. It places the eliminated mode's
+own reflection at the core end of the port's plane as a
+`network.mode_reflection(...)` section:
 
 ```text
-S_r(f) = ((kappa_i - kappa_e)/2 - i Omega) / ((kappa_e + kappa_i)/2 - i Omega),
-Omega = 2π (f - f_mode),
+S_r(f) = ((w kappa_i - w kappa_e)/2 - i Omega) / ((w kappa_e + w kappa_i)/2 - i Omega)
+Omega = 2π (f - f_tilde)
+f_tilde = E(1_tilde_m) - E(0_tilde)
+w = |<0_tilde|a|1_tilde_m>|^2
 ```
 
-is not part of `c_eff`. It is kept as a `network.mode_reflection(...)` section
-at the core end of the port's plane, so a reflection sweep obeys
-`S_full(f) ≈ S_r(f) S_reduced(f)`. The remaining difference is the frequency
-dependence of the Purcell coupling across the sweep, of order
-`(g/Delta)^2 kappa_e/Delta`. `kappa_e` is the port rate. `kappa_i` is the
-eliminated mode's internal damping of `<a>`, read from its own channels.
-Lowering channels add their rate, raising channels subtract it, and pure
-dephasing adds it. The section's internal-loss bath is vacuum.
+Here, `a` is the mode's lowering operator in the full product energy basis.
+The section uses the dressed transition and rates `w kappa_e` and `w kappa_i`.
+Both routes use the same static Hamiltonian that they reduce, under the
+source chip's approximation. The exact route reuses its labeled eigenvalues
+and eigenvectors for the transition and weight, without another diagonalization.
+The SW route computes complete second-order energies:
+
+```text
+eps(n) = h_nn + sum_{k != n} |h_kn|^2 / (h_nn - h_kk)
+f_tilde = eps(1_m) - eps(0)
+```
+
+The sum includes every intermediate state, including couplings within Q.
+It uses the guarded division of the SW generator, so a coupled degeneracy raises.
+For the weight, SW uses the ground and mode-excitation columns
+of `exp(-S2)`. The first-order generator `S2` includes only couplings touching
+either state. This exponential makes the first-order states orthonormal without
+diagonalization.
+
+`kappa_e` is the bare port rate. The mode's own channels supply `kappa_i`,
+its internal damping of `<a>`. Lowering channels add their rate, raising
+channels subtract it, and pure dephasing adds it. The section drops damping
+from survivor and other channels, of order `(g/Delta)^2 gamma_s`.
+Its internal-loss bath is vacuum. The section keeps the bare frequency of
+the first touching survivor as `reference_freq` to select the square-root branch.
+
+A reflection sweep obeys `S_full(f) ≈ S_r(f) S_reduced(f)`.
+The exact route leaves the frequency dependence of the Purcell coupling,
+of order `(g/Delta)^2 kappa_e/Delta`, including across the eliminated resonance.
+With frequencies in GHz and rates in 1/ns, the scale is
+`(g/Delta)^2 kappa_e/(2π |Delta|)`.
+SW misses the energy shifts beyond second order. The estimates that follow
+assume RWA couplings `g_i` to survivors at detunings `Delta_i = f_mode - f_i`,
+with `|g_i|` much smaller than `|Delta_i|`. With one survivor, the leading
+frequency error is the fourth-order term `g^4/Delta^3`. Several survivors
+without a coupling loop also leave a fourth-order error. A coupling `J` between
+two survivors that both couple to the mode closes a loop. It adds the
+third-order term `2 g_1 g_2 J/(Delta_1 Delta_2)`. A frequency error `delta_f`
+changes the complex scattering amplitude by up to `8π delta_f/(w kappa_e)`
+near the dip.
 
 A port that an earlier elimination transformed already acts on every survivor
 and reaches a later eliminated mode only through that dressing. The later
