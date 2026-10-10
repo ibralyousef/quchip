@@ -36,7 +36,7 @@ This file records notable user-visible changes to quchip.
 - Local elimination stores single-device corrections and transformed channels
   on their own supports. Ordered maps preserve operator transport without
   forcing later patches to include every earlier patch. Noisy channels can
-  still spread along the maps.
+  still spread along the maps. Partitioning keeps each map with its devices.
   ([#113](https://github.com/quchip/quchip/pull/113))
 
 #### Fixes
