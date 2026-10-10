@@ -41,8 +41,8 @@ This file records notable user-visible changes to quchip.
 
 - `eliminate()` removes a readout whose port shares a feedline with other ports.
   `PortNetwork.mode_transmission(...)` keeps its dressed transmission as a
-  one-pass reference section. The result reports the field error for kept ports
-  beyond the section as `kappa_over_delta`.
+  one-pass reference section. The result reports a dispersive field-error scale
+  for kept ports beyond the section as `kappa_over_delta`, not a strict bound.
   ([#116](https://github.com/quchip/quchip/pull/116))
 - You can eliminate port-coupled modes on chips with more than two devices. The
   transformed port acts jointly on every survivor. Stationary-tone frame
