@@ -422,6 +422,20 @@ Each device authors its Hamiltonian and named operators in a `LocalSpace`. The b
 
 `Chip(..., basis="native")` keeps each device's authored local coordinate basis and dimension. `basis="eigen"` diagonalizes each device's exact authored local Hamiltonian. It then projects all Hamiltonians, coupling and drive operators, states, observables, and collapse operators into the retained local energy subspace. A device can override the chip-wide policy with its own `basis` and, where necessary, select the retained energy dimension with `projection_levels`.
 
+A multi-device operator can project factor by factor when it is a sum of
+scalar-weighted single-device products:
+
+```text
+V†(A ⊗ B)V = (V_a† A V_a) ⊗ (V_b† B V_b).
+```
+
+Products on one device multiply before projection. The truncated projector
+`V_a V_a†` is not the identity in the authored space. A product of sums can
+expand into many terms. The engine estimates memory for factored and dense
+projection, then selects the smaller route. Opaque multi-device operators use
+the dense route. Both routes check available memory before projection. These
+estimates cover concrete forward calculations, not reverse-mode storage.
+
 Resolution records each fixed authored-to-solver transformation in `EngineResult.bases`. Local energy ordering differs from whole-chip dressing: `Chip.dress()` diagonalizes the coupled static chip for analysis, whereas local-basis resolution defines the tensor factors that go through the engine and backends.
 
 Truncation diagnostics sample the component's declared boundary projector at the
@@ -648,6 +662,28 @@ carrier produce a drive modulation only after `QuantumSequence.schedule()`.
 `Envelope.value(local_time)` defines the local complex I/Q shape, and scheduling
 owns the pulse start, carrier, and global phase. You can therefore place and
 phase-rotate the same shape without changing its physics definition.
+
+Each carrier pulse follows the phase reference of one device, its frame.
+`QuantumSequence.vz(device, θ)` emits no pulse. It adds θ to the phase of every
+later carrier pulse in that device's frame, on any line (McKay et al., PRA 96,
+022330 (2017)). The frame defaults to the device that the pulse's line drives.
+A cross-resonance tone runs on the control's line at the target's frequency.
+Its phase sets the axis of the target's conditional rotation, so the pulse
+names the target as its frame with `frame=`. Baseband pulses have no carrier
+and follow no frame.
+
+A pulse's `detuning` δ offsets its carrier from `freq`, referenced to the pulse
+start `t0`:
+
+```text
+s(t) = E(t - t0) exp(iφ) exp(-2πi f t) exp(-2πi δ (t - t0))
+```
+
+`freq` stays the frame frequency, so the pulse is the same in that frame at
+every start time. A carrier at `freq = f + δ` is a fixed oscillator instead.
+Relative to the frame at `f`, its phase at the pulse start is `φ - 2πδ t0`. Its
+rotation axis therefore turns when the pulse moves. Scheduling owns the offset,
+as it owns the carrier, so every envelope supports it.
 
 Local eigenbasis projection uses the static authored Hamiltonian at the
 solve's operating point. The engine projects component-owned
