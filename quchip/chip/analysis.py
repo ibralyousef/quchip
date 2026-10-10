@@ -609,11 +609,11 @@ class ChipAnalysis:
         if scoped_hit(self._sector_cache, signature):
             return self._sector_cache[2]
         chip = self._chip
-        model = (
-            SectorModel(chip, resolution=_local_resolution)
-            if conserves_excitation_number(chip, chip.approximation)
-            else None
-        )
+        from quchip.engine.assembly import _resolve_system
+
+        resolution = _resolve_system(chip, chip.backend) if _local_resolution is None else _local_resolution
+        model = (SectorModel(chip, resolution=resolution)
+                 if conserves_excitation_number(chip, chip.approximation, resolution=resolution) else None)
         self._sector_cache = scoped_entry(signature, model, traced=model is not None and model.traced)
         return model
 
@@ -675,13 +675,12 @@ class ChipAnalysis:
         total : int
             Largest total energy-level index of the queried labels.
         """
-        from quchip.chip.effective import conserves_excitation_number
         from quchip.engine.sectors import sector_size
 
-        chip = self._chip
-        if not conserves_excitation_number(chip, chip.approximation):
-            return chip.total_dim
-        dims = self._semantic_dims()
+        model = self._sector_model()
+        if model is None:
+            return self._chip.total_dim
+        dims = model.dims
         return max(sector_size(dims, level_sum) for level_sum in range(total + 1))
 
     def _ground_ket(self, approximation: "Approximation") -> Any | None:
@@ -1114,13 +1113,21 @@ class ChipAnalysis:
                 "transition must be a device reference or an (initial_mapping, final_mapping) pair"
             )
 
-        engine = self.engine_result()
-        _, eigenvectors, _, labeling = self._compute_array_labeled(engine)
+        sectors = self._sector_model()
         xp = self._chip.backend.array_module
-        U = xp.asarray(eigenvectors, dtype=complex)
-        amplitudes = xp.asarray(self._semantic_amplitudes(U, engine))
+        if sectors is None:
+            engine = self.engine_result()
+            _, eigenvectors, _, labeling = self._compute_array_labeled(engine)
+            U = xp.asarray(eigenvectors, dtype=complex)
+            amplitudes = xp.asarray(self._semantic_amplitudes(U, engine))
 
         def phase_fixed_state(label: tuple[int, ...]) -> Any:
+            if sectors is not None:
+                system = sectors.eigensystem(sum(label))
+                row = system.space.row(label)
+                column = system.labeling.indices[row]
+                state = xp.asarray(system.eigenvectors)[:, column]
+                return _phase_fixed_state(state, state[row], xp)
             bare_index = self._bare_label_index(label)
             state = U[:, labeling.indices[bare_index]]
             return _phase_fixed_state(state, amplitudes[bare_index, labeling.indices[bare_index]], xp)
@@ -1157,11 +1164,16 @@ class ChipAnalysis:
                     f"got {len(channels)}."
                 )
 
-            local_operator = prepare_local_op(device, channels[0][1], engine.bases[device.label], backend)
-            operator = xp.asarray(backend.to_array(local_operator), dtype=complex)
-            initial_tensor = initial.reshape(engine.dims)
-            acted = xp.tensordot(operator, initial_tensor, axes=((1,), (device_index,)))
-            acted = xp.moveaxis(acted, 0, device_index).reshape(-1)
+            if sectors is not None:
+                operator = sectors.local_operator(channels[0][1], (device_index,))
+                block = sectors.block(operator, (device_index,), sum(final_label), sum(initial_label))
+                acted = xp.asarray(block) @ initial
+            else:
+                local_operator = prepare_local_op(device, channels[0][1], engine.bases[device.label], backend)
+                operator = xp.asarray(backend.to_array(local_operator), dtype=complex)
+                initial_tensor = initial.reshape(engine.dims)
+                acted = xp.tensordot(operator, initial_tensor, axes=((1,), (device_index,)))
+                acted = xp.moveaxis(acted, 0, device_index).reshape(-1)
             elements[drive.label] = xp.vdot(final, acted)
         return elements
 

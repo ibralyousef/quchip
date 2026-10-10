@@ -13,9 +13,8 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterator, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 import jax.numpy as jnp
 import numpy as np
@@ -25,17 +24,16 @@ from quchip.chip.ports import Port
 from quchip.chip.sw import _sector_eigh
 from quchip.declarative.expr import materialize_expr
 from quchip.engine.assembly import (
-    _interaction_contributions,
+    _energy_operator,
+    _resolved_energy_interactions,
     _project_on_support,
     _resolve_system,
-    _support_semantic_transform,
 )
 from quchip.utils.constants import TWO_PI
 from quchip.utils.jax_utils import concrete_array_module, contains_tracer
 from quchip.utils.values import scoped_entry, scoped_hit
 
 if TYPE_CHECKING:
-    from quchip.approximations import Approximation
     from quchip.chip.chip import Chip
 
 
@@ -172,7 +170,7 @@ class SectorModel:
         self.dims = tuple(int(dimension) for dimension in resolution.dims)
         self.network = resolution.network
         self.energies = tuple(self.bases[device.label].energies for device in chip.devices)
-        self.terms = tuple(self._static_terms())
+        self.terms = tuple(_resolved_energy_interactions(chip, resolution, chip.approximation))
         self._ports: dict[str, tuple[Any, tuple[int, ...]]] | None = None
         self._spaces: dict[int, SectorSpace] = {}
         self._pairs: dict[tuple[tuple[int, ...], int, int],
@@ -201,6 +199,12 @@ class SectorModel:
             Total energy-level index.
         """
         if total not in self._spaces:
+            from quchip.backend._memory import require_memory
+
+            size = sector_size(self.dims, total)
+            require_memory(16 * 6 * size**2 + 8 * len(self.dims) * size,
+                           task=f"Excitation sector N={total} (dimension {size})",
+                           remedy="Request lower-excitation labels or reduce the model.")
             self._spaces[total] = SectorSpace(self.dims, total, _sector_levels(self.dims, total))
         return self._spaces[total]
 
@@ -216,13 +220,8 @@ class SectorModel:
             denotes an operator on the whole chip.
         """
         chip, backend = self.chip, self.chip.backend
-        matrix = backend.to_array(_project_on_support(chip, operator, support, self.bases, backend))
-        transform = _support_semantic_transform(chip, support or tuple(range(len(self.dims))), self.bases)
-        if transform is not None:
-            xp = concrete_array_module(matrix, transform)
-            transform = xp.asarray(transform)
-            matrix = transform.conj().T @ xp.asarray(matrix) @ transform
-        return matrix if contains_tracer(matrix) else np.asarray(matrix, dtype=complex)
+        projected = _project_on_support(chip, operator, support, self.bases, backend)
+        return _energy_operator(chip, projected, support, self.bases, backend)
 
     def channel_operator(self, operator: Any, rate: Any, support: tuple[int, ...], phase: Any = None) -> Any:
         """Return a channel coupling ``exp(i phase) sqrt(rate) A`` in its support's energy basis.
@@ -349,6 +348,10 @@ class SectorModel:
         for total in totals:
             offsets[total] = size
             size += systems[total].space.size
+        from quchip.backend._memory import require_memory
+
+        require_memory(16 * 3 * size**2, task=f"Combined excitation sectors (dimension {size})",
+                       remedy="Request fewer sectors or reduce the model.")
         xp = concrete_array_module(tuple((system.eigenvectors, system.labeling.indices) for system in systems.values()))
         eigenvalues = xp.concatenate([xp.asarray(systems[total].eigenvalues) for total in totals])
         eigenvectors = xp.zeros((size, size), dtype=complex)
@@ -365,36 +368,6 @@ class SectorModel:
             for label, row in zip(labels, rows, strict=True)
         ])
         return eigenvalues, eigenvectors, positions, columns
-
-    def _static_terms(self) -> Iterator[tuple[Any, tuple[int, ...]]]:
-        """Yield every coupling and retained term on its support, in the energy basis and GHz."""
-        chip = self.chip
-        approximation = chip.approximation
-        for contribution in _interaction_contributions(chip):
-            support = tuple(chip.device_index(label) for label in contribution.labels)
-            operator = self.local_operator(contribution.expression(), support)
-            if approximation.filters_terms and not contribution.retained:
-                kept = operator * self._band_mask(support, approximation)
-                if not contains_tracer(operator):
-                    norm = np.linalg.norm(operator)
-                    if norm > 0.0 and np.linalg.norm(kept) <= 1e-12 * norm:
-                        warnings.warn(f"Coupling {contribution.label!r} vanishes entirely under RWA().",
-                                      UserWarning, stacklevel=2)
-                operator = kept
-            yield operator, support
-
-    def _band_mask(self, support: tuple[int, ...], approximation: "Approximation") -> np.ndarray:
-        """Mark the matrix elements on ``support`` whose band the approximation keeps.
-
-        An element's band weight on each device is its column level minus its
-        row level, in the energy basis.
-        """
-        dims = tuple(self.dims[index] for index in support)
-        levels = np.indices(dims).reshape(len(dims), -1).T
-        weights = (levels[None, :, :] - levels[:, None, :]).reshape(-1, len(dims))
-        bands, inverse = np.unique(weights, axis=0, return_inverse=True)
-        kept = np.array([approximation.keeps_operator_band(tuple(int(weight) for weight in band)) for band in bands])
-        return kept[inverse.reshape(-1)].reshape(levels.shape[0], levels.shape[0])
 
     def _generated(self, total: int) -> Any | None:
         """Return the Hamiltonian block that cascaded port pairs generate, in GHz, or ``None``.

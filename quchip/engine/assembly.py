@@ -893,6 +893,10 @@ class _Interaction:
     expression: Callable[[], Any]
     retained: bool = False
 
+    def keeps_band(self, approximation: Approximation, weights: tuple[int, ...]) -> bool:
+        """Apply the static band policy, with retained contributions exempt from filtering."""
+        return self.retained or not approximation.filters_terms or approximation.keeps_operator_band(weights)
+
 
 def _interaction_contributions(chip: "Chip"):
     for coupling in chip.couplings:
@@ -900,6 +904,60 @@ def _interaction_contributions(chip: "Chip"):
                            coupling.interaction_hamiltonian)
     for terms in chip.effective_terms:
         yield _Interaction(terms.label, terms.labels, terms.expression, retained=True)
+
+
+@dataclass(frozen=True)
+class _ResolvedInteraction:
+    contribution: _Interaction
+    support: tuple[int, ...]
+    authored: Any
+    operator: Any
+
+
+def _resolved_interactions(chip: "Chip", resolution: _SystemResolution, backend: Backend):
+    """Project local interactions once, before choosing a global or sector representation."""
+    for contribution in _interaction_contributions(chip):
+        support = tuple(chip.device_index(label) for label in contribution.labels)
+        authored = contribution.expression()
+        operator = _project_on_support(chip, authored, support, resolution.bases, backend)
+        yield _ResolvedInteraction(contribution, support, authored, operator)
+
+
+def _energy_operator(chip: "Chip", operator: Any, support: tuple[int, ...],
+                     bases: Mapping[str, BasisRecord], backend: Backend) -> Any:
+    """Express a projected support-local operator in isolated energy coordinates."""
+    matrix = backend.to_array(operator)
+    transform = _support_semantic_transform(chip, support or tuple(range(len(chip.devices))), bases)
+    if transform is not None:
+        xp = concrete_array_module(matrix, transform)
+        transform = xp.asarray(transform)
+        matrix = transform.conj().T @ xp.asarray(matrix) @ transform
+    return matrix if contains_tracer(matrix) else np.asarray(matrix, dtype=complex)
+
+
+def _resolved_energy_interactions(chip: "Chip", resolution: _SystemResolution, approximation: Approximation):
+    """Yield kept static operators on their local supports in energy coordinates, in GHz."""
+    for resolved in _resolved_interactions(chip, resolution, chip.backend):
+        contribution, support = resolved.contribution, resolved.support
+        operator = _energy_operator(chip, resolved.operator, support, resolution.bases, chip.backend)
+        if approximation.filters_terms and not contribution.retained:
+            dims = tuple(resolution.dims[index] for index in support)
+            dimension = prod(dims)
+            require_memory((16 + 24 * len(dims)) * dimension**2,
+                           task=f"Static band mask on {contribution.labels}",
+                           remedy="Use interactions on smaller local supports.")
+            levels = np.indices(dims).reshape(len(dims), -1).T
+            weights = (levels[None, :, :] - levels[:, None, :]).reshape(-1, len(dims))
+            bands, inverse = np.unique(weights, axis=0, return_inverse=True)
+            kept = np.array([contribution.keeps_band(approximation, tuple(int(w) for w in band)) for band in bands])
+            filtered = operator * kept[inverse.reshape(-1)].reshape(dimension, dimension)
+            if not contains_tracer(operator):
+                norm = np.linalg.norm(operator)
+                if norm > 0.0 and np.linalg.norm(filtered) <= 1e-12 * norm:
+                    warnings.warn(f"Coupling {contribution.label!r} vanishes entirely under RWA().",
+                                  UserWarning, stacklevel=3)
+            operator = filtered
+        yield operator, support
 
 
 def _may_raise_ground(chip: "Chip", approximation: Approximation, bases: Mapping[str, BasisRecord]) -> bool:
@@ -924,10 +982,9 @@ def _may_raise_ground(chip: "Chip", approximation: Approximation, bases: Mapping
 def coupling_band_records(chip: "Chip", resolution: _SystemResolution, backend: Backend) -> list[BandRecord]:
     """Return nonzero interaction bands for frame planning."""
     records: list[BandRecord] = []
-    for contribution in _interaction_contributions(chip):
-        support = tuple(chip.device_index(label) for label in contribution.labels)
-        expression = contribution.expression()
-        h_full = _project_on_support(chip, expression, support, resolution.bases, backend)
+    for resolved in _resolved_interactions(chip, resolution, backend):
+        contribution, support = resolved.contribution, resolved.support
+        expression, h_full = resolved.authored, resolved.operator
         if _is_concrete_zero_array(backend.to_array(h_full)):
             continue
         bands = _authored_bands(
@@ -1000,15 +1057,12 @@ def _resolve_coupling_terms(
     dropped: list[DroppedTerm] = []
     supports: list[tuple[str, ...]] = []
     dims = resolution.dims
-    label_to_index = {dev.label: i for i, dev in enumerate(chip.devices)}
-
-    for contribution in _interaction_contributions(chip):
+    for resolved in _resolved_interactions(chip, resolution, backend):
+        contribution, support = resolved.contribution, resolved.support
         labels = contribution.labels
-        support = tuple(label_to_index[label] for label in labels)
         frequencies = tuple(resolved_frame.frequencies.get(label, 0.0) for label in labels)
         filters_terms = approximation.filters_terms and not contribution.retained
-        authored = contribution.expression()
-        h_full = _project_on_support(chip, authored, support, resolution.bases, backend)
+        authored, h_full = resolved.authored, resolved.operator
         if not contains_tracer(h_full) and _is_concrete_zero_array(backend.to_array(h_full)):
             continue
 
@@ -1021,7 +1075,7 @@ def _resolve_coupling_terms(
         retained: list[Operator] = []
         for weights, band_canonical in sub_bands.items():
             osc_freq = _band_frame_frequency(weights, frequencies)
-            if filters_terms and not approximation.keeps_operator_band(weights):
+            if not contribution.keeps_band(approximation, weights):
                 band_values = band_canonical.values
                 xp = array_namespace(band_values)
                 dropped.append(DroppedTerm(
@@ -2023,6 +2077,9 @@ def _build_static_analysis_result(
     _local_resolution: _SystemResolution | None = None,
 ) -> EngineResult:
     """Resolve the chip in the lab frame and retain only its static model."""
+    dimension = chip.total_dim if _local_resolution is None else prod(_local_resolution.dims)
+    require_memory(16 * 6 * dimension**2, task=f"Full static eigensystem (dimension {dimension})",
+                   remedy="Use a conserving model with labeled sector queries or reduce the model.")
     labels = [device.label for device in chip.devices]
     frame = ResolvedFrame(
         frequencies={label: 0.0 for label in labels},

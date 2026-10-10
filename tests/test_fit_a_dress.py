@@ -449,7 +449,9 @@ def test_fit_rejects_unknown_evaluator(evaluator):
 
 
 def test_fit_dimension_limit_cannot_overflow_for_many_devices():
-    chip = Chip([Resonator(freq=5.0, levels=2, label=f"r{i}") for i in range(64)], approximation=Exact())
+    devices = [Resonator(freq=5.0, levels=2, label=f"r{i}") for i in range(64)]
+    # Counter-rotating terms force the full-space dimension check. Uncoupled Exact models conserve N.
+    chip = Chip(devices, [Capacitive(devices[0], devices[1], g=0.01)], approximation=Exact())
     assert chip.total_dim == 2**64
     with pytest.raises(ValueError, match=str(2**64)):
         fit_a_dress(chip)

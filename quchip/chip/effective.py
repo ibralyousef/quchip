@@ -11,7 +11,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from quchip.declarative.dissipation import CollapseChannel
-from quchip.declarative.expr import PhysicsExpr, declared_excitation_changes, materialize_expr
+from quchip.declarative.expr import (
+    PhysicsExpr, _bound_values, declared_excitation_changes, is_energy_diagonal, materialize_expr,
+)
 from quchip.utils.jax_utils import concrete_array_module, contains_tracer
 from quchip.utils.values import copy_value, value_fingerprint
 
@@ -24,11 +26,11 @@ def authored_excitation_changes(
 ) -> frozenset[int] | None:
     """Return the total energy-level changes an authored operator carries.
 
-    A declared matrix contribution returns its declaration. Otherwise the
-    operator is evaluated at compile time in the captured energy bases of
-    ``labels``, so a constant operator stays concrete inside ``jax.jit``.
-    Missing bases, traced bases, or parameter-dependent operators return
-    ``None``.
+    Declarations and factored algebra supply structural support. Scalar
+    coefficients do not change it, including at zero. Constant leaves are
+    checked in the captured energy bases at compile time. Unknown matrix
+    support or traced energy vectors return ``None``. No small-entry
+    threshold supplies a conservation proof.
 
     Parameters
     ----------
@@ -48,24 +50,61 @@ def authored_excitation_changes(
         return declared
     if bases is None or any(label not in bases for label in labels):
         return None
-    records = [bases[label] for label in labels]
-    with jax.ensure_compile_time_eval(), backend.eager_operators():
-        matrix = backend.to_array(materialize_expr(operator, backend, local_bases=bases))
-        vectors = records[0].energy_vectors
-        for record in records[1:]:
-            vectors = jnp.kron(vectors, record.energy_vectors)
-        dims = tuple(int(record.energy_vectors.shape[1]) for record in records)
-        return concrete_excitation_changes(matrix, dims, vectors)
+    bindings = _bound_values(operator) if isinstance(operator, PhysicsExpr) else None
+
+    def changes(node: Any, support: tuple[str, ...]) -> frozenset[int] | None:
+        declared = declared_excitation_changes(node)
+        if declared is not None:
+            return declared
+        if isinstance(node, PhysicsExpr):
+            if not node.labels or is_energy_diagonal(node, bases):
+                return frozenset({0})
+            if node.kind in ("scale", "embed"):
+                operand = node.args[1] if node.kind == "scale" else node.args[0]
+                return changes(operand, operand.labels)
+            if node.kind in ("add", "sub", "tensor", "matmul"):
+                left, right = (changes(arg, arg.labels) for arg in node.args)
+                if left is None or right is None:
+                    return None
+                if node.kind in ("add", "sub"):
+                    return left | right
+                return frozenset(a + b for a in left for b in right)
+            # An opaque parameter-dependent function has no fixed support proof.
+            if node.parameter_paths():
+                return None
+            if node.kind == "matrix" and contains_tracer(node.args[0]):
+                return None
+            if node.kind == "function" and contains_tracer(node.numeric_values()):
+                return None
+        elif contains_tracer(node):
+            return None
+        records = [bases[label] for label in support]
+        if contains_tracer(tuple(record.energy_vectors for record in records)):
+            return None
+        from quchip.backend._memory import require_memory
+
+        dimension = prod(record.native_dim for record in records)
+        require_memory(16 * 5 * dimension**2, task="Excitation-number proof on local support",
+                       remedy="Use factored operators or declare their excitation_changes.")
+        with jax.ensure_compile_time_eval(), backend.eager_operators():
+            matrix = backend.to_array(materialize_expr(node, backend, bindings=bindings, local_bases=bases))
+            vectors = records[0].energy_vectors
+            for record in records[1:]:
+                vectors = jnp.kron(vectors, record.energy_vectors)
+            dims = tuple(int(record.energy_vectors.shape[1]) for record in records)
+            return concrete_excitation_changes(matrix, dims, vectors)
+
+    return changes(operator, labels)
 
 
-def conserves_excitation_number(chip: Any, approximation: Any) -> bool:
-    """Return whether a chip's static model structurally conserves the total energy-level index.
+def conserves_excitation_number(chip: Any, approximation: Any, *, resolution: Any = None) -> bool:
+    """Prove conservation of the total isolated energy-level index from retained operators.
 
-    Device Hamiltonians are diagonal in their energy bases. The approximation
-    must keep only bands of zero total weight, and every retained term must
-    declare conservation. A port pair that generates the cascade Hamiltonian
-    ``Im(L2^dagger S2 L1)`` conserves the index when both port operators lower
-    it by one, as the ports of a shared feedline do.
+    A zero-total band filter proves conservation of ordinary interactions.
+    Otherwise their authored algebra or exact local matrix support must prove
+    it. Retained terms bypass that filter. Unknown support is not a proof.
+    Generated port pairs additionally require single-excitation lowering at
+    both ends, as assumed by compact static network assembly.
 
     Parameters
     ----------
@@ -73,17 +112,20 @@ def conserves_excitation_number(chip: Any, approximation: Any) -> bool:
         Chip whose static model is checked.
     approximation : Approximation
         Approximation the static model is resolved with.
+    resolution : optional
+        Local basis resolution to reuse.
     """
-    if not approximation.conserves_excitation_number():
-        return False
-    if any(terms.excitation_changes is None for terms in chip.effective_terms):
-        return False
-    pairs = () if chip.port_network is None else chip.port_network._active_generated_pairs()
-    if not pairs:
-        return True
-    from quchip.engine.assembly import _resolve_system
+    from quchip.engine.assembly import _interaction_contributions, _resolve_system
 
-    bases = _resolve_system(chip, chip.backend).bases
+    resolution = _resolve_system(chip, chip.backend) if resolution is None else resolution
+    bases = resolution.bases
+    for term in _interaction_contributions(chip):
+        if not term.retained and approximation.filters_terms and approximation.conserves_excitation_number():
+            continue
+        changes = authored_excitation_changes(term.expression(), term.labels, chip.backend, bases)
+        if changes is None or not changes <= {0}:
+            return False
+    pairs = () if resolution.network is None else resolution.network.generated_pairs
     labels = dict.fromkeys(label for downstream, upstream, _ in pairs for label in (downstream, upstream))
     return all(_port_lowers_level_index(chip, chip.port(label), bases) for label in labels)
 
