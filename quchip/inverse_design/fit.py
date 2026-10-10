@@ -55,6 +55,9 @@ from quchip.inverse_design.subsystems import (
 from quchip.inverse_design.types import FitADressResult, FitParameterReport, ObservableReport
 from quchip.utils.labeling import resolve_label
 
+# Largest total energy-level index that each target kind reads from the dressed spectrum.
+_TARGET_LEVEL_SUMS = {"freq": 1, "exchange_rate": 1, "anharmonicity": 2, "cross_kerr": 2}
+
 
 def _pair_labels(label: Any, kind: str) -> tuple[str, str]:
     """Validate a 2-tuple label for pair observables (``zz``, ``exchange``)."""
@@ -487,12 +490,20 @@ def fit_a_dress(
     evaluator
         ``"full"`` evaluates each target on the complete model. ``"local"``
         explicitly selects one-hop neighborhoods and omits effects of devices
-        outside them. Target reports record the selected evaluator. Unsupported
-        local model contributions raise.
+        outside them. A neighborhood keeps the ports whose targets it holds.
+        Target reports record the selected evaluator. Unsupported local model
+        contributions raise, e.g. a feedline that links a kept port to a
+        discarded one. A ``PortNetwork`` with matrix-form ``scattering`` also
+        raises when a neighborhood keeps only some of its planes. With the
+        mapping form ``{(output, input): amplitude}``, each neighborhood keeps
+        the entries of its own planes.
     max_hilbert_dim
-        Maximum Hilbert-space dimension of each evaluated model. A larger model
-        raises before seeding or optimization, and no different approximation
-        is selected. Increase the value to permit a larger model.
+        Maximum dimension of each matrix that a target evaluation
+        diagonalizes. A chip whose static model conserves the total
+        excitation number diagonalizes only the excitation sectors that its
+        targets read. Other chips diagonalize the full product space. A larger
+        matrix raises before seeding or optimization, and no different
+        approximation is selected. Increase the value to permit a larger model.
     seed_strength_bounds
         ``(lo, hi)`` magnitude bounds for the seed root solve of the bare coupling
         strength (:func:`_estimate_bare_g`). This solve serves ``cross_kerr`` coupling
@@ -563,10 +574,11 @@ def fit_a_dress(
         if isinstance(locator, str) and locator in chip.coupling_map:
             coupling = chip.coupling_map[locator]
             locator = (coupling.device_a_label, coupling.device_b_label)
-        dimension = _working_chip(chip, locator, evaluator).total_dim
+        working = _working_chip(chip, locator, evaluator)
+        dimension = working.analysis._dressed_dimension(_TARGET_LEVEL_SUMS.get(spec.kind, 0))
         if dimension > max_hilbert_dim:
             raise ValueError(
-                f"The {evaluator} model for {spec.label!r} has dimension {dimension}, "
+                f"The {evaluator} model for {spec.label!r} diagonalizes a matrix of dimension {dimension}, "
                 f"exceeding max_hilbert_dim={max_hilbert_dim}. Increase the limit to evaluate this model."
             )
 
