@@ -1190,11 +1190,16 @@ block, and two states couple only when they agree outside that support. The engi
 assigns labels within each block with the same overlap rule as the full
 eigensystem. `Chip.energy()`, `Chip.freq()`, `Chip.transition_frequency()`,
 `Chip.dispersive_shift()`, `Chip.dressed_anharmonicity()`, `Chip.kerr_matrix()`,
-`Chip.effective_subspace_hamiltonian()` and `effective_hamiltonian()` take this
+`Chip.drive_matrix_elements()`, `Chip.effective_subspace_hamiltonian()` and `effective_hamiltonian()` take this
 route. Ground-conditioned first transitions and single-excitation exchange need
 `N <= 1`. Ground-conditioned anharmonicities, ZZ and dispersive shifts need
 `N <= 2`. Other conditioned transitions use the sectors of their specified labels.
-Large authored supports can still require large local matrices.
+Drive matrix elements connect the initial and final sectors with the local
+operator's rectangular block. The assigned bare-state overlap fixes each
+state's phase, as in full-space analysis. This static query does not change
+pulse simulation.
+Large authored supports can still require large local matrices. Memory checks
+precede local projection, sector enumeration and full-space static fallback.
 Traced blocks use differentiable eigensolves.
 Derivatives require separated eigenvalues and a locally stable assignment. `Chip.dress()`, `Chip.dressed_spectrum()`, `Chip.state()` and
 dressed-basis operators still diagonalize the complete chip. Other chips keep
@@ -1483,13 +1488,27 @@ overlap block and `S = W W†`. This [des Cloizeaux effective Hamiltonian][des-c
 labeled energies exactly. Its basis is not the canonical SW rotation, so off-diagonal reads agree
 with `method="sw"` only through 2nd order.
 
-When `chip.approximation` keeps only bands of zero total weight, as `RWA()` does, the static model
-conserves the total energy-level index. The exact route then diagonalizes each total-excitation
-sector separately, so its retained Hamiltonian, jump operators and coordinate map have exact zeros
-between sectors, with no round-off from near-degeneracies across sectors. This requires earlier
-retained terms to declare the same conservation. Each port pair that generates a cascade
-Hamiltonian, as on a shared feedline, must lower the index by one at both ports. Otherwise, the
-route diagonalizes the full matrix.
+The engine checks conservation from the static operators in the isolated energy
+bases. A filter that keeps only zero-total bands proves conservation for ordinary
+interactions. Retained terms bypass that filter and need their own proof.
+Declared excitation changes, factored algebra and exact local matrix support
+can supply that proof, including under `Exact()`. Scalar coefficients do not
+change structural support, even when a coefficient is zero. No numerical
+small-entry threshold proves conservation. Unknown support uses the full route.
+Each port pair that generates a cascade Hamiltonian must lower the index by one
+at both ports. Vacuum VNA separately checks all channels and input occupations.
+
+The exact reduction route then diagonalizes each total-excitation sector
+separately. Its retained Hamiltonian, channels and coordinate map have exact
+zeros between sectors, without mixing near-degenerate states across sectors.
+This eligibility check does not remove the full-space construction used by
+whole-model elimination.
+
+Tracing can make an undeclared operator or its local energy basis unknown.
+The engine then requires a structural proof to keep the sector route.
+`fit_a_dress()` checks `max_hilbert_dim` at each target evaluation, including
+tracing and parameter rebinding. It raises if the required sector or full-space
+matrix exceeds that limit. The fit does not select a different approximation.
 
 `method="exact"` validates the ground, the single excitations of touching survivors, and their pair
 excitations. Each diagnostic label needs a distinct majority dressed eigenstate, and the full

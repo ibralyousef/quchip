@@ -58,6 +58,29 @@ choices. `chip.resolve().dropped_terms_summary()` lists discarded terms.
 `Exact()` keeps the declared Hamiltonian terms. Finite local spaces and
 component approximations still apply.
 
+## Fit a large conserving model
+
+`fit_a_dress()` uses the same excitation sectors as labeled dressed queries.
+For 24 devices with at least two levels each, ground-conditioned frequencies
+need the vacuum and a 24-state block. With at least three levels per device,
+anharmonicities and pair shifts also need the 300-state two-excitation block.
+Smaller local cutoffs reduce that count.
+
+The engine must prove conservation from the retained operators. Default `RWA()`
+provides this for ordinary interactions. An explicitly conserving model can
+qualify under `Exact()` too. Unknown or nonconserving operators use the full
+space. No excitation cutoff is inserted.
+
+`max_hilbert_dim` limits the largest matrix used by each fit target. The limit
+is checked again after rebinding or tracing. Traced local energy bases can
+make an undeclared operator's conservation unknown. Keep a sufficient limit
+for the full fallback, or supply a valid structural operator declaration.
+`evaluator="full"` retains the complete device model even when it uses sectors.
+`evaluator="local"` remains an explicit neighborhood approximation.
+
+`drive_matrix_elements()` also uses the sectors of its two selected states.
+Pulse simulations still use their existing state space.
+
 ## Change parameters without rebuilding the example
 
 ```python

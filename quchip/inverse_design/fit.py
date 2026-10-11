@@ -257,6 +257,29 @@ def _coupling_by_label(chip: Chip, label: Any):
     return next(c for c in chip.couplings if c.label == label)
 
 
+def _target_model(candidate: Chip, spec: TargetSpec, evaluator: str, max_hilbert_dim: int) -> Chip:
+    """Resolve and check the actual model before each spectral target evaluation."""
+    locator = spec.label
+    if isinstance(locator, str) and locator in candidate.coupling_map:
+        coupling = candidate.coupling_map[locator]
+        locator = (coupling.device_a_label, coupling.device_b_label)
+    working = _working_chip(candidate, locator, evaluator)
+    if spec.kind in _TARGET_LEVEL_SUMS:
+        dimension = working.analysis._dressed_dimension(_TARGET_LEVEL_SUMS[spec.kind])
+        if dimension > max_hilbert_dim:
+            raise ValueError(
+                f"The {evaluator} model for {spec.label!r} diagonalizes a matrix of dimension {dimension}, "
+                f"exceeding max_hilbert_dim={max_hilbert_dim}. Increase the limit to evaluate this model."
+            )
+    return working
+
+
+def _evaluate_checked_spec(candidate: Chip, spec: TargetSpec, evaluator: str, max_hilbert_dim: int) -> Any:
+    """Apply the matrix budget to the selected model before evaluating its observable."""
+    working = _target_model(candidate, spec, evaluator, max_hilbert_dim)
+    return _evaluate_spec(working, spec, "full")
+
+
 def _evaluate_spec(candidate: Chip, spec: TargetSpec, evaluator: str) -> Any:
     """Compute the observable this ``spec`` anchors, on the appropriate working chip."""
     match spec.kind:
@@ -418,6 +441,7 @@ def _jax_residual_functions(
     evaluator: str,
     targets: np.ndarray,
     scales: np.ndarray,
+    max_hilbert_dim: int = 10_000,
 ):
     """Return JAX residual functions for a JAX-backed chip, else ``None``."""
     backend = chip.backend
@@ -429,7 +453,8 @@ def _jax_residual_functions(
     def residual(values):
         with _backend_context(backend):
             candidate = _rebuild_candidate(chip, names, values)
-            observed = jnp.stack([jnp.asarray(_evaluate_spec(candidate, spec, evaluator)) for spec in target_specs])
+            observed = jnp.stack([jnp.asarray(_evaluate_checked_spec(candidate, spec, evaluator, max_hilbert_dim))
+                                  for spec in target_specs])
         return (observed - targets_jax) / scales_jax
 
     return jax.jit(residual), jax.jit(jax.jacrev(residual))
@@ -502,8 +527,9 @@ def fit_a_dress(
         diagonalizes. A chip whose static model conserves the total
         excitation number diagonalizes only the excitation sectors that its
         targets read. Other chips diagonalize the full product space. A larger
-        matrix raises before seeding or optimization, and no different
-        approximation is selected. Increase the value to permit a larger model.
+        matrix raises before seeding or optimization. Each rebound or traced
+        target checks the limit again if its conservation proof changes.
+        No different approximation is selected. Increase the value to permit a larger model.
     seed_strength_bounds
         ``(lo, hi)`` magnitude bounds for the seed root solve of the bare coupling
         strength (:func:`_estimate_bare_g`). This solve serves ``cross_kerr`` coupling
@@ -570,17 +596,7 @@ def fit_a_dress(
     target_specs = build_dressed_target_specs(chip, constraint_mapping)
 
     for spec in target_specs:
-        locator = spec.label
-        if isinstance(locator, str) and locator in chip.coupling_map:
-            coupling = chip.coupling_map[locator]
-            locator = (coupling.device_a_label, coupling.device_b_label)
-        working = _working_chip(chip, locator, evaluator)
-        dimension = working.analysis._dressed_dimension(_TARGET_LEVEL_SUMS.get(spec.kind, 0))
-        if dimension > max_hilbert_dim:
-            raise ValueError(
-                f"The {evaluator} model for {spec.label!r} diagonalizes a matrix of dimension {dimension}, "
-                f"exceeding max_hilbert_dim={max_hilbert_dim}. Increase the limit to evaluate this model."
-            )
+        _target_model(chip, spec, evaluator, max_hilbert_dim)
 
     if vary is None:
         targeted_labels = {spec.label for spec in target_specs if isinstance(spec.label, str)}
@@ -650,7 +666,8 @@ def fit_a_dress(
 
     def concrete_residuals(x: np.ndarray) -> np.ndarray:
         candidate = _rebuild_candidate(chip, names, x)
-        values = np.asarray([_evaluate_spec(candidate, spec, evaluator) for spec in target_specs], dtype=float)
+        values = np.asarray([_evaluate_checked_spec(candidate, spec, evaluator, max_hilbert_dim)
+                             for spec in target_specs], dtype=float)
         return (values - targets_arr) / scales
 
     jacobian_mode = "finite-difference"
@@ -664,6 +681,7 @@ def fit_a_dress(
             evaluator,
             targets_arr,
             scales,
+            max_hilbert_dim,
         )
     except ImportError:
         jax_functions = None

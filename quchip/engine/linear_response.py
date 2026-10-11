@@ -92,16 +92,16 @@ def _build_vacuum_response_problem(
     ``c* L_1 - |c|²/2 - (L†L)_1 / 2`` to that block. Every block comes from the
     terms' local operators, so the full product space is never formed.
     """
-    from quchip.chip.effective import authored_excitation_changes, conserves_excitation_number
-    from quchip.engine.sectors import SectorModel
+    from quchip.chip.effective import authored_excitation_changes
 
     network = chip.port_network
-    if (network is None or chip.dynamic_contributions()
-            or not conserves_excitation_number(chip, chip.approximation)):
+    if network is None or chip.dynamic_contributions():
+        raise _UnsupportedLinearModel
+    sectors = chip.analysis._sector_model()
+    if sectors is None:
         raise _UnsupportedLinearModel
     backend = chip.backend
     labels = tuple(device.label for device in chip.devices)
-    sectors = SectorModel(chip)
     channels: list[list[tuple[Any, Any, tuple[int, ...]]]] = []
     hidden_keys: list[str] = []
     occurrences: dict[str, int] = {}
