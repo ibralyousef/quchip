@@ -446,6 +446,17 @@ def _mode_reflection_transfer(
 _Feeder = tuple[Any, "TerminalKey | None", "TerminalKey | None"]
 
 
+@dataclass(frozen=True)
+class _ModeResponse:
+    """A removed harmonic pole attached to its original quantum-port locations."""
+
+    label: str
+    ports: tuple[str, ...]
+    freq: Any
+    weight: Any
+    internal_rate: Any
+
+
 @dataclass
 class _AffineField:
     scattering: list[Any]
@@ -525,6 +536,7 @@ class PortNetwork:
         self._connections: dict[TerminalKey, TerminalKey] = {}
         self._used_outputs: dict[TerminalKey, TerminalKey] = {}
         self._exposures: list[NetworkPort] = []
+        self._mode_responses: tuple[_ModeResponse, ...] = ()
 
     @classmethod
     def from_ports(
@@ -615,7 +627,13 @@ class PortNetwork:
 
     @property
     def parameters(self) -> Mapping[str, Any]:
-        """Return bindable scalar network parameters visible in authored scattering."""
+        """Return bindable scalar parameters of the network and retained responses.
+
+        Paths are ``scattering.<output>.<input>``, ``component.<label>.<name>``
+        and ``response.<mode>.<name>``. A retained mode response has ``freq`` in
+        GHz, a dimensionless ``weight`` and ``internal_rate`` in 1/ns. The
+        ``internal_rate`` already includes the weight.
+        """
         values: dict[str, Any] = {}
         if isinstance(self._authored_scattering, Mapping):
             for (output, input_), value in self._authored_scattering.items():
@@ -623,6 +641,9 @@ class PortNetwork:
         for component in self.components:
             for name, value in component._parameters.items():
                 values[f"component.{component.label}.{name}"] = value
+        for mode in self._mode_responses:
+            for name in ("freq", "weight", "internal_rate"):
+                values[f"response.{mode.label}.{name}"] = getattr(mode, name)
         return MappingProxyType(values)
 
     def set_parameter_value(self, name: str, value: Any) -> None:
@@ -631,9 +652,10 @@ class PortNetwork:
         Parameters
         ----------
         name : str
-            Path below ``scattering`` or ``component``.
+            Path below ``scattering``, ``component`` or ``response``.
         value : Any
-            Replacement scalar in the component parameter's declared units.
+            Replacement scalar in the parameter's units. :attr:`parameters` gives
+            the units of retained mode responses.
         """
         parts = name.split(".")
         if (
@@ -650,6 +672,13 @@ class PortNetwork:
             if component is not None and parts[2] in component._parameters:
                 component._parameters[parts[2]] = value
                 return
+        if len(parts) == 3 and parts[0] == "response" and parts[2] in {"freq", "weight", "internal_rate"}:
+            for index, mode in enumerate(self._mode_responses):
+                if mode.label == parts[1]:
+                    modes = list(self._mode_responses)
+                    modes[index] = replace(mode, **{parts[2]: value})
+                    self._mode_responses = tuple(modes)
+                    return
         raise KeyError(name)
 
     def port(
@@ -1300,6 +1329,9 @@ class PortNetwork:
             tuple(self._connections.items()),
             tuple((item.label, item._input_key, item._output_key) for item in self._exposures),
             self._cache_value(self._authored_scattering),
+            tuple((mode.label, mode.ports, *(self._cache_value(getattr(mode, name))
+                                           for name in ("freq", "weight", "internal_rate")))
+                  for mode in self._mode_responses),
         )
 
     def resolve(
@@ -1422,7 +1454,7 @@ class PortNetwork:
         return tuple(fields)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize a static network graph and its quantum ports."""
+        """Serialize the network graph, quantum ports and retained mode responses."""
         filters = [component.label for component in self.components if component._kind == "filter"]
         if filters:
             raise TypeError(
@@ -1433,6 +1465,12 @@ class PortNetwork:
         return {
             "label": self.label,
             "ports": [port.to_dict() for port in self._ports],
+            **({"mode_responses": [
+                {"label": mode.label, "ports": list(mode.ports),
+                 **{name: self._serialize_scalar(getattr(mode, name))
+                    for name in ("freq", "weight", "internal_rate")}}
+                for mode in self._mode_responses
+            ]} if self._mode_responses else {}),
             "scattering": self._serialize_boundary(self._authored_scattering),
             "components": [
                 self._serialize_component(component)
@@ -1479,7 +1517,7 @@ class PortNetwork:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "PortNetwork":
-        """Reconstruct a static network produced by :meth:`to_dict`.
+        """Reconstruct a network produced by :meth:`to_dict`.
 
         Parameters
         ----------
@@ -1491,6 +1529,7 @@ class PortNetwork:
             "ports",
             "scattering",
             "components",
+            "mode_responses",
             "connections",
             "exposures",
         }
@@ -1534,6 +1573,17 @@ class PortNetwork:
                 input=FieldTerminal(input_component, input_name, "input", network._token),
                 output=FieldTerminal(output_component, output_name, "output", network._token),
             )
+        known = {port.label for port in network._ports}
+        for payload in data.get("mode_responses", ()):
+            ports = tuple(payload["ports"])
+            if not ports or len(set(ports)) != len(ports) or not known.issuperset(ports):
+                raise ValueError(f"Mode response {payload['label']!r} must name distinct ports of this network, "
+                                 f"got {list(ports)}. Available ports: {sorted(known)}.")
+        network._mode_responses = tuple(
+            _ModeResponse(payload["label"], tuple(payload["ports"]),
+                          *(cls._deserialize_scalar(payload[name]) for name in ("freq", "weight", "internal_rate")))
+            for payload in data.get("mode_responses", ())
+        )
         return network
 
     def copy(self) -> "PortNetwork":
@@ -1563,8 +1613,9 @@ class PortNetwork:
         KeyError
             A selected port is not part of this network.
         ValueError
-            A reachable subgraph also touches an unselected port, or boundary
-            scattering couples kept and dropped planes.
+            A reachable subgraph also touches an unselected port, boundary
+            scattering couples kept and dropped planes, or the kept ports hold
+            only part of a retained mode response.
         """
         labels = {port if isinstance(port, str) else port.label for port in ports}
         known = {port.label for port in self._ports}
@@ -1784,6 +1835,10 @@ class PortNetwork:
     def _copy_graph(self, replacements: Mapping[str, Port], keep: set[str] | None) -> "PortNetwork":
         """Copy the components in ``keep`` (all when ``None``) with their wiring and parameters."""
         kept = keep if keep is not None else {component.label for component in self.components}
+        for mode in self._mode_responses:
+            if set(mode.ports) & kept and not set(mode.ports) <= kept:
+                raise ValueError(f"Retained mode response {mode.label!r} needs all of its ports "
+                                 f"{sorted(mode.ports)}. Restrict them together.")
         scattering = copy_value(self._authored_scattering) if keep is None else self._restricted_boundary(kept)
         copied = PortNetwork(scattering=scattering, label=self.label)
         for component in self.components:
@@ -1805,16 +1860,27 @@ class PortNetwork:
             for exposure in self._exposures
             if exposure._input_key[0] in kept
         ]
+        copied._mode_responses = tuple(
+            replace(mode, **{name: copy_value(getattr(mode, name)) for name in ("freq", "weight", "internal_rate")})
+            for mode in self._mode_responses if set(mode.ports) <= kept
+        )
         return copied
 
     def physics_notes(self) -> list[str]:
         """Return the boundary convention and approximation scope."""
-        return [
+        notes = [
             "This instantaneous Markovian boundary uses b_out = S b_in + L; scalar S is unitary after "
             "explicit loss dilation; declared thermal input states enter the quantum dynamics.",
             "Reference sections shift incident and reported fields at external planes only; they do not "
             "enter S, L, or H and cannot sit inside feedback loops. Acyclic output mixing preserves joint noise.",
         ]
+        if self._mode_responses:
+            notes.append(
+                "Retained multiport harmonic poles enter vacuum VNA sweeps at their original port locations. "
+                "Quantum dynamics use only the transformed Markov channels. "
+                "The dissipative reduction remains dispersive."
+            )
+        return notes
 
     def dynamical_supports(
         self, chip: Any, *, _compiled: _CompiledNetwork | None = None,

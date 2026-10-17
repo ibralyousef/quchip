@@ -1778,15 +1778,61 @@ The entry sets `is_valid` when `kappa_over_delta < 0.1`. This is a dispersive
 diagnostic, not an accuracy guarantee.
 Reflection sections add no such entry.
 
+A harmonic mode with several default lowering ports can instead retain one
+coupled response at the original port locations. Each port must lie on a
+distinct directional line accepted by the series check above. For the pole's
+local incident and outgoing fields, the internal convention gives
+
+```text
+v_j = sqrt(w kappa_j) exp(i phi_j)
+d(f) = (sum_j |v_j|² + w kappa_i)/2 - i 2π(f - f_tilde)
+F(f) = I - v v† / d(f)
+```
+
+This is the passive linear transfer formula of
+[Gough, Gohm and Yanagisawa](https://arxiv.org/abs/0807.2338).
+The off-diagonal entries scatter between directions. For equal rates and
+phases on a two-way hanger, the transmission and reflection obey `t = 1 + rho`.
+The reported VNA convention conjugates this internal transfer.
+
+The vacuum weak-probe solve retains one scalar amplitude per removed mode.
+It composes that amplitude with the transformed survivor ports through the
+network's existing channel maps and series-product Hamiltonian terms.
+Consequently it keeps the pole's position, subsequent scattering, port phases,
+and unequal rates. This representation adds no device or Hilbert-space state.
+It cannot be replaced by independent scalar sections on the two lines.
+The pole data survive copying, parameter rebinding and serialization.
+
+In a conserving model, a one-port mode on a line shared with a multiport mode
+also retains its pole at the original port. This applies before and after the
+multiport mode is eliminated. Moving a scalar section across that mode would
+change which incident or outgoing direction receives its phase and attenuation.
+The original graph therefore determines the response for either elimination
+order. Other one-port reductions keep their reference sections, including
+nonconserving models.
+
+The reduced quantum model keeps both transformed emission channels. Its
+Markov dynamics do not retain the pole amplitude. Dispersive error remains
+in these channels and in the retained Hamiltonian: omitted directional
+couplings to the removed mode leave shifts of order `|J_network|²/|Delta|`.
+The weak-probe composition restores those network paths in the frequency solve.
+It omits survivor damping of the pole and correlations with the discarded
+internal-loss bath. The second-order SW energy error stated above also remains.
+This does not make the dissipative reduction exact.
+The coupled pole supports a conserving model's vacuum `VNA.sweep()` only.
+Pumped, finite-power, noisy, excited-reference, and general stationary field
+routes reject it. A time-domain solve also rejects a coherent input that
+reaches the pole's ports. For those observables, keep the boundary mode.
+
 A port that an earlier elimination transformed already acts on every survivor
 and reaches a later eliminated mode only through that dressing. The later
 reduction transforms it like an inherited channel and gives it no section, so
 you can eliminate both readout modes of a chip in either order. Like an
 inherited channel, it drops its direct scattering through the later mode, of
 order `rate |<0|L|1>|^2 / Delta`. Rather than approximate or double-count them,
-quchip rejects custom or collective boundary operators, projected survivors,
-and a mode with several ports. It also rejects a nonlinear eliminated boundary
-target and a plane carrying fields that do not pass the port in series.
+quchip rejects custom or collective boundary operators and projected survivors.
+It also rejects a nonlinear eliminated boundary target and a plane carrying
+fields that do not pass the port in series.
 
 The result's `notes` record that the projection is exact for the
 *spectrum* but approximate for *dissipation*, because the discarded

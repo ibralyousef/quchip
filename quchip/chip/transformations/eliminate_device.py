@@ -118,6 +118,20 @@ def _retained_port_labels(chip: "Chip") -> set[str]:
     }
 
 
+def _line_has_coupled_response(chip: "Chip", labels: tuple[str, ...], retained_ports: set[str]) -> bool:
+    """Return whether a line meets a mode that also emits through other ports."""
+    network = chip.port_network
+    assert network is not None
+    line = set(labels)
+    ports_by_target: dict[str, set[str]] = {}
+    for port in chip.ports:
+        if port.label not in retained_ports:
+            for target in port.resolve_targets(chip):
+                ports_by_target.setdefault(target, set()).add(port.label)
+    groups = [*ports_by_target.values(), *(set(mode.ports) for mode in network._mode_responses)]
+    return any(len(ports) > 1 and not line.isdisjoint(ports) for ports in groups)
+
+
 def _operator_terms(expr: PhysicsExpr) -> Iterator[PhysicsExpr]:
     """Yield the operator products that ``expr`` sums, without their scalar coefficients."""
     if expr.kind in ("add", "sub"):
@@ -620,14 +634,14 @@ def reduce_device(chip: "Chip", target: Any, method: str, *, local: bool = False
                 "default lowering ports and ports an earlier reduction transformed; "
                 f"unsupported ports: {unsupported}."
             )
-        if len(boundary_ports) > 1:
-            raise NotImplementedError(
-                f"Mode {mode_label!r} couples to ports {[port.label for port in boundary_ports]}; its "
-                "frequency-dependent transmission between them has no reduced boundary yet. Keep the mode."
-            )
     if boundary_ports:
         assert chip.port_network is not None
-        reflection_plane, upstream_ports, downstream_ports = chip.port_network._line_exposure(boundary_ports[0].label)
+        lines = [chip.port_network._line_exposure(port.label) for port in boundary_ports]
+        planes = [plane for plane, _, _ in lines]
+        shared = [port.label for port, plane in zip(boundary_ports, planes, strict=True) if planes.count(plane) > 1]
+        if shared:
+            raise NotImplementedError(f"Ports {shared} of {mode_label!r} share a directional line. Keep the mode.")
+        reflection_plane, upstream_ports, downstream_ports = lines[0]
         non_fock = [
             label
             for label, _ in survivors
@@ -727,6 +741,19 @@ def reduce_device(chip: "Chip", target: Any, method: str, *, local: bool = False
     sectors = excitation_sectors(dims) if conserves_excitation_number(numeric, approximation) else None
     if sectors is not None:
         h = concrete_array_module(h).where(sectors[:, None] == sectors[None, :], h, 0.0)
+    conserving = sectors is not None
+    if local and conserving and boundary_ports:
+        # A retained pole serves the vacuum response of the whole reduced chip.
+        conserving = conserves_excitation_number(chip, approximation)
+    if len(boundary_ports) > 1 and not conserving:
+        raise NotImplementedError(
+            f"Eliminating {mode_label!r} with ports {[port.label for port in boundary_ports]} requires an "
+            "excitation-conserving model such as RWA(). Keep the mode."
+        )
+    coupled_response = len(boundary_ports) > 1 or (
+        len(boundary_ports) == 1 and conserving
+        and _line_has_coupled_response(chip, upstream_ports + downstream_ports, retained_ports)
+    )
     # Survivor pairs are keyed in the chip's device order everywhere — the
     # pair extraction, the exact route, and the fold loop below — so the two
     # sides of every ("J", a, b) lookup agree no matter what order the legs
@@ -1113,6 +1140,31 @@ def reduce_device(chip: "Chip", target: Any, method: str, *, local: bool = False
                          port_replacements=port_replacements,
                          effective_terms=effective_terms, baths=projected_baths)
     if boundary_ports:
+        if local:
+            frequency, weight = _local_dressed_transition(chip, resolution, mode_label, mode_lowering, approximation)
+        else:
+            lowering = _kron(*(mode_lowering if label == mode_label else np.eye(dim)
+                               for label, dim in zip(labels, dims)))
+            frequency, weight = reduction.dressed_transition(ctx, lowering)
+    if coupled_response:
+        from quchip.chip.port_network import _ModeResponse
+
+        network = final.port_network
+        assert network is not None
+        network._mode_responses += (_ModeResponse(
+            mode_label, tuple(port.label for port in boundary_ports), frequency, weight, weight * internal_rate,
+        ),)
+        notes.append(
+            f"Kept the coupled response of {mode_label!r} at its original ports. "
+            "Vacuum VNA sweeps compose its dressed pole with the network, including later scattering. "
+            "Time-domain dynamics use only the transformed port operators. "
+            "The pole omits survivor damping and correlations with the discarded internal-loss bath. "
+            "Dissipation remains dispersive."
+            + (" SW keeps second-order energies only." if method == "sw" else "")
+            + " Pumped, finite-power, noisy and excited-reference field responses, and time-domain "
+            "coherent inputs at its ports, require the full boundary mode."
+        )
+    if len(boundary_ports) == 1 and not coupled_response:
         # The transformed port carries survivor emission. The section keeps
         # the removed mode's scattering on the external plane.
         network = final.port_network
@@ -1127,12 +1179,6 @@ def reduce_device(chip: "Chip", target: Any, method: str, *, local: bool = False
         while section_label in {component.label for component in network.components}:
             section_label = f"{mode_label}_{section_kind}_{suffix}"
             suffix += 1
-        if local:
-            frequency, weight = _local_dressed_transition(chip, resolution, mode_label, mode_lowering, approximation)
-        else:
-            lowering = _kron(*(mode_lowering if label == mode_label else np.eye(dim)
-                               for label, dim in zip(labels, dims)))
-            frequency, weight = reduction.dressed_transition(ctx, lowering)
         external_rate = weight * boundary_ports[0].rate_value(chip)
         if shared_line:
             section = network.mode_transmission(

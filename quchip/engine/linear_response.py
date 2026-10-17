@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import jax
@@ -109,7 +109,7 @@ def _build_vacuum_response_problem(
         )
         rows.append(model.channel_block(index, 0, 1)[0])
     inbound, outbound = model.transfers(frequencies)
-    return LinearResponseProblem(
+    problem = LinearResponseProblem(
         frequencies=frequencies,
         mode_labels=tuple(labels[index] for index in excited[order]),
         hamiltonian=block[np.ix_(order, order)],
@@ -118,6 +118,59 @@ def _build_vacuum_response_problem(
         plane_indices=model.plane_indices,
         inbound_transfer=inbound,
         outbound_transfer=outbound,
+    )
+
+    return _with_mode_responses(problem, model, order)
+
+
+def _with_mode_responses(problem: LinearResponseProblem, model: Any, order: Any) -> LinearResponseProblem:
+    """Compose removed harmonic poles at their original port locations in mode space.
+
+    For one pole, elimination of its amplitude gives
+    ``S(f) = I - v v† / (sum(|v|²)/2 + kappa_i/2 - i 2π(f-f_r))``.
+    Keeping this one scalar unknown in the frequency solve composes the full
+    rank-one response, including reflections and later scattering. It does not
+    add a device or a quantum state to the reduced chip.
+    """
+    sectors = model.sectors
+    chip, compiled = sectors.chip, sectors.network
+    network = chip.port_network
+    modes = network._mode_responses
+    if not modes:
+        return problem
+    backend = chip.backend
+    xp = backend.array_module
+    count, added = len(problem.mode_labels), len(modes)
+    size = count + added
+    raw = {}
+    for port in network.ports:
+        matrix, support = sectors.port_couplings()[port.label]
+        kept = xp.asarray(sectors.block(matrix, support, 0, 1))[0, order]
+        amplitude = xp.sqrt(xp.asarray(_scalar_value(port.rate_value(chip), backend))) * xp.exp(
+            1j * xp.asarray(_scalar_value(port.phase, backend)))
+        poles = xp.stack([amplitude * xp.sqrt(xp.asarray(_scalar_value(mode.weight, backend)))
+                          if port.label in mode.ports else xp.asarray(0j) for mode in modes])
+        raw[port.label] = xp.concatenate((kept, poles))
+    h = xp.pad(problem.hamiltonian, ((0, added), (0, added)))
+    frequencies = xp.asarray([_scalar_value(mode.freq, backend) for mode in modes])
+    internal_rates = xp.asarray([_scalar_value(mode.internal_rate, backend) for mode in modes])
+    # Internal loss damps only the pole amplitude. The diagonal -i kappa_i/2
+    # gives the drift of an unread loss channel and stays differentiable at zero loss.
+    h = h + xp.diag(xp.concatenate((xp.zeros(count), TWO_PI * frequencies - 0.5j * internal_rates)))
+    # The retained block already contains the network Hamiltonian. Add only
+    # the new rows and columns of each series-product term.
+    for downstream, upstream, coefficient in compiled.generated_pairs:
+        product = xp.outer(xp.conj(raw[downstream]), coefficient * raw[upstream])
+        term = (product - product.conj().T) / (2j)
+        h = h + term - xp.pad(term[:count, :count], ((0, added), (0, added)))
+    exposed = xp.stack([
+        sum((coefficient * raw[source] for source, coefficient in entry.coupling.items()),
+            start=xp.zeros(size, dtype=complex)) for entry in compiled.channels
+    ])
+    hidden = xp.pad(problem.couplings[len(compiled.channels):], ((0, 0), (0, added)))
+    return replace(
+        problem, mode_labels=(*problem.mode_labels, *(mode.label for mode in modes)),
+        hamiltonian=h, couplings=xp.concatenate((exposed, hidden), axis=0),
     )
 
 
@@ -217,7 +270,8 @@ def _build_linear_response_problem(
     network = chip.port_network
     if network is None:
         raise _UnsupportedLinearModel
-    if chip.dynamic_contributions() or chip.effective_terms:
+    # Retained mode responses enter only the vacuum weak-probe composition.
+    if chip.dynamic_contributions() or chip.effective_terms or network._mode_responses:
         raise _UnsupportedLinearModel
 
     labels = tuple(device.label for device in chip.devices)

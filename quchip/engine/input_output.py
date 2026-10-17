@@ -20,6 +20,11 @@ def resolve_stationary_engine(
     port_frequencies: tuple[tuple[str, Any], ...],
 ) -> EngineResult:
     """Resolve port-tone frequencies into one static engine description."""
+    if chip.port_network is not None and chip.port_network._mode_responses:
+        raise NotImplementedError(
+            "Retained multiport mode responses support vacuum VNA.sweep() with no pumps or solver options. "
+            "Keep the boundary mode for finite-power or noisy field measurements."
+        )
     if not port_frequencies:
         raise ValueError("Stationary port analysis requires at least one tone frequency.")
 

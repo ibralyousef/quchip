@@ -67,8 +67,8 @@ This file records notable user-visible changes to quchip.
   `PortNetwork.mode_reflection(...)` reference section. It uses the dressed
   transition and scales both rates by the dressed lowering weight. Residual
   errors include Purcell dispersion, omitted survivor damping, and higher-order
-  energy shifts for SW. Several ports on the mode or fields outside its
-  series path remain unsupported.
+  energy shifts for SW. A port that shares its plane with fields outside its
+  series path remains unsupported.
   ([#76](https://github.com/quchip/quchip/issues/76),
   [#115](https://github.com/quchip/quchip/pull/115))
 - Capacitive couplings use each device's declared charge operator, as charge
@@ -94,6 +94,19 @@ This file records notable user-visible changes to quchip.
 
 #### New features
 
+- `eliminate()` removes a readout with one port in each direction of a two-way
+  hanger feedline. The reduced network keeps the readout's dressed pole at the
+  original ports, so vacuum `VNA.sweep()` keeps the dip and the reflection into
+  the other direction. Both transformed ports keep each qubit's directional
+  Purcell decay. In conserving models, a one-port readout that shares a line
+  with such a mode also keeps a pole instead of a `mode_transmission(...)`
+  section. Only vacuum sweeps use the pole. Pumped, finite-power, noisy and
+  excited-reference field calculations raise, and so do time-domain coherent
+  inputs at the pole's ports. Elimination raises `NotImplementedError` for two
+  ports of one mode on one directional line. It also raises for a multiport
+  mode in a model that does not conserve excitation number.
+  ([#131](https://github.com/quchip/quchip/issues/131),
+  [#140](https://github.com/quchip/quchip/pull/140))
 - Deterministic pulse simulations on QuTiP and dynamiqs evolve in an invariant
   excitation space when quchip can prove one. The proof covers the initial state
   and every retained Hamiltonian, control, collapse operator and no-jump

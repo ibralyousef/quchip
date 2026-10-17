@@ -1795,6 +1795,29 @@ def _compile_coherent_terms(
     return tuple(compiled)
 
 
+def _reject_inputs_to_mode_responses(chip: "Chip", control_ops: list["ControlOp"]) -> None:
+    """Reject a coherent input that reaches the ports of a retained mode response.
+
+    The Markov dynamics keep only the transformed port operators, so they omit
+    the removed mode's own scattering of that field.
+    """
+    network = chip.port_network
+    if network is None or not network._mode_responses:
+        return
+    compiled = network._compile()
+    owners = {label: mode.label for mode in network._mode_responses for label in mode.ports}
+    for operation in control_ops:
+        if not isinstance(operation, CoherentOp):
+            continue
+        fed = network.fed_ports(chip, operation.exposure, _compiled=compiled)
+        reached = sorted({owners[port.label] for port, _ in fed if port.label in owners})
+        if reached:
+            raise NotImplementedError(
+                f"Coherent input {operation.exposure!r} reaches retained multiport mode responses {reached}. "
+                "Time-domain dynamics omit their poles. Keep the boundary mode for transient field inputs."
+            )
+
+
 def _frame_shifted(program: SignalProgram, frequency: Any) -> SignalProgram:
     """Attach one operator-frame phase unless it is concretely zero."""
     if _is_concrete_zero(frequency):
@@ -1978,6 +2001,7 @@ def _template_from_engine_result(
         space=base_result.excitation_space,
     )
     coherent_terms = _compile_coherent_terms(base_result.slh, drive_ops)
+    _reject_inputs_to_mode_responses(chip, drive_ops)
     return HamiltonianTemplate(
         base_result=replace(base_result, metadata=dict(base_result.metadata)),
         drive_terms=drive_terms,

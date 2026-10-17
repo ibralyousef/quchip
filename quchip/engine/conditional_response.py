@@ -36,6 +36,11 @@ def build_conditional_response(
                         reference_stationarity_residual=0., mode_count=len(problem.mode_labels))
         return problem, metadata
 
+    if chip.port_network._mode_responses:
+        raise NotImplementedError(
+            "Retained multiport mode responses support the vacuum reference only. "
+            "Keep the boundary mode for an excited-reference VNA sweep."
+        )
     system = sectors.eigensystem(total)
     row = system.space.row(reference)
     index = system.labeling.indices[row]

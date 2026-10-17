@@ -507,12 +507,6 @@ def test_field_elimination_rejects_an_authored_joint_port() -> None:
         eliminate(chip, "r1")
 
 
-def test_field_elimination_rejects_a_mode_with_several_ports() -> None:
-    """A mode transmitting between two ports has no reduced boundary yet."""
-    with pytest.raises(NotImplementedError, match="transmission between them"):
-        eliminate(_bus_readout_chip(port_count=2), "r1")
-
-
 def test_field_elimination_rejects_a_plane_shared_with_another_port() -> None:
     """The mode's reflection cannot be factored out of a plane that also carries another port."""
     qubit = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="q")
