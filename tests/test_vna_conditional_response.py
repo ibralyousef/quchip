@@ -203,16 +203,25 @@ def test_conditional_response_jit_gradient_matches_finite_difference(monkeypatch
 
         monkeypatch.setattr(algebra, "_COHERENCE_DENSE_LIMIT", 0)
 
-    def signal(g):
-        value = VNA(readout_chip(g=g, backend="dynamiqs")).sweep(6.002, when={"q": 1}).matrix[0, 0]
-        return jnp.array([value.real, value.imag])
+    frequencies = np.array([5.999, 6.002])
 
-    g, step = .06, 1e-5
-    derivative = jax.jit(jax.jacrev(signal))(g)
-    difference = (signal(g + step) - signal(g - step)) / (2 * step)
-    np.testing.assert_allclose(derivative, difference, rtol=2e-6, atol=1e-7)
-    qutip_value = VNA(readout_chip(g=g)).sweep(6.002, when={"q": 1}).matrix[0, 0]
-    np.testing.assert_allclose(signal(g), [qutip_value.real, qutip_value.imag], atol=1e-10)
+    def signal(parameters, backend="dynamiqs"):
+        value = VNA(readout_chip(g=parameters[0], backend=backend)).sweep(
+            frequencies + parameters[1], when={"q": 1}).matrix[:, 0, 0]
+        return jnp.stack((value.real, value.imag))
+
+    parameters = np.array([.06, 0.])
+    derivative = jax.jit(jax.jacrev(signal))(parameters)
+    # Central-difference truncation and roundoff at these steps, plus the 1e-11
+    # solve tolerance, stay below this bound.
+    for i, step in enumerate([1e-5, 1e-7]):
+        delta = np.eye(2)[i] * step
+        difference = (signal(parameters + delta, "qutip") - signal(parameters - delta, "qutip")) / (2 * step)
+        np.testing.assert_allclose(derivative[..., i], difference, rtol=2e-6, atol=1e-7)
+    compiled = jax.jit(signal)
+    # Both backends solve the same blocks to a 1e-11 relative tolerance.
+    for point in (parameters, np.array([.055, .0003])):
+        np.testing.assert_allclose(compiled(point), signal(point, "qutip"), atol=1e-10)
 
 
 @pytest.mark.optional_backend
@@ -347,13 +356,64 @@ def test_matrix_free_response_matches_direct_solve(monkeypatch, backend):
     import quchip.backend._response as algebra
 
     chip = readout_chip(backend=backend)
+    network = PortNetwork()
+    network.port("a", target=chip["r"], rate=.01)
+    network.port("b", target=chip["r"], rate=.003, phase=.3)
+    chip = Chip(chip.devices, chip.couplings, port_network=network, backend=backend)
     f = np.array([5.99, 6.002])
     direct = VNA(chip).sweep(f, when={"q": 1}).matrix
+    np.testing.assert_allclose(direct, full_response(chip, f, {"q": 1}), rtol=1e-9, atol=1e-10)
     monkeypatch.setattr(algebra, "_COHERENCE_DENSE_LIMIT", 0)
     iterative = VNA(chip).sweep(f, when={"q": 1})
     np.testing.assert_allclose(iterative.matrix, direct, rtol=1e-8, atol=1e-9)
     assert max(d["residual"] for d in iterative.diagnostics) < 1e-8
     assert iterative.diagnostics[0]["block_condition_number"] is None
+
+
+@pytest.mark.optional_backend
+@pytest.mark.parametrize("iterative", [False, True])
+def test_conditional_response_rejects_nonfinite_source(monkeypatch, iterative):
+    """Compiled direct and iterative solves cannot return a nonfinite response as converged."""
+    pytest.importorskip("dynamiqs")
+    import jax
+    from dataclasses import replace
+
+    import quchip.backend._response as algebra
+    from quchip.engine.conditional_response import build_conditional_response
+
+    if iterative:
+        monkeypatch.setattr(algebra, "_COHERENCE_DENSE_LIMIT", 0)
+    chip = readout_chip(backend="dynamiqs")
+    problem, _ = build_conditional_response(chip, np.array([6.002]), ("readout",), (1, 0))
+    problem = replace(problem, sources=tuple(source * np.nan for source in problem.sources))
+    with pytest.raises((ValueError, jax.errors.JaxRuntimeError), match="failed to converge"):
+        chip.backend.coherence_response(problem).responses.block_until_ready()
+
+
+@pytest.mark.optional_backend
+@pytest.mark.validation
+def test_iterative_response_derivative_preserves_objective_scaling(monkeypatch):
+    """Implicit tangent and adjoint solves retain relative accuracy for small and large sources."""
+    pytest.importorskip("dynamiqs")
+    import jax
+    import jax.numpy as jnp
+    import quchip.backend._response as algebra
+
+    monkeypatch.setattr(algebra, "_COHERENCE_DENSE_LIMIT", 0)
+    frequencies = np.array([5.999, 6.002])
+
+    def power(g, backend="dynamiqs"):
+        response = VNA(readout_chip(g=g, backend=backend)).sweep(frequencies, when={"q": 1}).matrix
+        return jnp.sum(jnp.abs(response)**2)
+
+    gradient = jax.jit(jax.grad(lambda g, scale: scale * power(g)))
+    tangent = jax.jit(lambda g, scale: jax.jvp(power, (g,), (scale,))[1])
+    g, step = .06, 1e-5
+    reference = (power(g + step, "qutip") - power(g - step, "qutip")) / (2 * step)
+    # The reference's central difference carries the 1e-11 relative solve tolerance divided by the step.
+    for scale in (1e-12, 1., 1e12):
+        np.testing.assert_allclose(gradient(g, scale) / scale, reference, rtol=2e-6, atol=1e-7)
+        np.testing.assert_allclose(tangent(g, scale) / scale, reference, rtol=2e-6, atol=1e-7)
 
 
 def test_parameter_axes_ports_and_reference_delays_are_preserved():

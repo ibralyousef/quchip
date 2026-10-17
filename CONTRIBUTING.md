@@ -76,7 +76,7 @@ stay available for focused work. They carry no runtime budget.
 | PR marked ready for review, or updated while ready | `validation` on Python 3.11 |
 | Push to `main` | Relevant docs build/deployment; no repeated test or benchmark run |
 | Manual pre-merge run | `validation` on Python 3.11 |
-| Manual benchmark run | Full benchmark ladder against the selected comparison ref |
+| Manual benchmark run | Closed-system ladder or conditional-response suite against the selected comparison ref |
 | Weekly dependency canary | `unit` and `e2e` on Python 3.11 and 3.12 with fresh dependencies |
 
 Open new PRs as drafts (`gh pr create --draft`). Drafts run the fast checks,

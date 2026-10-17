@@ -138,8 +138,12 @@ This file records notable user-visible changes to quchip.
   dressed reference with zero or one excitation. The response includes all
   declared loss channels and coherence recycling. Diagnostics report reference
   escape and stationarity rates. This is an approximate CW response when the
-  reference decays, and does not simulate a finite acquisition.
-  ([#124](https://github.com/quchip/quchip/pull/124))
+  reference decays, and does not simulate a finite acquisition. On dynamiqs,
+  one compiled solve covers every frequency of a sweep, and each new number of
+  frequencies compiles once. Iterative blocks check the residual of every
+  response and derivative solve.
+  ([#124](https://github.com/quchip/quchip/pull/124),
+  [#154](https://github.com/quchip/quchip/pull/154))
 - Dispersive readout accepts `kappa_detected` and `efficiency`. Total linewidth
   controls pointer states and dephasing. Observed loss controls detected SNR.
   Defaults preserve ideal collection. Invalid concrete input domains raise.

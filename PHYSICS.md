@@ -1166,6 +1166,8 @@ matrix-free GMRES solve with a diagonal preconditioner and checked residuals.
 when all blocks use direct solves. It is `None` for the iterative route.
 The engine guards memory before allocation. JAX derivatives hold within a
 fixed, unambiguous reference assignment and require converged response solves.
+On the iterative route, each JAX tangent and adjoint solve takes its GMRES
+stopping scale from its own right-hand side and passes the same residual check.
 
 ### 8.2 Captured noisy VNA measurements
 
