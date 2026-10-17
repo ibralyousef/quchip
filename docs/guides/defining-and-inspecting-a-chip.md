@@ -104,12 +104,14 @@ Output:
 
 ```text
 2 term(s) dropped:
-  [qr] coupling band (Δa=-1, Δb=-1) on q·r  (counter-rotating under RWA; amp 0.173205 GHz, freq 12 GHz)
-  [qr] coupling band (Δa=+1, Δb=+1) on q·r  (counter-rotating under RWA; amp 0.173205 GHz, freq 12 GHz)
+  [qr] coupling band (-1, -1) on q·r  (discarded by RWA band selection; amp 0.173205 GHz, detuning 11.5 GHz)
+  [qr] coupling band (+1, +1) on q·r  (discarded by RWA band selection; amp 0.173205 GHz, detuning 11.5 GHz)
 ```
 
-The dropped terms create or annihilate two excitations, and their
-oscillation frequencies are much larger than their matrix elements here.
+The dropped terms create or annihilate two excitations. Each record shows
+the matrix element with the largest `|V|²/ΔE` and its bare-energy detuning.
+Here the detunings are much larger than the matrix elements. Band weights
+use `column - row`, so lowering has positive weight.
 See the [physics reference](../physics.md) for frame and approximation
 conventions.
 

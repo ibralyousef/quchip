@@ -331,10 +331,12 @@ class TestSolveBatchPointRetention:
         from quchip.engine.ir import DroppedTerm, SolveBatch, SolveProblem
 
         record_a = DroppedTerm(
-            source="d0", operator="drive band w=+0 on q0", reason="test", band_weights=(0,), frequency=5.0
+            source="d0", operator="drive band w=+0 on q0", reason="test", band_weights=(0,),
+            frequency=5.0, frame_frequency=10.0,
         )
         record_b = DroppedTerm(
-            source="d0", operator="drive band w=+0 on q0", reason="test", band_weights=(0,), frequency=6.0
+            source="d0", operator="drive band w=+0 on q0", reason="test", band_weights=(0,),
+            frequency=6.0, frame_frequency=11.0,
         )
         problem_a = SolveProblem(
             chip=None,
@@ -349,3 +351,5 @@ class TestSolveBatchPointRetention:
         batch = SolveBatch(chip=None, problems=(problem_a, problem_b))
         assert batch.element(0).engine_result.dropped_terms[0].frequency == pytest.approx(5.0)
         assert batch.element(1).engine_result.dropped_terms[0].frequency == pytest.approx(6.0)
+        assert batch.element(0).engine_result.dropped_terms[0].frame_frequency == pytest.approx(10.0)
+        assert batch.element(1).engine_result.dropped_terms[0].frame_frequency == pytest.approx(11.0)

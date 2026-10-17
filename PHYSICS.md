@@ -642,7 +642,7 @@ requested approximation. With `Exact()` and no tones, it selects the lab
 frame, because every retained band is static in the lab frame.
 
 The frame planner chooses one frequency `omega_d` for each device. A
-retained coupling band with excitation-change vector `k` is static when
+retained coupling band with energy-index weights `k = column - row` is static when
 
 ```text
 Σ_d k_d omega_d = 0
@@ -654,8 +654,8 @@ A band of a scheduled drive or port coupling at frequency `f` is static when
 Σ_d k_d omega_d = f
 ```
 
-Assembly evaluates `Σ_d k_d omega_d` by first adding the integer changes of
-devices that share a frame frequency. A band whose changes cancel among these
+Assembly evaluates `Σ_d k_d omega_d` by first adding the integer weights of
+devices that share a frame frequency. A band whose weights cancel among these
 devices is therefore exactly static. Drive bands with equal carriers share one
 term, so they do not differ by floating-point residues of approximately 1e-14
 GHz.
@@ -746,7 +746,9 @@ With this phase, the engine knows which part of `a + a†`, `i(a - a†)`, or an
 
 ### 5.2 Two-device couplings
 
-The engine decomposes a two-body operator into bands labeled `(delta_a, delta_b)`, where each value is the excitation change on one subsystem.
+The engine decomposes a two-body operator into bands labeled `(delta_a, delta_b)`.
+Each value is `column - row` in that device's isolated energy basis, opposite
+to the level change. Lowering has positive weight: `ab` has band `(1, 1)`.
 
 That band gets phase
 
@@ -803,7 +805,36 @@ Source: [`quchip/approximations.py`](quchip/approximations.py), [`quchip/engine/
 
 The chip owns one explicit approximation strategy. `Exact()` keeps every term in the authored finite-dimensional Hamiltonian. `RWA()` applies the engine's first-order structural rotating-wave reduction to static interactions and scheduled drives. Devices, couplings, and drives have no RWA policy of their own.
 
-`Chip.unresolved_hamiltonian()` keeps the authored static interaction. Engine assembly band-decomposes each interaction and applies the selected strategy. The engine reconstructs `Chip.hamiltonian()` from those same canonical terms, so inspection and simulation use one decision path. Under `RWA()`, rejected bands become advisory `DroppedTerm` records with the band's excitation weights, largest matrix-element magnitude, and frame frequency. A retained band with zero frame frequency stays in `H0`, and every other retained band is an explicit time-dependent term.
+`Chip.unresolved_hamiltonian()` keeps the authored static interaction. Engine assembly band-decomposes each interaction and applies the selected strategy. The engine reconstructs `Chip.hamiltonian()` from those same canonical terms, so inspection and simulation use one decision path. Under `RWA()`, rejected bands become advisory `DroppedTerm` records. A retained band with zero frame frequency stays in `H0`, and every other retained band is an explicit time-dependent term.
+
+Default `RWA()` counts energy-level indices, not energy: it keeps bands whose
+weights sum to zero. For uneven spectra such as fluxonium, this can discard
+near-resonant transitions. Use `Exact()` or an explicit `RWA(keep_bands=...)`
+selection to retain them.
+
+For a static interaction, each dropped record selects the entry with maximal
+`|V|²/ΔE`, using `ΔE = |E_col - E_row|` from the resolved isolated spectra.
+Its `amplitude` is `|V|` and its `frequency` is that same entry's `ΔE`, both
+in GHz and independent of the frame. A nonzero resonant entry has zero
+detuning and an infinite perturbative scale. Zero entries contribute no shift.
+The separate `frame_frequency` records the absolute carrier in the chosen
+frame. General time-dependent terms report only that carrier, since their
+coefficients can supply additional frequencies and amplitudes.
+
+On concrete evaluations, RWA warns when a discarded static band has a larger
+entrywise scale than every retained off-diagonal band of that interaction.
+It also warns for nonzero resonant discarded entries. The warning names the
+largest discarded band and its adjoint, once per interaction. An interaction
+that vanishes entirely keeps its existing warning. A resolved snapshot reports
+these warnings for its own approximation. Chip analysis caches its static
+model, and the first public query that uses the cached model reports its
+warnings once. Implicit reference-frequency analysis does not report them, so
+`resolve(approximation=Exact())` gives no warning about the chip's `RWA()`.
+This comparison is a heuristic, not an error bound. It omits interference,
+accumulated shifts, populations, and pulse spectra. Warnings require concrete
+diagnostic values. Traced values skip this check.
+Diagnostic fields remain traceable, with piecewise derivatives when the
+maximizing entry changes.
 
 A rotating-wave approximation needs discarded oscillations to dominate the
 relevant matrix elements and pulse bandwidth. The structural mask does not
@@ -825,7 +856,7 @@ full: g * i(a − a†) * i(b − b†)
 ```
 
 - `a†b + ab†` has total excitation weight zero and stays under `RWA()`
-- `ab + a†b†` has total excitation weight two and `RWA()` removes it
+- `ab` and `a†b†` have total weights `+2` and `-2`, and `RWA()` removes both
 
 `interaction_hamiltonian()` always returns the complete authored form, and `RWA()` reconstructs its retained bands in the engine. A coupling does not supply an alternative RWA operator or retention hook. The mask depends only on integer band offsets, so it stays concrete when operator parameters are JAX tracers.
 

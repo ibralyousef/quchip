@@ -8,6 +8,29 @@ This file records notable user-visible changes to quchip.
 
 #### Changes and migration
 
+- Static-coupling `DroppedTerm` records describe the entry with the largest
+  `|V|²/ΔE`, where `ΔE = |E_col - E_row|` uses the isolated energies.
+  `amplitude` is that entry's `|V|`, and `frequency` is its `ΔE` in any
+  frame. Previously, `amplitude` was the band's largest entry and `frequency`
+  was the frame carrier, which is 0 GHz in the lab frame. The carrier moves to
+  the new `frame_frequency` field. Time-dependent coupling and drive records
+  leave `amplitude` and `frequency` as `None`. For records from a coupling's
+  `dropped_terms()`, assembly fills a missing `frame_frequency` instead of
+  `frequency`. Labels print the unchanged `column - row` weights without `Δ`,
+  and the reason reads "discarded by RWA band selection".
+  ([#132](https://github.com/quchip/quchip/issues/132),
+  [#134](https://github.com/quchip/quchip/issues/134),
+  [#137](https://github.com/quchip/quchip/pull/137))
+- `RWA()` warns when a discarded static band has a nonzero resonant entry or
+  a larger `|V|²/ΔE` than every retained off-diagonal band. The band mask is
+  unchanged. For uneven spectra such as `Fluxonium`, compare with `Exact()`
+  or list every band to keep in `RWA(keep_bands=...)`, which replaces the
+  default selection. Each resolved snapshot reports these warnings and the
+  "vanishes entirely" warning for its own approximation. Chip analysis
+  reports them once, at the first query that uses its cached model. Implicit
+  reference-frequency lookups do not report them.
+  ([#133](https://github.com/quchip/quchip/issues/133),
+  [#137](https://github.com/quchip/quchip/pull/137))
 - An explicit `thermal_occupation=0` keeps a zero-rate absorption channel.
   Previously, a concrete zero dropped it. Dynamics and gradients do not
   change, but each emission channel of that device gains a zero-rate partner,

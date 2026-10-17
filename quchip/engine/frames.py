@@ -66,13 +66,14 @@ if TYPE_CHECKING:
 class FrameTone:
     """Describe a tone constraint ``Σ_d k_d ω_d = freq`` and its weight.
 
-    ``coefficients`` pairs each device label with its excitation-number change
-    ``k_d``. ``weight`` is ``|h_band|² ∫|envelope|² dt`` when available.
+    ``coefficients`` pairs each device label with its energy-index weight
+    ``k_d = column - row``. Lowering has positive weight, opposite to the level
+    change. ``weight`` is ``|h_band|² ∫|envelope|² dt`` when available.
 
     Attributes
     ----------
     coefficients : tuple of (str, int)
-        Device labels and excitation-number changes.
+        Device labels and energy-index weights ``column - row``.
     freq : scalar
         Constraint frequency in GHz.
     weight : float or None
@@ -316,8 +317,10 @@ def _compile_time(function: Any) -> Any:
 
 def resolve_reference_frequencies(chip: Any, *, local_resolution: Any = None) -> dict[str, Any]:
     """Resolve explicit overrides or dressed references in one chip context."""
+    # References use the chip's approximation. Its advisories stay on the cached
+    # analysis for public queries, and the requested snapshot reports its own.
     dressed = (
-        chip.analysis._dressed_frequencies(_local_resolution=local_resolution)
+        chip.analysis._dressed_frequencies(_local_resolution=local_resolution, _advise=False)
         if any(device.reference_freq is None for device in chip.devices)
         else {}
     )

@@ -101,7 +101,10 @@ class Exact(Approximation):
 class RWA(Approximation):
     """First-order structural rotating-wave selection.
 
-    ``keep_bands`` replaces, rather than extends, total-excitation conservation.
+    The default keeps bands whose energy-level index weights sum to zero.
+    This counts levels, not energy. Uneven spectra can have near-resonant
+    transitions in discarded bands. Compare with ``Exact()`` or supply
+    ``keep_bands``, which replaces the default selection.
 
     Parameters
     ----------

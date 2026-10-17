@@ -1495,9 +1495,12 @@ class ResolvedSLH:
 class DroppedTerm:
     """Advisory record for a Hamiltonian term elided by an approximation.
 
-    Compare a dropped band's amplitude with its oscillation frequency to assess
-    RWA validity. The leading Bloch-Siegert correction scales as
-    amplitude²/frequency. Numeric fields use ordinary GHz and can be traced.
+    For static interactions, ``amplitude`` and ``frequency`` identify the
+    entry with the largest ``|V|²/|E_col - E_row|`` in isolated energy
+    coordinates. This perturbative scale is a heuristic, not an error bound.
+    A nonzero entry at zero detuning is resonant. Its scale is infinite.
+    A zero amplitude contributes no shift. Numeric fields use ordinary GHz
+    and can be traced. The selected entry can change as parameters vary.
 
     Parameters
     ----------
@@ -1507,28 +1510,31 @@ class DroppedTerm:
     operator : str
         Human-readable operator string (for example ``"a_q0 · a_q1"``).
     reason : str
-        Short reason (for example ``"counter-rotating under RWA"``).
+        Short reason (for example ``"discarded by RWA band selection"``).
     band_weights : tuple[int, ...] | None
-        Excitation-change weights of the dropped band, one per endpoint mode in
-        the owner's declared order (for example ``(-1, -1)`` for ``a·b``).
+        Energy-index weights ``column - row``, one per supported device in
+        the owner's declared order (for example ``(1, 1)`` for ``a·b``).
+        Lowering has positive weight, opposite to the level change.
         ``None`` when not applicable.
     amplitude : Any | None
-        Static prefactor of the dropped term in GHz (for example the coupling
-        ``g``), possibly traced. ``None`` when the prefactor is time-dependent
-        (drive envelopes) or unknown.
+        Magnitude of the selected static matrix element in GHz, possibly
+        traced. ``None`` for time-dependent terms or unknown amplitudes.
     frequency : Any | None
-        Positive oscillation frequency of the dropped band in the assembly
-        frame, in GHz, possibly traced. ``None`` until resolved (assembly fills
-        it from the frame and ``band_weights``).
+        Absolute bare-energy detuning of that same entry in GHz, independent
+        of the frame and possibly traced. Zero denotes resonance.
+        ``None`` when unknown, including general time-dependent terms.
+    frame_frequency : Any | None
+        Absolute frame carrier in GHz, possibly traced. For a scheduled
+        drive this includes its dropped signal partner. ``None`` when unknown.
+        This carrier is not a physical transition detuning.
     """
-    # Static `band_weights` let assembly derive the frequency from the frame.
-
     source: str
     operator: str
     reason: str
     band_weights: tuple[int, ...] | None = None
     amplitude: Any = None
     frequency: Any = None
+    frame_frequency: Any = None
 
 
 @dataclass(frozen=True)
@@ -1758,7 +1764,7 @@ class EngineResult:
                     for term in self.collapse_terms
                 ),
                 tuple(
-                    (term.amplitude, term.frequency)
+                    (term.amplitude, term.frequency, term.frame_frequency)
                     for term in self.dropped_terms
                 ),
                 tuple(
@@ -1825,7 +1831,7 @@ class EngineResult:
     def dropped_terms_summary(self) -> str:
         """Format :attr:`dropped_terms` as a multi-line human-readable string.
 
-        Traced ``amplitude`` / ``frequency`` values print as ``traced`` and are
+        Traced numeric values print as ``traced`` and are
         not concretized.
         """
         if not self.dropped_terms:
@@ -1839,7 +1845,10 @@ class EngineResult:
         for term in self.dropped_terms:
             extras = [
                 f"{name} {_fmt(value)}"
-                for name, value in (("amp", term.amplitude), ("freq", term.frequency))
+                for name, value in (
+                    ("amp", term.amplitude), ("detuning", term.frequency),
+                    ("carrier", term.frame_frequency if term.frequency is None else None),
+                )
                 if value is not None
             ]
             detail = f"{term.reason}; {', '.join(extras)}" if extras else term.reason

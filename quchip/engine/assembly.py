@@ -92,7 +92,10 @@ from quchip.utils.jax_utils import (
     maybe_concrete_scalar,
 )
 from quchip.engine.bands import (
+    _BAND_NORM_RTOL,
     _decompose_product_canonical_bands,
+    _sandwich_canonical,
+    canonical_to_coo,
     decompose_canonical_bands,
     embed_on_support,
     prune_zero_diagonals,
@@ -991,8 +994,12 @@ def _energy_operator(chip: "Chip", operator: Any, support: tuple[int, ...],
     return matrix if contains_tracer(matrix) else np.asarray(matrix, dtype=complex)
 
 
-def _resolved_energy_interactions(chip: "Chip", resolution: _SystemResolution, approximation: Approximation):
-    """Yield kept static operators on their local supports in energy coordinates, in GHz."""
+def _resolved_energy_interactions(chip: "Chip", resolution: _SystemResolution, approximation: Approximation,
+                                  advisories: list[str] | None = None):
+    """Yield kept static operators on their local supports in energy coordinates, in GHz.
+
+    Approximation advisories go to ``advisories`` when it is given, and to ``warnings.warn`` otherwise.
+    """
     for resolved in _resolved_interactions(chip, resolution, chip.backend):
         contribution, support = resolved.contribution, resolved.support
         operator = _energy_operator(chip, resolved.operator, support, resolution.bases, chip.backend)
@@ -1010,8 +1017,23 @@ def _resolved_energy_interactions(chip: "Chip", resolution: _SystemResolution, a
             if not contains_tracer(operator):
                 norm = np.linalg.norm(operator)
                 if norm > 0.0 and np.linalg.norm(filtered) <= 1e-12 * norm:
-                    warnings.warn(f"Coupling {contribution.label!r} vanishes entirely under RWA().",
-                                  UserWarning, stacklevel=3)
+                    _report_advisory(f"Coupling {contribution.label!r} vanishes entirely under RWA().", advisories)
+                elif (
+                    norm > 0.0
+                    and not is_energy_diagonal(resolved.authored, resolution.bases)
+                    and not contains_tracer(tuple(resolution.bases[label].energies for label in contribution.labels))
+                ):
+                    # The diagnostic holds indices, levels, values and detunings of each nonzero entry.
+                    require_memory((64 + 40 * len(dims)) * int(np.count_nonzero(operator)),
+                                   task=f"Static band diagnostics on {contribution.labels}",
+                                   remedy="Use interactions on smaller local supports.")
+                    rows, cols = np.nonzero(operator)
+                    energies = tuple(resolution.bases[label].energies for label in contribution.labels)
+                    _report_advisory(_dropped_band_advisory(contribution.label, [
+                        (band, contribution.keeps_band(approximation, band), score)
+                        for band, (_, _, score) in _band_diagnostics(
+                            rows, cols, operator[rows, cols], dims, energies).items()
+                    ]), advisories)
             operator = filtered
         yield operator, support
 
@@ -1075,12 +1097,97 @@ def _keeps_drive_band(drive: BaseDrive, approximation: Approximation, charges: t
     return True
 
 
+def _transition_diagnostic(values: Any, detunings: Any) -> tuple[Any, Any, Any]:
+    """Select the entry with maximal perturbative scale, treating resonance explicitly."""
+    xp = concrete_array_module(values, detunings)
+    amplitudes = xp.abs(xp.asarray(values))
+    scores = xp.where(
+        amplitudes == 0, 0.0,
+        xp.where(detunings == 0, xp.inf, amplitudes**2 / xp.where(detunings == 0, 1.0, detunings)),
+    )
+    largest = xp.argmax(scores)
+    return amplitudes[largest], detunings[largest], scores[largest]
+
+
+def _band_diagnostics(
+    rows: Any,
+    cols: Any,
+    values: Any,
+    dims: tuple[int, ...],
+    energies: tuple[Any, ...],
+) -> dict[tuple[int, ...], tuple[Any, Any, Any]]:
+    """Return the entry with maximal |V|²/|ΔE| in each band of support-local COO entries.
+
+    The entries use isolated energy coordinates, and band weights are column
+    minus row. A nonzero resonant entry has an infinite score. A zero entry
+    has score zero, including at resonance. Like band decomposition, this
+    skips concrete bands at roundoff scale. Selection stays piecewise
+    differentiable.
+    """
+    if not np.size(rows):
+        return {}
+    row_levels = np.stack(np.unravel_index(rows, dims), axis=-1)
+    col_levels = np.stack(np.unravel_index(cols, dims), axis=-1)
+    bands, inverse = np.unique(col_levels - row_levels, axis=0, return_inverse=True)
+    inverse = inverse.reshape(-1)  # NumPy 2.0.0 returns a column for axis=0.
+    xp = concrete_array_module(values, energies)
+    values = xp.asarray(values)
+    detunings = xp.abs(sum(
+        xp.asarray(spectrum)[col_levels[:, axis]] - xp.asarray(spectrum)[row_levels[:, axis]]
+        for axis, spectrum in enumerate(energies)
+    ))
+    norm = None if contains_tracer(values) else np.linalg.norm(values)
+    order = np.argsort(inverse, kind="stable")
+    diagnostics = {}
+    for band, group in zip(bands, np.split(order, np.cumsum(np.bincount(inverse))[:-1]), strict=True):
+        if norm is not None and np.linalg.norm(values[group]) <= _BAND_NORM_RTOL * norm:
+            continue
+        diagnostics[tuple(int(weight) for weight in band)] = _transition_diagnostic(values[group], detunings[group])
+    return diagnostics
+
+
+def _dropped_band_advisory(
+    source: str,
+    diagnostics: list[tuple[tuple[int, ...], bool, Any]],
+) -> str | None:
+    """Return the advisory for an interaction whose concrete discarded shift dominates, or ``None``."""
+    scores = [maybe_concrete_scalar(score) for _, _, score in diagnostics]
+    if not scores or any(score is None for score in scores):
+        return None
+    concrete = [(weights, kept, cast(float, score)) for (weights, kept, _), score in zip(diagnostics, scores)]
+    dropped = [(weights, score) for weights, kept, score in concrete if not kept]
+    if not dropped:
+        return None
+    weights, score = max(dropped, key=lambda item: item[1])
+    kept_score = max((value for band, kept, value in concrete if kept and any(band)), default=0.0)
+    if score > 0 and (np.isinf(score) or score > kept_score):
+        pair = sorted({weights, tuple(-weight for weight in weights)})
+        detail = "a nonzero resonant entry" if np.isinf(score) else "a larger entrywise |V|²/ΔE than the retained bands"
+        return (
+            f"RWA() drops band(s) {', '.join(map(str, pair))} on {source!r} with {detail}. "
+            "This bare-energy diagnostic is a heuristic, not an error bound. "
+            "Compare with Exact() or list every band to keep in RWA(keep_bands=...)."
+        )
+    return None
+
+
+def _report_advisory(message: str | None, advisories: list[str] | None) -> None:
+    """Warn with an approximation advisory, or append it to ``advisories`` for a cached analysis entry."""
+    if message is None:
+        return
+    if advisories is None:
+        warnings.warn(message, UserWarning, stacklevel=4)
+    else:
+        advisories.append(message)
+
+
 def _resolve_coupling_terms(
     chip: "Chip",
     resolved_frame: "ResolvedFrame",
     backend: Backend,
     resolution: _SystemResolution,
     approximation: Approximation,
+    advisories: list[str] | None = None,
 ) -> tuple[
     list[Operator],
     list[Operator],
@@ -1105,7 +1212,9 @@ def _resolve_coupling_terms(
     coupling (see e.g. Gambetta et al., *PRA* **74**, 042318 (2006)).
     Traced carrier frequencies stay dynamic — concreteness is probed
     with :func:`maybe_concrete_scalar`, never by branching on a tracer.
-    All emitted operators already carry the 2π factor.
+    All emitted operators already carry the 2π factor. Approximation
+    advisories go to ``advisories`` when it is given, and to
+    ``warnings.warn`` otherwise.
     """
     interactions: list[Operator] = []
     frame_corrections: list[Operator] = []
@@ -1128,18 +1237,33 @@ def _resolve_coupling_terms(
 
         sub_bands = _authored_bands(chip, authored, h_full, support, resolution.bases, backend, tag="coupling_local")
         retained: list[Operator] = []
+        diagnostics: list[tuple[tuple[int, ...], bool, Any]] = []
+        band_diagnostics = {}
+        if filters_terms:
+            # Sparse payloads stay sparse unless a basis transform moves them to energy coordinates.
+            energy_canonical = backend.to_canonical_operator(h_full)
+            transform = _support_semantic_transform(chip, support, resolution.bases)
+            if transform is not None:
+                energy_canonical = _sandwich_canonical(energy_canonical, transform.conj().T, transform)
+            band_diagnostics = _band_diagnostics(
+                *canonical_to_coo(energy_canonical), tuple(resolution.dims[index] for index in support),
+                tuple(resolution.bases[label].energies for label in labels),
+            )
         for weights, band_canonical in sub_bands.items():
             osc_freq = _band_frame_frequency(weights, frequencies)
-            if not contribution.keeps_band(approximation, weights):
-                band_values = band_canonical.values
-                xp = array_namespace(band_values)
+            kept = contribution.keeps_band(approximation, weights)
+            if filters_terms:
+                amplitude, detuning, score = band_diagnostics.get(weights, (0.0, 0.0, 0.0))
+                diagnostics.append((weights, kept, score))
+            if not kept:
                 dropped.append(DroppedTerm(
                     source=contribution.label,
-                    operator=f"coupling band (Δa={weights[0]:+d}, Δb={weights[1]:+d}) on {'·'.join(labels)}",
-                    reason="counter-rotating under RWA",
+                    operator=f"coupling band ({', '.join(f'{weight:+d}' for weight in weights)}) on {'·'.join(labels)}",
+                    reason="discarded by RWA band selection",
                     band_weights=weights,
-                    amplitude=xp.max(xp.abs(band_values)),
-                    frequency=abs(osc_freq),
+                    amplitude=amplitude,
+                    frequency=detuning,
+                    frame_frequency=abs(osc_freq),
                 ))
                 continue
             band_op = backend.from_canonical_operator(band_canonical)
@@ -1153,7 +1277,9 @@ def _resolve_coupling_terms(
             td_terms.append((scaled, ScalarModulation(signal=Carrier(freq=TWO_PI * osc_freq, sign=-1))))
 
         if filters_terms and sub_bands and not retained:
-            warnings.warn(f"Coupling {contribution.label!r} vanishes entirely under RWA().", UserWarning, stacklevel=3)
+            _report_advisory(f"Coupling {contribution.label!r} vanishes entirely under RWA().", advisories)
+        elif filters_terms:
+            _report_advisory(_dropped_band_advisory(contribution.label, diagnostics), advisories)
         if filters_terms:
             if retained:
                 interactions.append(resolution.embed(
@@ -1205,16 +1331,13 @@ def _component_time_terms(
         for weights, band in bands.items():
             oscillation = _band_frame_frequency(weights, frequencies)
             if len(support) == 2 and not approximation.keeps_operator_band(weights):
-                values = band.values
-                xp = array_namespace(values)
                 dropped.append(
                     DroppedTerm(
                         source=owner.label,
                         operator=f"time-dependent coupling band {weights}",
-                        reason="counter-rotating under RWA",
+                        reason="discarded by RWA band selection",
                         band_weights=weights,
-                        amplitude=xp.max(xp.abs(values)),
-                        frequency=abs(oscillation),
+                        frame_frequency=abs(oscillation),
                     )
                 )
                 continue
@@ -1771,20 +1894,20 @@ def _collect_dropped_terms(chip: "Chip", resolved_frame: "ResolvedFrame") -> tup
 
     ``RWA()`` drops are generated inside :func:`_resolve_coupling_terms`;
     this pass collects whatever a coupling's own model elides. Records
-    that declare ``band_weights`` without a frequency get the band's
-    frame oscillation resolved here as ``|Σ wᵢ·f_ref,i|`` — raw
-    arithmetic on possibly-traced frame frequencies, never concretized.
+    that declare ``band_weights`` and no ``frame_frequency`` get one
+    resolved here as ``|Σ wᵢ·f_ref,i|``. This arithmetic keeps traced frame
+    frequencies traced.
     """
     gathered: list[DroppedTerm] = []
     for coupling in chip.couplings:
         endpoint_labels = (coupling.device_a_label, coupling.device_b_label)
         for record in coupling.dropped_terms():
             weights = record.band_weights
-            if record.frequency is None and weights is not None and len(weights) == len(endpoint_labels):
+            if record.frame_frequency is None and weights is not None and len(weights) == len(endpoint_labels):
                 freq = _band_frame_frequency(
                     weights, [resolved_frame.frequencies.get(label, 0.0) for label in endpoint_labels],
                 )
-                record = replace(record, frequency=abs(freq))
+                record = replace(record, frame_frequency=abs(freq))
             gathered.append(record)
     return tuple(gathered)
 
@@ -1888,6 +2011,7 @@ def compile_hamiltonian_template(
     approximation: Approximation | None = None,
     _local_resolution: _SystemResolution | None = None,
     _base_result: EngineResult | None = None,
+    _advisories: list[str] | None = None,
 ) -> HamiltonianTemplate:
     """Compile the invariant Hamiltonian skeleton (H₀, couplings, pre-embedded drive bands).
 
@@ -1927,6 +2051,7 @@ def compile_hamiltonian_template(
         backend,
         resolution,
         strategy,
+        _advisories,
     )
     h0 = _build_static_h0(
         chip,
@@ -2095,8 +2220,8 @@ def instantiate_engine_result(
                     operator=(f"{compiled.origin} band w={compiled.weight:+d} on {item.target.label} (fast partner)"),
                     reason="counter-rotating drive component under RWA",
                     band_weights=(compiled.weight,),
-                    frequency=abs(item.signal.carrier
-                                  + (1 if compiled.weight > 0 else -1) * compiled.device_frame_freq),
+                    frame_frequency=abs(item.signal.carrier
+                                        + (1 if compiled.weight > 0 else -1) * compiled.device_frame_freq),
                 )
             )
 
@@ -2135,6 +2260,7 @@ def build_engine_result(
     approximation: Approximation | None = None,
     _local_resolution: _SystemResolution | None = None,
     _base_result: EngineResult | None = None,
+    _advisories: list[str] | None = None,
 ) -> EngineResult:
     """Compile the template and instantiate one engine-result variant.
 
@@ -2167,6 +2293,7 @@ def build_engine_result(
         approximation=approximation,
         _local_resolution=_local_resolution,
         _base_result=_base_result,
+        _advisories=_advisories,
     )
     return instantiate_engine_result(template, drive_ops, chip)
 
@@ -2176,6 +2303,7 @@ def _build_static_analysis_result(
     *,
     approximation: Approximation,
     _local_resolution: _SystemResolution | None = None,
+    _advisories: list[str] | None = None,
 ) -> EngineResult:
     """Resolve the chip in the lab frame and retain only its static model."""
     dimension = chip.total_dim if _local_resolution is None else prod(_local_resolution.dims)
@@ -2193,6 +2321,7 @@ def _build_static_analysis_result(
         resolved_frame=frame,
         approximation=approximation,
         _local_resolution=_local_resolution,
+        _advisories=_advisories,
     )
     metadata = {key: value for key, value in result.metadata.items() if key in {"frame", "spectral_bound_ghz"}}
     return replace(

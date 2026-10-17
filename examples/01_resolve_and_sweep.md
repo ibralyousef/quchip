@@ -242,7 +242,7 @@ Output:
  'kerr_matrix_ghz': array([[-6.48611801e-01,  1.71057586e-05, -1.35398353e-03],
         [ 1.71057586e-05, -6.48003156e-01, -2.04352737e-03],
         [-1.35398353e-03, -2.04352737e-03, -4.63804199e-06]]),
- 'q1_drive_matrix_element': -0.9991667711850264j}
+ 'q1_drive_matrix_element': -0.9991667711850256j}
 ```
 
 <!-- executed-output:end -->
@@ -283,10 +283,10 @@ Output:
 
 ```text
 4 term(s) dropped:
-  [q1-bus] coupling band (Δa=-1, Δb=-1) on q1·bus  (counter-rotating under RWA; amp 0.15 GHz, freq 11.8525 GHz)
-  [q1-bus] coupling band (Δa=+1, Δb=+1) on q1·bus  (counter-rotating under RWA; amp 0.15 GHz, freq 11.8525 GHz)
-  [q2-bus] coupling band (Δa=-1, Δb=-1) on q2·bus  (counter-rotating under RWA; amp 0.15 GHz, freq 12.132 GHz)
-  [q2-bus] coupling band (Δa=+1, Δb=+1) on q2·bus  (counter-rotating under RWA; amp 0.15 GHz, freq 12.132 GHz)
+  [q1-bus] coupling band (-1, -1) on q1·bus  (discarded by RWA band selection; amp 0.15 GHz, detuning 10.55 GHz)
+  [q1-bus] coupling band (+1, +1) on q1·bus  (discarded by RWA band selection; amp 0.15 GHz, detuning 10.55 GHz)
+  [q2-bus] coupling band (-1, -1) on q2·bus  (discarded by RWA band selection; amp 0.15 GHz, detuning 10.83 GHz)
+  [q2-bus] coupling band (+1, +1) on q2·bus  (discarded by RWA band selection; amp 0.15 GHz, detuning 10.83 GHz)
 ```
 
 <!-- executed-output:end -->

@@ -161,16 +161,18 @@ class SectorModel:
         Chip whose static model conserves the total energy-level index.
     resolution : optional
         Resolved local bases to reuse instead of resolving the devices again.
+    advisories : list of str, optional
+        List that receives approximation advisories instead of warnings.
     """
 
-    def __init__(self, chip: "Chip", *, resolution: Any = None) -> None:
+    def __init__(self, chip: "Chip", *, resolution: Any = None, advisories: list[str] | None = None) -> None:
         resolution = _resolve_system(chip, chip.backend) if resolution is None else resolution
         self.chip = chip
         self.bases = resolution.bases
         self.dims = tuple(int(dimension) for dimension in resolution.dims)
         self.network = resolution.network
         self.energies = tuple(self.bases[device.label].energies for device in chip.devices)
-        self.terms = tuple(_resolved_energy_interactions(chip, resolution, chip.approximation))
+        self.terms = tuple(_resolved_energy_interactions(chip, resolution, chip.approximation, advisories))
         self._ports: dict[str, tuple[Any, tuple[int, ...]]] | None = None
         self._spaces: dict[int, SectorSpace] = {}
         self._pairs: dict[tuple[tuple[int, ...], int, int],
