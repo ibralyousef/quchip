@@ -312,6 +312,12 @@ This file records notable user-visible changes to quchip.
 
 #### Compatibility
 
+- The dynamiqs backend supports dynamiqs 0.3.7, where `QArray` is abstract,
+  and keeps support for 0.3.6. Sparse operators use the public constructor
+  and keep JAX gradients. Batched integration uses the public time-array
+  conversion and native save callbacks, and still reports numerical failures.
+  ([#136](https://github.com/quchip/quchip/issues/136),
+  [#149](https://github.com/quchip/quchip/pull/149))
 - `Backend.steadystate()` takes an optional `guess`: a native stationary
   state of a related problem, which a backend can return if it is also
   stationary here. A backend that overrides `steadystate()` must accept the

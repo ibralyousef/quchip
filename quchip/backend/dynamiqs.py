@@ -34,7 +34,6 @@ import equinox as eqx
 import numpy as np
 from dynamiqs.qarrays.layout import get_layout
 from dynamiqs.qarrays.qarray import QArray
-from dynamiqs.qarrays.sparsedia_dataarray import SparseDIADataArray
 from dynamiqs.time_qarray import SummedTimeQArray
 
 # x64 is enabled at the package boundary in ``quchip/__init__.py``.
@@ -103,16 +102,21 @@ def _summed_modulation(modulations: Sequence[Any]) -> Any:
 def _dia_structure(dims: tuple[int, ...], offsets: tuple[int, ...]) -> Any:
     """Pytree structure of an unbatched sparse-DIA qarray whose one leaf is its diagonals.
 
-    The instances are assembled field by field: running their constructors,
-    even abstractly, traces dynamiqs' per-diagonal checks for every offset set.
+    Construct a zero sparse template once per structure, including inside JIT.
+    Cache only its structure; dynamiqs selects the concrete class.
     """
-    data = object.__new__(SparseDIADataArray)
-    object.__setattr__(data, "offsets", offsets)
-    object.__setattr__(data, "diags", 0)
-    qarray = object.__new__(QArray)
-    for name, value in (("dims", dims), ("vectorized", False), ("data", data)):
-        object.__setattr__(qarray, name, value)
-    return jtu.tree_structure(qarray)
+    n = math.prod(dims)
+
+    # Run the constructor's validation eagerly: nested JIT error callbacks can
+    # execute while their inactive branch is traced in compile-time evaluation.
+    with jax.ensure_compile_time_eval(), jax.disable_jit():
+        if offsets:
+            template = dq.sparsedia_from_dict(
+                {offset: jnp.zeros(n - abs(offset), dtype=jnp.complex128) for offset in offsets}, dims=dims,
+            )
+        else:
+            template = dq.zeros(*dims, layout=dq.dia)
+    return jtu.tree_structure(template)
 
 
 def _dia_qarray(dims: tuple[int, ...], offsets: tuple[int, ...], diags: Any) -> QArray:
@@ -126,10 +130,8 @@ def _dia_qarray(dims: tuple[int, ...], offsets: tuple[int, ...], diags: Any) -> 
     """
     dims = tuple(int(dim) for dim in dims)
     offsets = tuple(int(offset) for offset in offsets)
-    if np.ndim(diags) != 2:
-        return QArray(dims, False, SparseDIADataArray(offsets, jnp.asarray(diags, dtype=jnp.complex128)))
     if contains_tracer(diags):
-        inside = np.ones(np.shape(diags), dtype=bool)
+        inside = np.ones(np.shape(diags)[-2:], dtype=bool)
         for row, offset in enumerate(offsets):
             if offset > 0:
                 inside[row, :offset] = False
@@ -138,8 +140,8 @@ def _dia_qarray(dims: tuple[int, ...], offsets: tuple[int, ...], diags: Any) -> 
         values = jnp.where(inside, jnp.asarray(diags, dtype=jnp.complex128), 0.0)
         return jtu.tree_unflatten(_dia_structure(dims, offsets), [values])
     host = np.asarray(diags, dtype=complex)
-    for row, offset in zip(host, offsets):
-        if np.any(row[:offset] if offset >= 0 else row[offset:]):
+    for row, offset in zip(np.moveaxis(host, -2, 0), offsets):
+        if np.any(row[..., :offset] if offset >= 0 else row[..., offset:]):
             raise ValueError("Sparse-DIA diagonals must be zero outside the matrix bounds.")
     return jtu.tree_unflatten(_dia_structure(dims, offsets), [jnp.asarray(host)])
 
