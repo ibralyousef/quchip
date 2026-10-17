@@ -115,7 +115,7 @@ class Bath:
                 "Collective thermal baths are unsupported; use correlated=False "
                 "(independent channels sharing one temperature)."
             )
-        self._retained: dict[str, tuple[Any, Any, Any]] | None = None
+        self._retained: dict[str, tuple[Any, Any, Any, Any]] | None = None
         self.recipe = recipe
         self._targets = targets
         self.temperature = temperature
@@ -179,7 +179,7 @@ class Bath:
             "retained": None if self._retained is None else {
                 label: [float(freq), *[dict(real=jnp.asarray(op).real.tolist(), imag=jnp.asarray(op).imag.tolist())
                                        for op in (lowering, number)]]
-                for label, (freq, lowering, number) in self._retained.items()
+                for label, (freq, lowering, number, _changes) in self._retained.items()
             },
             "recipe": self.recipe,
             "targets": targets,
@@ -220,7 +220,8 @@ class Bath:
                     matrices.append(real + 1j * imag)
                 if not bool(jnp.isfinite(frequency)) or frequency < 0:
                     raise ValueError("Retained bath frequencies must be finite and nonnegative.")
-                bath._retained[label] = (frequency, matrices[0], matrices[1])
+                # Concrete operators give their level changes from their entries.
+                bath._retained[label] = (frequency, matrices[0], matrices[1], None)
         return bath
 
     def physics_notes(self) -> list[str]:
@@ -409,12 +410,13 @@ class Bath:
         """Yield each bath target before summing collective amplitudes or applying rates."""
         labels, dims = tuple(d.label for d in chip.devices), chip.authored_dims
         if self._retained is not None:
-            for label, (frequency, lowering, number) in self._retained.items():
+            for label, (frequency, lowering, number, changes) in self._retained.items():
                 if label in chip.device_map:
                     frequency = getattr(chip[label], "freq", frequency)
                 yield (label, frequency, *[
-                    PhysicsExpr.from_matrix(op, labels=labels, dims=dims, name=f"{self.label}:{label}")
-                    for op in (lowering, number)
+                    PhysicsExpr.from_matrix(op, labels=labels, dims=dims, name=f"{self.label}:{label}",
+                                            excitation_changes=change)
+                    for op, change in zip((lowering, number), changes or (None, None))
                 ])
             return
         records = self._resolved_bases(chip, bases)

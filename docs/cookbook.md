@@ -72,14 +72,27 @@ qualify under `Exact()` too. Unknown or nonconserving operators use the full
 space. No excitation cutoff is inserted.
 
 `max_hilbert_dim` limits the largest matrix used by each fit target. The limit
-is checked again after rebinding or tracing. Traced local energy bases can
-make an undeclared operator's conservation unknown. Keep a sufficient limit
+is checked again after rebinding or tracing. Traced parameters of a local
+Hamiltonian that is not diagonal by construction, such as a
+`ChargeBasisTransmon`, give a traced energy basis. Conservation of an
+undeclared operator on that device is then unknown. Keep a sufficient limit
 for the full fallback, or supply a valid structural operator declaration.
 `evaluator="full"` retains the complete device model even when it uses sectors.
 `evaluator="local"` remains an explicit neighborhood approximation.
 
 `drive_matrix_elements()` also uses the sectors of its two selected states.
-Pulse simulations still use their existing state space.
+Eligible deterministic pulses also use exact invariant excitation spaces.
+
+## Probe a static model with counter-rotating terms
+
+`VNA(chip).sweep(frequencies)` supports pump-free models that are static in
+the lab frame, including capacitive couplings under `Exact()`. It solves one
+stationary state per chip parameter point, then evaluates the weak response
+at each probe frequency. The declared loss channels and approximation stay
+unchanged. Counter-rotating terms move the stationary state out of the vacuum,
+so this sweep uses the full Liouvillian, of size D² × D² for Hilbert-space
+dimension D. Fixed pumps, `measure()` and `finite_power()` still require a tone
+frame in which the model is stationary.
 
 ## Compare conditional readout responses
 
@@ -185,6 +198,34 @@ before the frame transform. Use `chip.state()` for other coupled eigenstates and
 `chip.bare_state()` to request a bare product state explicitly.
 `result.population(q, level=1)` measures a local isolated energy-state population. `overlap()`
 tests a particular joint state.
+
+## Reuse an exact compact pulse state
+
+Exact reduction requires no approximation option. A solve uses it when its
+initial state, Hamiltonian, controls, and dissipation close within a smaller
+space. A transverse drive or thermal raising can require the full space.
+The solver never substitutes an excitation cutoff.
+
+```python
+initial = chip.compact_state({"q": 1})
+# Use dressed=True for assigned eigenstates of a conserving static model.
+idle = QuantumSequence(chip)
+result = idle.simulate(duration=60.0, initial_state=initial)
+occupation = result.population("q", level=1)
+saved = result.compact_state()
+```
+
+The factory also accepts weighted superpositions, such as
+`chip.compact_state((1, {}), (1j, {"q": 1}))`. It normalizes the sum.
+Pass `saved` as the next solve's `initial_state`, with the same captured local
+bases. Start the next time grid at the previous final time to continue
+absolute-time controls.
+
+Inspect `result.stats["excitation_reduction"]` for dimensions and the proof
+or fallback reason. Local queries keep the state compact. Existing native
+state exports expand only when requested and check memory first. A full
+population dictionary also requires product-space storage. Use `population`
+for individual device occupations on large models.
 
 ## Declare network noise
 

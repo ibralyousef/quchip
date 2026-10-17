@@ -12,6 +12,10 @@ result = sequence.simulate(duration=100.0, backend="qutip")
 ```
 
 Install `quchip[dynamiqs]` and set `backend="dynamiqs"` on the chip or solve.
+Traced Hamiltonian values, operator arrays, port parameters, and pulse coefficients
+cannot be lowered to QuTiP.
+You can bind traced parameters on a QuTiP chip, then call
+`simulate(backend="dynamiqs")`.
 
 | Request | Automatic equation |
 |---|---|

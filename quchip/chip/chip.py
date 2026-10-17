@@ -928,7 +928,7 @@ class Chip:
             raise TypeError(f"Expected a Bath, got {type(bath).__name__}: {bath!r}")
         if bath._retained is not None:
             size = int(np.prod(self.authored_dims))
-            if any(op.shape != (size, size) for _, *operators in bath._retained.values() for op in operators):
+            if any(op.shape != (size, size) for _, *operators, _ in bath._retained.values() for op in operators):
                 raise ValueError("Retained bath operators do not match this chip's authored dimensions.")
         unknown = [lbl for lbl in bath.resolve_targets(self) if lbl not in self._device_map]
         if unknown:
@@ -1925,6 +1925,27 @@ class Chip:
             Per-device energy levels keyed by label.
         """
         return self._analysis.state(device_states, **device_state_kwargs)
+
+    def compact_state(self, *components: Any, dressed: bool = False) -> Any:
+        """Prepare a reusable state without a full product-space allocation.
+
+        Parameters
+        ----------
+        *components : mapping, str, or (amplitude, specification) pairs
+            Bare product energy labels, using the same strings and mappings as
+            ``superposition``. Unmentioned devices have level zero. Components
+            are summed and normalized. No components prepares the vacuum.
+        dressed : bool, default=False
+            Use the static dressed eigenstate assigned to each label. This
+            requires proven static excitation conservation.
+
+        Returns
+        -------
+        CompactState
+            Captured state accepted as a pulse simulation's initial_state.
+        """
+        from quchip.results.compact import compact_state
+        return compact_state(self, *components, dressed=dressed)
 
     def bare_state(
         self,

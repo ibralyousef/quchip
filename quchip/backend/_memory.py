@@ -35,6 +35,18 @@ def available_memory_bytes() -> int | None:
     return max(min(limits), 0)
 
 
+def fits_memory(required: float) -> bool:
+    """Return whether an estimated allocation fits, and ``True`` when memory is unknown.
+
+    Parameters
+    ----------
+    required : float
+        Estimated peak allocation in bytes.
+    """
+    available = available_memory_bytes()
+    return available is None or required <= available
+
+
 def require_memory(required: float, *, task: str, remedy: str) -> None:
     """Raise :class:`MemoryError` before an allocation that cannot fit.
 

@@ -54,7 +54,6 @@ __all__ = [
     "canonical_to_dense_array",
     "concrete_excitation_changes",
     "local_mode_bands",
-    "embed_single_mode_bands",
     "prune_zero_diagonals",
 ]
 
@@ -584,34 +583,6 @@ def local_mode_bands(
     return [
         (weight, backend.from_canonical_operator(band))
         for weight, band in sorted(bands.items(), key=lambda kv: kv[0])
-    ]
-
-
-def embed_single_mode_bands(
-    backend: Any,
-    local_op: Any,
-    *,
-    device_index: int,
-    dim: int,
-    label: str,
-    dims: tuple[int, ...],
-    semantic_to_solver: Any | None = None,
-) -> list[tuple[int, Any]]:
-    """Like :func:`local_mode_bands`, but each band is embedded into *dims*.
-
-    Returns ``[(weight, embedded_op), ...]``, where ``embedded_op`` acts on the
-    full chip Hilbert space, still in the lab frame and ordinary GHz (no
-    ``2π``).
-    """
-    return [
-        (weight, backend.embed(band_op, device_index, dims))
-        for weight, band_op in local_mode_bands(
-            backend,
-            local_op,
-            dim=dim,
-            label=label,
-            semantic_to_solver=semantic_to_solver,
-        )
     ]
 
 

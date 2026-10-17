@@ -317,7 +317,8 @@ def active_patch(
         every device elimination.
     local
         Forwarded to :func:`~quchip.chip.transformations.eliminate`. Each
-        step then reads only the patch around the eliminated device.
+        step then computes its generator on the patch around the eliminated
+        device.
 
     Returns
     -------

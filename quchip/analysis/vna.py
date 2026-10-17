@@ -14,6 +14,7 @@ from quchip.backend.containers import PreparedStationary
 from quchip.engine.input_output import (
     add_port_inputs,
     port_operators,
+    reject_retained_mode_responses,
     resolve_stationary_engine,
     same_frequency,
 )
@@ -207,8 +208,8 @@ class VNA:
         pump-tone axes. At each frequency, the passive-linear route solves one
         multi-right-hand-side mode-space system. The stationary route solves one
         pumped operating point, then uses one shifted-Liouvillian factorization for
-        every input port. An operating point that stays stationary when the probe
-        frequency moves the port frames is reused.
+        every input port. A pump-free model that is static in the lab frame uses
+        one stationary state per chip point and a resolvent at each probe frequency.
 
         Parameters
         ----------
@@ -292,16 +293,22 @@ class VNA:
         blocks: list[tuple[Any, Any]] = []
         diagnostics: list[Mapping[str, Any]] = []
         previous: tuple[Any, Any, _OperatingPoint] | None = None
+        lab_operating: _OperatingPoint | None = None
         for tones, chip, frequency in iterator:
-            # The probe frequency only moves the selected planes' frames: an
-            # operating point that commutes with that shift stays stationary.
             same_point = previous is not None and previous[0] is tones and previous[1] is chip
-            guess = previous[2].state.state if previous is not None and same_point else None
-            operating = _operating_point(
-                chip, tones, frequency, labels, options, guess=guess
-            )
+            if not same_point and not tones:
+                reject_retained_mode_responses(chip)
+                engine = chip._resolve(frame="lab")
+                lab_operating = None if engine.dynamic_terms else _solve_engine(chip, engine, tones, options)
+            if lab_operating is not None:
+                operating = lab_operating
+            else:
+                guess = previous[2].state.state if previous is not None and same_point else None
+                operating = _operating_point(chip, tones, frequency, labels, options, guess=guess)
             previous = (tones, chip, operating)
-            blocks.append(_small_signal_matrix(operating, labels, frequency))
+            blocks.append(_small_signal_matrix(
+                operating, labels, frequency, offset=frequency if lab_operating is not None else 0.0,
+            ))
             diagnostics.append(operating.diagnostics)
 
         return result(diagnostics, *(xp.stack(part) for part in zip(*blocks, strict=True)))
@@ -879,13 +886,17 @@ def _small_signal_matrix(
     operating: _OperatingPoint,
     labels: tuple[str, ...],
     frequency: Any,
+    *,
+    offset: Any = 0.0,
 ) -> tuple[Any, Any]:
     """Return the selected-port ``S_ji(f)`` and phase-conjugating ``T_ji(f)`` matrices.
 
     Rows are output ports and columns are input ports. Around a phase-sensitive
     operating point the linear response is ``delta <b_out> = S delta beta + T
     conj(delta beta)``; one shifted-Liouvillian factorization serves both source
-    sets for all input columns.
+    sets for all input columns. ``offset`` is the probe frequency relative to
+    the stationary frame, in GHz. At nonzero offset the conjugate input lies
+    at the opposite Fourier frequency and contributes no same-carrier ``T``.
     """
     engine = operating.engine
     backend = operating.prepared.backend
@@ -914,7 +925,7 @@ def _small_signal_matrix(
         engine,
         tuple(sources),
         tuple((channel.key, channels[channel.key]) for channel in engine.slh.channels),
-        (0.0,),
+        (offset,),
         prepared=operating.prepared,
     )
     inbound = xp.stack([cw_transfer(external[i].reference.inbound, frequency, xp) for i in indices])
@@ -930,7 +941,8 @@ def _small_signal_matrix(
     gain = outbound[:, None]
     return (
         gain * inbound[None, :] * (mixing @ (direct + gather("normal"))),
-        gain * xp.conj(inbound)[None, :] * (mixing @ gather("conjugate")),
+        xp.where(xp.asarray(offset) == 0.0,
+                 gain * xp.conj(inbound)[None, :] * (mixing @ gather("conjugate")), 0.0),
     )
 
 

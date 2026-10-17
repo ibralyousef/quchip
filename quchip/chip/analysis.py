@@ -244,6 +244,9 @@ def dress_engine_result(
         context.reference,
         policy=assign_rowwise_greedy,
     )
+    if result.excitation_space is not None:
+        from dataclasses import replace
+        kernel_labeling = replace(kernel_labeling, keys=tuple(map(tuple, result.excitation_space.levels.tolist())))
     return _materialize_dressed_result(
         eigenvalues,
         eigenvector_matrix,
@@ -392,6 +395,14 @@ def _kerr_coefficient(
     return excited((index_a, 1), (index_b, 1)) - excited((index_a, 1)) - excited((index_b, 1)) + e0
 
 
+def _reported(entry: tuple[Any, list[str]], advise: bool) -> Any:
+    """Return a cached static model. With ``advise``, warn once with each advisory it still holds."""
+    model, advisories = entry
+    while advise and advisories:
+        warnings.warn(advisories.pop(0), UserWarning, stacklevel=3)
+    return model
+
+
 class ChipAnalysis:
     """Dressed-state analysis, caching, and dressed-basis helpers.
 
@@ -403,7 +414,8 @@ class ChipAnalysis:
     Caching: :meth:`dress` keys its cache on a structural signature covering
     the backend identity and the ``state_version`` of every device and
     coupling. Any change that increments a version invalidates the cache on the
-    next access.
+    next access. The first query that uses a cached static model reports its
+    approximation advisories once.
 
     Parameters
     ----------
@@ -417,9 +429,10 @@ class ChipAnalysis:
         self._dressed_result: DressedResult | None = None
         self._dressed_signature: tuple[Any, ...] | None = None
         # Cache entries are (key, trace scope, value); see quchip.utils.values.scoped_entry.
+        # Static model values pair the model with the advisories that no query has reported yet.
         self._array_cache: tuple[Any, Any, tuple[Any, Any, Any, Labeling]] | None = None
-        self._sector_cache: tuple[Any, Any, SectorModel | None] | None = None
-        self._engine_result_cache: tuple[Any, Any, EngineResult] | None = None
+        self._sector_cache: tuple[Any, Any, tuple[SectorModel | None, list[str]]] | None = None
+        self._engine_result_cache: tuple[Any, Any, tuple[EngineResult, list[str]]] | None = None
         self._ground_cache: tuple[Any, Any, Any] | None = None
         self._bare_labels_cache: tuple[
             tuple[tuple[int, ...], ...], dict[tuple[int, ...], int]
@@ -486,22 +499,24 @@ class ChipAnalysis:
             network_key,
         )
 
-    def engine_result(self, *, _local_resolution: Any | None = None) -> EngineResult:
+    def engine_result(self, *, _local_resolution: Any | None = None, _advise: bool = True) -> EngineResult:
         """Return the resolved static lab-frame contract used by analysis."""
         from quchip.engine.assembly import _build_static_analysis_result
 
         signature = self._analysis_signature()
         cache = self._engine_result_cache
         if scoped_hit(cache, signature):
-            return cache[2]
+            return _reported(cache[2], _advise)
 
+        advisories: list[str] = []
         result = _build_static_analysis_result(
             self._chip,
             approximation=self._chip.approximation,
             _local_resolution=_local_resolution,
+            _advisories=advisories,
         )
-        self._engine_result_cache = scoped_entry(signature, result, traced=result._contains_tracer())
-        return result
+        self._engine_result_cache = scoped_entry(signature, (result, advisories), traced=result._contains_tracer())
+        return _reported((result, advisories), _advise)
 
     def _semantic_amplitudes(self, eigenvectors: Any, engine_result: EngineResult) -> Any:
         context = engine_result._dressing_context
@@ -584,8 +599,9 @@ class ChipAnalysis:
 
         if engine_result is None:
             engine_result = self.engine_result()
-        else:
-            self._engine_result_cache = scoped_entry(signature, engine_result, traced=engine_result._contains_tracer())
+        elif not scoped_hit(self._engine_result_cache, signature):
+            self._engine_result_cache = scoped_entry(
+                signature, (engine_result, []), traced=engine_result._contains_tracer())
         result = _labeled_eigensystem(engine_result, chip.backend)
         # The 3rd slot carries the EigensystemData (lazy eigenstates) rather than
         # a materialized ket list — nothing on the hot path reads it. The cache
@@ -596,7 +612,7 @@ class ChipAnalysis:
         self._array_cache = scoped_entry(signature, result, traced=traced)
         return result
 
-    def _sector_model(self, *, _local_resolution: Any | None = None) -> SectorModel | None:
+    def _sector_model(self, *, _local_resolution: Any | None = None, _advise: bool = True) -> SectorModel | None:
         """Return the chip's excitation-sector model, or ``None`` when its static model may change ``N``.
 
         Labeled dressed energies of a conserving chip come from the sector of
@@ -607,15 +623,16 @@ class ChipAnalysis:
 
         signature = self._analysis_signature()
         if scoped_hit(self._sector_cache, signature):
-            return self._sector_cache[2]
+            return _reported(self._sector_cache[2], _advise)
         chip = self._chip
         from quchip.engine.assembly import _resolve_system
 
         resolution = _resolve_system(chip, chip.backend) if _local_resolution is None else _local_resolution
-        model = (SectorModel(chip, resolution=resolution)
+        advisories: list[str] = []
+        model = (SectorModel(chip, resolution=resolution, advisories=advisories)
                  if conserves_excitation_number(chip, chip.approximation, resolution=resolution) else None)
-        self._sector_cache = scoped_entry(signature, model, traced=model is not None and model.traced)
-        return model
+        self._sector_cache = scoped_entry(signature, (model, advisories), traced=model is not None and model.traced)
+        return _reported((model, advisories), _advise)
 
     def _is_bare_label(self, label: tuple[int, ...]) -> bool:
         """Return whether ``label`` gives every device a resolved level."""
@@ -635,7 +652,7 @@ class ChipAnalysis:
         return tuple(label)
 
     def _labeled_lookup(
-        self, *, _local_resolution: Any | None = None,
+        self, *, _local_resolution: Any | None = None, _advise: bool = True,
     ) -> Callable[[tuple[int, ...]], tuple[Any, Any, Any]]:
         """Return a map from a bare label to its dressed energy in GHz, assignment overlap and margin.
 
@@ -643,7 +660,7 @@ class ChipAnalysis:
         sector of each requested label. Other chips diagonalize their complete
         static model once.
         """
-        model = self._sector_model(_local_resolution=_local_resolution)
+        model = self._sector_model(_local_resolution=_local_resolution, _advise=_advise)
         if model is not None:
             def sector_entry(label: tuple[int, ...]) -> tuple[Any, Any, Any]:
                 label = self._sector_label(label)
@@ -652,7 +669,7 @@ class ChipAnalysis:
                 return system.energy(label), system.labeling.overlaps[row], system.labeling.margins[row]
 
             return sector_entry
-        engine_result = self.engine_result(_local_resolution=_local_resolution)
+        engine_result = self.engine_result(_local_resolution=_local_resolution, _advise=_advise)
         eigenvalues, _, _, labeling = self._compute_array_labeled(engine_result)
 
         def full_entry(label: tuple[int, ...]) -> tuple[Any, Any, Any]:
@@ -702,10 +719,11 @@ class ChipAnalysis:
         chip = self._chip
         backend = chip.backend
         # Reuse dressed analysis only when it describes the solve's approximation.
+        # The solve's own snapshot reports the advisories of that approximation.
         same_approximation = approximation == chip.approximation
         static = (
-            self.engine_result() if same_approximation
-            else _build_static_analysis_result(chip, approximation=approximation)
+            self.engine_result(_advise=False) if same_approximation
+            else _build_static_analysis_result(chip, approximation=approximation, _advisories=[])
         )
         bare = _bare_state_from_bases(chip, {}, static.bases)
         traced = static._contains_tracer()
@@ -907,9 +925,9 @@ class ChipAnalysis:
             )
         return dressed.eigenstates[eigen_idx]
 
-    def _dressed_frequencies(self, *, _local_resolution: Any | None = None) -> dict[str, Any]:
+    def _dressed_frequencies(self, *, _local_resolution: Any | None = None, _advise: bool = True) -> dict[str, Any]:
         """Per-device dressed 0 → 1 transition frequencies (GHz)."""
-        lookup = self._labeled_lookup(_local_resolution=_local_resolution)
+        lookup = self._labeled_lookup(_local_resolution=_local_resolution, _advise=_advise)
         ground = (0,) * len(self._chip.devices)
         ground_energy = lookup(ground)[0]
         frequencies: dict[str, Any] = {}
@@ -1155,7 +1173,7 @@ class ChipAnalysis:
                     AnalyticSignal(program=Constant(1.0 + 0.0j)),
                 )
             from quchip.declarative.expr import split_dynamic_hamiltonian
-            from quchip.chip.observables import prepare_local_op
+            from quchip.engine.assembly import _project_on_support, _retained_operator
 
             channels = split_dynamic_hamiltonian(authored)
             if len(channels) != 1:
@@ -1164,16 +1182,23 @@ class ChipAnalysis:
                     f"got {len(channels)}."
                 )
 
+            bases = sectors.bases if sectors is not None else engine.bases
+            authored, support = _retained_operator(
+                self._chip, channels[0][1], (device_index,), backend, f"drive:{drive.label}", bases=bases,
+            )
             if sectors is not None:
-                operator = sectors.local_operator(channels[0][1], (device_index,))
-                block = sectors.block(operator, (device_index,), sum(final_label), sum(initial_label))
+                operator = sectors.local_operator(authored, support)
+                block = sectors.block(operator, support, sum(final_label), sum(initial_label))
                 acted = xp.asarray(block) @ initial
             else:
-                local_operator = prepare_local_op(device, channels[0][1], engine.bases[device.label], backend)
+                local_operator = _project_on_support(self._chip, authored, support, bases, backend)
                 operator = xp.asarray(backend.to_array(local_operator), dtype=complex)
+                local_dims = tuple(engine.dims[index] for index in support)
+                operator = operator.reshape(local_dims + local_dims)
+                rank = len(support)
                 initial_tensor = initial.reshape(engine.dims)
-                acted = xp.tensordot(operator, initial_tensor, axes=((1,), (device_index,)))
-                acted = xp.moveaxis(acted, 0, device_index).reshape(-1)
+                acted = xp.tensordot(operator, initial_tensor, axes=(tuple(range(rank, 2 * rank)), support))
+                acted = xp.moveaxis(acted, tuple(range(rank)), support).reshape(-1)
             elements[drive.label] = xp.vdot(final, acted)
         return elements
 

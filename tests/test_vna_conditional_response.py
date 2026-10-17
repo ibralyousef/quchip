@@ -12,7 +12,8 @@ def readout_chip(*, g=0.06, alpha=-0.25, levels=3, backend="qutip", T1=30000., T
     r = Resonator(freq=6., levels=levels, label="r", internal_quality_factor=60000.)
     network = PortNetwork()
     network.port("readout", target=r, rate=0.01)
-    return Chip([q, r], [Capacitive(q, r, g=g)], port_network=network, approximation=approximation, backend=backend)
+    return Chip([q, r], [Capacitive(q, r, g=g, label="qr")], port_network=network,
+                approximation=approximation, backend=backend)
 
 
 def full_response(chip, frequencies, when):
@@ -202,16 +203,149 @@ def test_conditional_response_jit_gradient_matches_finite_difference(monkeypatch
 
         monkeypatch.setattr(algebra, "_COHERENCE_DENSE_LIMIT", 0)
 
-    def signal(g):
-        value = VNA(readout_chip(g=g, backend="dynamiqs")).sweep(6.002, when={"q": 1}).matrix[0, 0]
+    frequencies = np.array([5.999, 6.002])
+
+    def signal(parameters, backend="dynamiqs"):
+        value = VNA(readout_chip(g=parameters[0], backend=backend)).sweep(
+            frequencies + parameters[1], when={"q": 1}).matrix[:, 0, 0]
+        return jnp.stack((value.real, value.imag))
+
+    parameters = np.array([.06, 0.])
+    derivative = jax.jit(jax.jacrev(signal))(parameters)
+    # Central-difference truncation and roundoff at these steps, plus the 1e-11
+    # solve tolerance, stay below this bound.
+    for i, step in enumerate([1e-5, 1e-7]):
+        delta = np.eye(2)[i] * step
+        difference = (signal(parameters + delta, "qutip") - signal(parameters - delta, "qutip")) / (2 * step)
+        np.testing.assert_allclose(derivative[..., i], difference, rtol=2e-6, atol=1e-7)
+    compiled = jax.jit(signal)
+    # Both backends solve the same blocks to a 1e-11 relative tolerance.
+    for point in (parameters, np.array([.055, .0003])):
+        np.testing.assert_allclose(compiled(point), signal(point, "qutip"), atol=1e-10)
+
+
+@pytest.mark.optional_backend
+@pytest.mark.validation
+@pytest.mark.parametrize("path, point, loss", [("q.freq", 5., True), ("r.freq", 6., False), ("qr.g", .06, True)])
+@pytest.mark.parametrize("when", [None, {"q": 0}, {"q": 1}])
+def test_device_frequency_response_keeps_sectors_under_ad_and_jit(monkeypatch, path, point, loss, when):
+    """Device and coupling derivatives retain their sector route and complex response."""
+    pytest.importorskip("dynamiqs")
+    import jax
+    import jax.numpy as jnp
+    from quchip.backend.dynamiqs import DynamiqsBackend
+
+    chip = readout_chip(backend="dynamiqs", T1=30000. if loss else None, T2=40000. if loss else None)
+    probe = 6.002
+
+    def reject_stationary(*args, **kwargs):
+        pytest.fail("An eligible frequency derivative assembled a full stationary system.")
+
+    monkeypatch.setattr(DynamiqsBackend, "prepare_stationary", reject_stationary)
+
+    def signal(value):
+        result = VNA(chip.with_params({path: value})).sweep(probe, when=when)
+        expected_route = "conditional_response" if when == {"q": 1} else "vacuum_response"
+        assert result.diagnostics[0]["solver"] == expected_route
+        value = result.matrix[0, 0]
         return jnp.array([value.real, value.imag])
 
-    g, step = .06, 1e-5
-    derivative = jax.jit(jax.jacrev(signal))(g)
-    difference = (signal(g + step) - signal(g - step)) / (2 * step)
-    np.testing.assert_allclose(derivative, difference, rtol=2e-6, atol=1e-7)
-    qutip_value = VNA(readout_chip(g=g)).sweep(6.002, when={"q": 1}).matrix[0, 0]
-    np.testing.assert_allclose(signal(g), [qutip_value.real, qutip_value.imag], atol=1e-10)
+    step = 1e-6
+    difference = (signal(point + step) - signal(point - step)) / (2 * step)
+    reference = full_response(chip, [probe], when or {"q": 0})[0, 0, 0]
+    np.testing.assert_allclose(jax.jit(signal)(point), [reference.real, reference.imag], atol=1e-10)
+
+    def tangent(x):
+        return jax.jvp(signal, (x,), (1.,))[1]
+
+    np.testing.assert_allclose(tangent(point), difference, rtol=3e-5, atol=1e-7)
+    np.testing.assert_allclose(jax.jit(tangent)(point), difference, rtol=3e-5, atol=1e-7)
+    for component in range(2):
+        gradient = jax.grad(lambda x: signal(x)[component])
+        np.testing.assert_allclose(gradient(point), difference[component], rtol=3e-5, atol=1e-7)
+        np.testing.assert_allclose(jax.jit(gradient)(point), difference[component], rtol=3e-5, atol=1e-7)
+    assert np.linalg.norm(difference) > 1e-3
+
+
+@pytest.mark.optional_backend
+def test_cascaded_frequency_jvp_keeps_vacuum_and_conditional_sectors(monkeypatch):
+    """A shared feedline keeps its generated Hamiltonian and channel derivatives compact."""
+    pytest.importorskip("dynamiqs")
+    import jax
+    import jax.numpy as jnp
+    from quchip.backend.dynamiqs import DynamiqsBackend
+
+    q = DuffingTransmon(freq=5., anharmonicity=-.25, levels=3, label="q", T1=30000., T2=40000.)
+    r = Resonator(freq=6., levels=3, label="r")
+    b = Resonator(freq=6.01, levels=3, label="b")
+    network = PortNetwork()
+    first = network.port("r", target=r, rate=.01)
+    last = network.port("b", target=b, rate=.008, phase=.4)
+    network.cascade(first, last)
+    network.expose("feed", input=first, output=last)
+    chip = Chip([q, r, b], [Capacitive(q, r, g=.04), Capacitive(r, b, g=.002)],
+                port_network=network, backend="dynamiqs")
+
+    def reject_stationary(*args, **kwargs):
+        pytest.fail("A cascaded frequency derivative assembled a full stationary system.")
+
+    monkeypatch.setattr(DynamiqsBackend, "prepare_stationary", reject_stationary)
+
+    def signal(offset):
+        changed = chip.with_params({"q.freq": 5. + offset, "r.freq": 6. + offset})
+        values = []
+        for when, route in ((None, "vacuum_response"), ({"q": 1}, "conditional_response")):
+            result = VNA(changed).sweep(6.002, when=when)
+            assert result.diagnostics[0]["solver"] == route
+            values.append(result.matrix[0, 0])
+        return jnp.asarray(values)
+
+    value, derivative = jax.jit(lambda x: jax.jvp(signal, (x,), (1.,)))(0.)
+    step = 1e-6
+    expected = (signal(step) - signal(-step)) / (2 * step)
+    np.testing.assert_allclose(value, signal(0.), atol=1e-10)
+    np.testing.assert_allclose(derivative, expected, rtol=3e-5, atol=1e-6)
+    assert np.all(np.abs(derivative) > 1.)
+
+
+@pytest.mark.optional_backend
+@pytest.mark.parametrize("cascade", [False, True])
+def test_compiled_response_rejects_reordered_levels(cascade):
+    """A compiled diagonal model keeps its authored level order and rejects values that reorder it."""
+    pytest.importorskip("dynamiqs")
+    import jax
+    from quchip.declarative import DeviceModel, Scalar, parameter
+
+    class Diagonal(DeviceModel):
+        freq: Scalar = parameter()
+
+        def local_hamiltonian(self, op, p):
+            return p.freq * op.n - 3. * (op.n @ op.n)
+
+    q = Diagonal(freq=10., levels=3, label="q")
+    r = Resonator(freq=6., levels=3, label="r")
+    network = PortNetwork()
+    first = network.port("q", target=q, rate=.01)
+    last = network.port("r", target=r, rate=.008)
+    if cascade:
+        network.cascade(first, last)
+        network.expose("feed", input=first, output=last)
+    chip = Chip([q, r], port_network=network, backend="dynamiqs")
+
+    def signal(frequency):
+        result = VNA(chip.with_params({"q.freq": frequency})).sweep(6.002, when={"q": 0})
+        assert result.diagnostics[0]["solver"] == "vacuum_response"
+        return result.matrix
+
+    compiled = jax.jit(signal)
+    # Compiled and eager calls solve the same sector blocks, so only round-off differs.
+    np.testing.assert_allclose(compiled(10.), signal(10.), atol=1e-12)
+    for frequency in (5., -1.):
+        with pytest.raises(ValueError, match="conserv"):
+            signal(frequency)
+        # The cached executable checks the traced level order during execution.
+        with pytest.raises(jax.errors.JaxRuntimeError, match="out of their authored order"):
+            compiled(frequency).block_until_ready()
 
 
 @pytest.mark.parametrize("backend", ["qutip", pytest.param("dynamiqs", marks=pytest.mark.optional_backend)])
@@ -222,13 +356,64 @@ def test_matrix_free_response_matches_direct_solve(monkeypatch, backend):
     import quchip.backend._response as algebra
 
     chip = readout_chip(backend=backend)
+    network = PortNetwork()
+    network.port("a", target=chip["r"], rate=.01)
+    network.port("b", target=chip["r"], rate=.003, phase=.3)
+    chip = Chip(chip.devices, chip.couplings, port_network=network, backend=backend)
     f = np.array([5.99, 6.002])
     direct = VNA(chip).sweep(f, when={"q": 1}).matrix
+    np.testing.assert_allclose(direct, full_response(chip, f, {"q": 1}), rtol=1e-9, atol=1e-10)
     monkeypatch.setattr(algebra, "_COHERENCE_DENSE_LIMIT", 0)
     iterative = VNA(chip).sweep(f, when={"q": 1})
     np.testing.assert_allclose(iterative.matrix, direct, rtol=1e-8, atol=1e-9)
     assert max(d["residual"] for d in iterative.diagnostics) < 1e-8
     assert iterative.diagnostics[0]["block_condition_number"] is None
+
+
+@pytest.mark.optional_backend
+@pytest.mark.parametrize("iterative", [False, True])
+def test_conditional_response_rejects_nonfinite_source(monkeypatch, iterative):
+    """Compiled direct and iterative solves cannot return a nonfinite response as converged."""
+    pytest.importorskip("dynamiqs")
+    import jax
+    from dataclasses import replace
+
+    import quchip.backend._response as algebra
+    from quchip.engine.conditional_response import build_conditional_response
+
+    if iterative:
+        monkeypatch.setattr(algebra, "_COHERENCE_DENSE_LIMIT", 0)
+    chip = readout_chip(backend="dynamiqs")
+    problem, _ = build_conditional_response(chip, np.array([6.002]), ("readout",), (1, 0))
+    problem = replace(problem, sources=tuple(source * np.nan for source in problem.sources))
+    with pytest.raises((ValueError, jax.errors.JaxRuntimeError), match="failed to converge"):
+        chip.backend.coherence_response(problem).responses.block_until_ready()
+
+
+@pytest.mark.optional_backend
+@pytest.mark.validation
+def test_iterative_response_derivative_preserves_objective_scaling(monkeypatch):
+    """Implicit tangent and adjoint solves retain relative accuracy for small and large sources."""
+    pytest.importorskip("dynamiqs")
+    import jax
+    import jax.numpy as jnp
+    import quchip.backend._response as algebra
+
+    monkeypatch.setattr(algebra, "_COHERENCE_DENSE_LIMIT", 0)
+    frequencies = np.array([5.999, 6.002])
+
+    def power(g, backend="dynamiqs"):
+        response = VNA(readout_chip(g=g, backend=backend)).sweep(frequencies, when={"q": 1}).matrix
+        return jnp.sum(jnp.abs(response)**2)
+
+    gradient = jax.jit(jax.grad(lambda g, scale: scale * power(g)))
+    tangent = jax.jit(lambda g, scale: jax.jvp(power, (g,), (scale,))[1])
+    g, step = .06, 1e-5
+    reference = (power(g + step, "qutip") - power(g - step, "qutip")) / (2 * step)
+    # The reference's central difference carries the 1e-11 relative solve tolerance divided by the step.
+    for scale in (1e-12, 1., 1e12):
+        np.testing.assert_allclose(gradient(g, scale) / scale, reference, rtol=2e-6, atol=1e-7)
+        np.testing.assert_allclose(tangent(g, scale) / scale, reference, rtol=2e-6, atol=1e-7)
 
 
 def test_parameter_axes_ports_and_reference_delays_are_preserved():

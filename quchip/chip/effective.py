@@ -30,7 +30,8 @@ def authored_excitation_changes(
     coefficients do not change it, including at zero. Constant leaves are
     checked in the captured energy bases at compile time. Unknown matrix
     support or traced energy vectors return ``None``. No small-entry
-    threshold supplies a conservation proof.
+    threshold supplies a conservation proof. A product on a truncated energy
+    basis is checked as one complete matrix.
 
     Parameters
     ----------
@@ -62,7 +63,12 @@ def authored_excitation_changes(
             if node.kind in ("scale", "embed"):
                 operand = node.args[1] if node.kind == "scale" else node.args[0]
                 return changes(operand, operand.labels)
-            if node.kind in ("add", "sub", "tensor", "matmul"):
+            # A product on a truncated energy basis also passes through discarded
+            # levels, so only its complete matrix gives its retained changes.
+            truncated = node.kind == "matmul" and any(
+                bases[label].resolved_dim < bases[label].native_dim for label in node.labels
+            )
+            if node.kind in ("add", "sub", "tensor", "matmul") and not truncated:
                 left, right = (changes(arg, arg.labels) for arg in node.args)
                 if left is None or right is None:
                     return None
@@ -147,6 +153,8 @@ class OperatorProjection:
     other devices keep their coordinates. A chain of local reductions therefore
     never forms a full-space embedding. Rates and local operators remain owned
     by the components. This record carries only their change of coordinates.
+    ``unchanged_labels`` identifies tensor factors on which this map is the
+    identity, proved by the reduction's generator support.
     """
 
     source_labels: tuple[str, ...]
@@ -156,6 +164,7 @@ class OperatorProjection:
     embedding: Any
     overrides: tuple[tuple[str, OperatorProjection], ...] = ()
     parents: tuple[OperatorProjection, ...] = ()
+    unchanged_labels: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("source_labels", "source_dims", "target_labels", "target_dims"):
@@ -185,26 +194,39 @@ class OperatorProjection:
         if any(not isinstance(parent, OperatorProjection) for parent in parents):
             raise TypeError("OperatorProjection parents must be OperatorProjection values.")
         object.__setattr__(self, "parents", parents)
+        unchanged = tuple(self.unchanged_labels)
+        if not set(unchanged) <= set(self.target_labels):
+            raise ValueError("Unchanged operator coordinates must belong to the target space.")
+        if any(self.source_dims[self.source_labels.index(label)] != self.target_dims[self.target_labels.index(label)]
+               for label in unchanged):
+            raise ValueError("Unchanged operator coordinates must keep their dimensions.")
+        object.__setattr__(self, "unchanged_labels", unchanged)
 
     @classmethod
     def capture(cls, chip: Any, target_labels: tuple[str, ...], target_dims: tuple[int, ...],
-                embedding: Any) -> OperatorProjection:
+                embedding: Any, *, unchanged_labels: tuple[str, ...] = ()) -> OperatorProjection:
         """Compose a reduction with the source's already captured operator coordinates.
 
         ``embedding`` maps the targets into the product space of all of
         ``chip``'s devices. One earlier map over all of them is multiplied
         in. Otherwise the earlier maps become parents, in the
         order they apply, and keep their own embeddings.
+        ``unchanged_labels`` names targets on which this reduction is the
+        identity. A multiplied-in map keeps only the labels that both maps
+        leave unchanged.
         """
         labels, dims = tuple(d.label for d in chip.devices), tuple(chip.authored_dims)
         previous = tuple(t.projection for t in chip.effective_terms if t.projection is not None)
         if not (len(previous) == 1 and previous[0].target_labels == labels):
-            return cls(labels, dims, target_labels, target_dims, embedding, parents=lineage(previous))
+            return cls(labels, dims, target_labels, target_dims, embedding, parents=lineage(previous),
+                       unchanged_labels=unchanged_labels)
         parent = previous[0]
 
         def advance(previous: OperatorProjection) -> OperatorProjection:
             return replace(previous, target_labels=target_labels, target_dims=target_dims,
-                           embedding=previous.embedding @ embedding, overrides=())
+                           embedding=previous.embedding @ embedding, overrides=(),
+                           unchanged_labels=tuple(label for label in previous.unchanged_labels
+                                                  if label in unchanged_labels))
 
         return replace(advance(parent), overrides=tuple((key, advance(p)) for key, p in parent.overrides))
 
@@ -296,7 +318,7 @@ class OperatorProjection:
     def fingerprint(self) -> Any:
         own = value_fingerprint((self.source_labels, self.source_dims, self.target_labels,
                                  self.target_dims, self.embedding,
-                                 tuple((key, p.fingerprint()) for key, p in self.overrides)))
+                                 tuple((key, p.fingerprint()) for key, p in self.overrides), self.unchanged_labels))
         # Parent keys are already fingerprints. Hashing them again would double
         # their nesting depth at every step of a chain.
         return own if not self.parents else (own, tuple(p.fingerprint() for p in self.parents))
@@ -309,17 +331,20 @@ class OperatorProjection:
                     overrides={key: p.to_dict() for key, p in self.overrides})
         if self.parents:
             data["parents"] = [p.to_dict() for p in self.parents]
+        if self.unchanged_labels:
+            data["unchanged_labels"] = list(self.unchanged_labels)
         return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OperatorProjection:
         required = {"source_labels", "source_dims", "target_labels", "target_dims", "real", "imag", "overrides"}
-        if not required <= set(data) <= required | {"parents"}:
+        if not required <= set(data) <= required | {"parents", "unchanged_labels"}:
             raise ValueError("Invalid serialized OperatorProjection fields.")
         return cls(tuple(data["source_labels"]), tuple(data["source_dims"]), tuple(data["target_labels"]),
                    tuple(data["target_dims"]), np.asarray(data["real"]) + 1j * np.asarray(data["imag"]),
                    tuple((key, cls.from_dict(p)) for key, p in data["overrides"].items()),
-                   tuple(cls.from_dict(p) for p in data.get("parents", ())))
+                   tuple(cls.from_dict(p) for p in data.get("parents", ())),
+                   tuple(data.get("unchanged_labels", ())))
 
 
 def lineage(projections: tuple[OperatorProjection, ...]) -> tuple[OperatorProjection, ...]:
@@ -355,7 +380,7 @@ def _walk(steps: tuple[OperatorProjection, ...], operator: Any, labels: tuple[st
     start, override = _entry(steps, owner_key)
     acted = False
     for step in (() if override is None else override._steps()) + steps[start:]:
-        if not set(step.source_labels).isdisjoint(labels):
+        if not set(step.source_labels).difference(step.unchanged_labels).isdisjoint(labels):
             operator, labels, dims = step._embed(operator, labels, dims)
             acted = True
     return operator, labels, dims, acted
@@ -367,7 +392,7 @@ def _reach(steps: tuple[OperatorProjection, ...], labels: tuple[str, ...],
     start, override = _entry(steps, owner_key)
     acted = False
     for step in (() if override is None else override._steps()) + steps[start:]:
-        if not set(step.source_labels).isdisjoint(labels):
+        if not set(step.source_labels).difference(step.unchanged_labels).isdisjoint(labels):
             labels = step.target_labels + tuple(label for label in labels if label not in step.source_labels)
             acted = True
     return labels if acted else None
