@@ -8,6 +8,16 @@ This file records notable user-visible changes to quchip.
 
 #### Changes and migration
 
+- `frame="auto"` ranks coupling bands whose integer weights sum to a nonzero
+  value after tones, exchange bands and reference pins. Previously, under
+  `Exact()`, a counter-rotating band could set a negative-frequency frame, or
+  the lab frame as the solve window grew. Without tones, `"auto"` now follows
+  exchange constraints and device references. Pass `frame="lab"` to keep the
+  previous no-tone frame. The chip default stays `"lab"`, and frame planning
+  removes no Hamiltonian terms. Stored integration-frame phases and numerical
+  integration errors can change.
+  ([#135](https://github.com/quchip/quchip/issues/135),
+  [#141](https://github.com/quchip/quchip/pull/141))
 - Devices whose Hamiltonian is diagonal by construction, such as `Resonator`,
   `DuffingTransmon` or `KerrCavity`, keep their levels in authored order when
   `jax.jit` or `jax.grad` traces their parameters. Previously, a traced

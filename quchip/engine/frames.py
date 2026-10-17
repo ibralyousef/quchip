@@ -5,11 +5,10 @@ Supported :data:`FrameSpec` values:
 * ``"lab"``: zero integration frequencies.
 * ``"rotating"``: each device's ``reference_freq``, defaulting to its dressed
   drive frequency. An off-transition reference leaves idle Ramsey detuning.
-* ``"auto"``: :func:`plan_frame` ranks constraints from retained coupling bands,
-  cascade couplings, and scheduled tones by integrated strength. Consistent
-  constraints set the frame; the rest remain time dependent and are recorded
-  as residuals. Unconstrained frequencies use device references in declaration
-  order.
+* ``"auto"``: :func:`plan_frame` satisfies cascade constraints, then selects
+  tones and exchange bands by integrated strength. Free frequencies use device
+  references in declaration order. Other coupling bands cannot override these
+  choices. Unsatisfied constraints remain time dependent and become residuals.
 * A scalar: one common frequency for all devices.
 * A device-or-label mapping: per-device frequencies, with missing entries zero.
 
@@ -346,10 +345,11 @@ def plan_frame(
     A retained static coupling band imposes ``Σ_d k_d ω_d = 0``. Each entry in
     ``tones`` imposes ``Σ_d k_d ω_d = freq``. Cascade-generated network
     couplings add equality constraints between their device frequencies. The
-    non-strict planner keeps the consistent subset with the largest total
-    integrated strength; declaration order breaks ties. Rejected constraints
-    become residual oscillations. Free variables are pinned to device reference
-    frequencies in declaration order.
+    non-strict planner keeps the consistent subset of tones and exchange bands
+    with the largest total integrated strength. Declaration order breaks ties.
+    Free variables are pinned to device references in declaration order.
+    Coupling bands whose integer weights sum to a nonzero value cannot override these choices.
+    Rejected constraints become residual oscillations.
 
     Parameters
     ----------
@@ -398,6 +398,7 @@ def plan_frame(
 
     hard: list[_Row] = []
     soft: list[_Row] = []
+    after_pins: list[_Row] = []
     network = chip.port_network
     for group in () if network is None else network.dynamical_supports(chip, _compiled=resolution.network):
         for first, second in zip(group, group[1:], strict=False):
@@ -407,14 +408,18 @@ def plan_frame(
             continue
         coefficients = _normalized(zip(record.devices, record.charges, strict=True))
         weight = None if record.amplitude is None or duration is None else record.amplitude**2 * duration
-        row = _Row(coefficients, zero, weight, record.source, record.devices, len(soft), False)
-        (hard if strict and sum(record.charges) == 0 else soft).append(row)
+        row = _Row(coefficients, zero, weight, record.source, record.devices, len(soft) + len(after_pins), False)
+        if sum(record.charges) == 0:
+            (hard if strict else soft).append(row)
+        else:
+            (soft if strict else after_pins).append(row)
     for tone in tones:
         coefficients = _normalized(tone.coefficients)
         if not coefficients:
             continue
         devices = tuple(dict.fromkeys(label for label, _ in tone.coefficients))
-        row = _Row(coefficients, leaves.affine(tone.freq), tone.weight, tone.source, devices, len(soft), True)
+        row = _Row(coefficients, leaves.affine(tone.freq), tone.weight, tone.source,
+                   devices, len(soft) + len(after_pins), True)
         (hard if strict else soft).append(row)
 
     system = _System()
@@ -446,6 +451,9 @@ def plan_frame(
         pin = _Row({device.label: Fraction(1)}, leaves.affine(reference), None, "reference", (device.label,), -1, False)
         if system.add(pin):
             pins.append((device.label, reference))
+
+    for row in _aggregate(after_pins):
+        (accepted if system.consistent(row) else rejected).append(row)
 
     frequencies = {device.label: leaves.evaluate(system.solve(device.label)) for device in chip.devices}
     residuals = tuple(

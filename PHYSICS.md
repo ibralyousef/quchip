@@ -638,8 +638,9 @@ This rule defines the frame-subtraction frequencies `f_ref,i`.
 
 `"auto"` is opt-in. The chip default stays `"lab"`, and `"rotating"` keeps the
 meaning above. `Chip.resolve(frame="auto", approximation=...)` uses the
-requested approximation. With `Exact()` and no tones, it selects the lab
-frame, because every retained band is static in the lab frame.
+requested approximation. With `Exact()` and no tones, it follows exchange
+constraints and device references. Counter-rotating bands do not force
+the lab frame. Use `frame="lab"` to keep the static lab Hamiltonian.
 
 The frame planner chooses one frequency `omega_d` for each device. A
 retained coupling band with energy-index weights `k = column - row` is static when
@@ -682,8 +683,9 @@ The operator band's instantaneous amplitude is `|c| |L_band| / 2π` in
 ordinary GHz. Equivalently, the frame record stores `|S| |L_band| / 2π` and
 the weight integrates `|beta|²`.
 
-When the constraints cannot all hold at once, the planner keeps the consistent
-subset with the largest integrated strength. A scheduled tone band has weight
+For scheduled calculations, the planner keeps the consistent subset of tones
+and zero-total-weight coupling constraints with the largest integrated strength.
+A scheduled tone band has weight
 `|h_band|² ∫|envelope|² dt`. Each signal is integrated over its own nonzero
 extent in the outer weighting window. That window is `[tlist[0], tlist[-1]]`
 when you build a problem, or `[0, last pulse end]` otherwise. A short pulse
@@ -701,7 +703,13 @@ oscillation frequency, and weight.
 The planner fixes free frequencies from `reference_freq` in device
 declaration order. An undriven cluster with exchange coupling therefore
 rotates together at one member's reference frequency, and an isolated mode
-keeps its own. `chip.describe()` and `sequence.describe()` show the selected
+keeps its own. Coupling bands whose integer weights sum to a nonzero value
+come after these reference pins. They remain residuals unless the chosen frame
+already makes them static, regardless of their integrated strength. This rule
+applies only to coupling bands: multiphoton tones keep their tone priority.
+Frame planning removes no Hamiltonian terms.
+
+`chip.describe()` and `sequence.describe()` show the selected
 frequencies, accepted tones, pins, and residuals. Traced JAX tone frequencies
 go through the plan without conversion to Python scalars.
 
