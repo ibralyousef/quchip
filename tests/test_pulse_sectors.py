@@ -251,6 +251,35 @@ def test_jitted_parameter_gradient_matches_exchange_solution():
 
 @pytest.mark.validation
 @pytest.mark.optional_backend
+def test_traced_frequency_keeps_the_exact_space_and_detuned_exchange_gradient():
+    """A traced device frequency keeps the two-amplitude space and the analytic detuned exchange."""
+    pytest.importorskip("dynamiqs")
+    import jax
+    import jax.numpy as jnp
+
+    chip, g, t = pair(backend="dynamiqs"), 0.02, 10.0
+
+    def population(frequency):
+        bound = chip.with_params({"a.freq": frequency})
+        result = QuantumSequence(bound).simulate(tlist=jnp.linspace(0, t, 21), initial_state={"a": 1},
+                                                 dissipation=False)
+        assert result.stats["excitation_reduction"]["dimension"] == 2
+        return result.population("b", 1)[-1]
+
+    def exchange(frequency):
+        # One excitation shared by two detuned modes oscillates at the Rabi rate.
+        rate = jnp.sqrt(g**2 + ((frequency - 0.25) / 2) ** 2)
+        return g**2 / rate**2 * jnp.sin(2 * jnp.pi * rate * t) ** 2
+
+    value, gradient = jax.jit(jax.value_and_grad(population))(0.26)
+    # The default Dopri8 rtol of 1e-9 keeps both values far inside these bounds.
+    np.testing.assert_allclose(value, exchange(0.26), atol=2e-6)
+    np.testing.assert_allclose(gradient, jax.grad(exchange)(0.26), atol=2e-4)
+    assert abs(float(gradient)) > 1.0
+
+
+@pytest.mark.validation
+@pytest.mark.optional_backend
 @pytest.mark.parametrize("model", ["ladder", "energy basis"])
 def test_zero_thermal_occupation_keeps_the_relaxation_gradient(model):
     """An explicit zero occupation keeps dP1/dT1 at its analytic value."""

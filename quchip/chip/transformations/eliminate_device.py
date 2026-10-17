@@ -42,6 +42,7 @@ from quchip.chip.effective import (
     EffectiveTerms,
     OperatorProjection,
     _in_device_order,
+    _retained_owners,
     authored_excitation_changes,
     conserves_excitation_number,
     lineage,
@@ -666,6 +667,13 @@ def reduce_device(chip: "Chip", target: Any, method: str, *, local: bool = False
     }
 
     source_bases = numeric.resolve(frame="lab").bases
+    # The SW generator has no support outside the same patch used by local
+    # reduction. Operators on those spectators commute with the rotation.
+    unchanged_labels: tuple[str, ...] = ()
+    if method == "sw" and not local:
+        generator_labels, _ = _local_patch(numeric, mode_label, source_bases)
+        unchanged_labels = tuple(label for label in labels if label not in generator_labels
+                                 and source_bases[label].native_dim == source_bases[label].resolved_dim)
 
     def transform_operator(operator: Any, support_labels: tuple[str, ...]) -> tuple[Any, Any]:
         local = _array(chip.backend.to_array(materialize_expr(operator, chip.backend)))
@@ -969,7 +977,16 @@ def reduce_device(chip: "Chip", target: Any, method: str, *, local: bool = False
     for bath in chip.baths:
         copied = bath.copy()
         copied._retained = {}
+        # Authored bath operators first cross the maps of earlier reductions.
+        crossed = _retained_owners(chip, tuple(labels), None)[0] if bath._retained is None else []
         for label, frequency, lowering, number in bath._target_operators(chip, source_bases):
+            # A conserving reduction keeps each operator's total level change, as for channels, when
+            # every earlier map that the operator crosses also conserves the total level index.
+            changes = None if sectors is None or any(t.excitation_changes is None for t in crossed) else tuple(
+                authored_excitation_changes(op, tuple(labels), chip.backend,
+                                            source_bases if chip_bases is None else chip_bases)
+                for op in (lowering, number)
+            )
             matrices = [_array(chip.backend.to_array(materialize_expr(op, chip.backend)))
                         for op in (lowering, number)]
             if bath._retained is None:
@@ -977,10 +994,11 @@ def reduce_device(chip: "Chip", target: Any, method: str, *, local: bool = False
                                for op in matrices]
                 matrices = [op if moved is None else _array(moved[0]) for op, moved in zip(matrices, transported)]
             copied._retained[label] = (frequency, *[step_embedding.conj().T @ op @ step_embedding
-                                                   for op in matrices])
+                                                   for op in matrices], changes)
         projected_baths.append(copied)
     projection = None if lone and not joined else (step if step is not None else OperatorProjection.capture(
         numeric, tuple(numeric_survivors), tuple(numeric_final.authored_dims), step_embedding,
+        unchanged_labels=unchanged_labels,
     )).with_current_operators(tuple(f"port:{label}" for label in port_replacements))
     order = "second-order" if method == "sw" else "exact projected"
     notes.append(f"Retained the full {order} Hamiltonian correction and each transformed channel "

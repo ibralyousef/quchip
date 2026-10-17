@@ -34,9 +34,12 @@ def test_exact_exchange_uses_sectors_and_matches_independent_spectrum():
     assert chip.freq("q") == pytest.approx(expected, abs=1e-12)
 
 
-def test_exact_fit_uses_sector_dimension_and_recovers_bare_frequency():
+@pytest.mark.parametrize("backend", ["qutip", pytest.param("dynamiqs", marks=pytest.mark.optional_backend)])
+def test_exact_fit_uses_sector_dimension_and_recovers_bare_frequency(backend):
     """An Exact exchange fit respects the sector limit and reproduces its dressed target."""
-    chip = pair()
+    if backend == "dynamiqs":
+        pytest.importorskip("dynamiqs")
+    chip = pair(backend=backend)
     target = 4.95
     result = fit_a_dress(chip, constraints={"q": {"freq": target, "anharmonicity": None},
                                           "r": {"freq": None, "anharmonicity": None},
@@ -78,6 +81,59 @@ def test_counter_rotating_support_is_not_declared_conserving_at_zero_strength():
     for g in (0.0, 1e-16, 0.04):
         chip = Chip([q, r], [Capacitive(q, r, g=g)], approximation=Exact())
         assert not conserves_excitation_number(chip, chip.approximation)
+
+
+@pytest.mark.optional_backend
+def test_traced_counter_rotating_frequency_uses_the_full_eigensystem_as_eager():
+    """A traced frequency keeps the full eigensystem that plain evaluation uses for counter-rotating terms."""
+    pytest.importorskip("dynamiqs")
+    from quchip import Capacitive, Resonator
+
+    q = DuffingTransmon(freq=5., anharmonicity=-.25, levels=3, label="q")
+    r = Resonator(freq=6., levels=3, label="r")
+    chip = Chip([q, r], [Capacitive(q, r, g=.06)], approximation=Exact(), backend="dynamiqs")
+
+    def frequency(x):
+        bound = chip.with_params({"q.freq": x})
+        assert bound.analysis._sector_model() is None
+        return bound.freq("q")
+
+    value, derivative = jax.jit(jax.value_and_grad(frequency))(5.)
+    step = 1e-4
+    difference = (frequency(5. + step) - frequency(5. - step)) / (2 * step)
+    # Plain and compiled calls diagonalize the same 9 x 9 Hamiltonian, so only round-off differs.
+    np.testing.assert_allclose(value, frequency(5.), atol=1e-12)
+    np.testing.assert_allclose(jax.grad(frequency)(5.), derivative, atol=1e-12)
+    # The central difference has O(step²) truncation error near 1e-10 and round-off divided by the step.
+    np.testing.assert_allclose(derivative, difference, atol=1e-9)
+
+
+@pytest.mark.optional_backend
+@pytest.mark.validation
+def test_traced_counter_rotating_pulse_derivative_matches_finite_difference():
+    """A traced energy keeps the eager rotating frame and full-space pulse evolution."""
+    pytest.importorskip("dynamiqs")
+    from quchip import Capacitive, Gaussian, QuantumSequence, Resonator
+
+    q = DuffingTransmon(freq=5., anharmonicity=-.25, levels=3, label="q")
+    r = Resonator(freq=6., levels=3, label="r")
+    chip = Chip([q, r], [Capacitive(q, r, g=.06)], approximation=Exact(), backend="dynamiqs", frame="rotating")
+    chip.wire(ChargeDrive(q, label="xy"))
+
+    def population(x):
+        sequence = QuantumSequence(chip.with_params({"q.freq": x}))
+        sequence.schedule("xy", envelope=Gaussian(duration=8., sigmas=3., amplitude=.04), freq=4.996)
+        result = sequence.simulate(tlist=jnp.linspace(0., 10., 11), initial_state={"q": 0})
+        return jnp.real(result.population("q", level=1)[-1])
+
+    value, derivative = jax.jit(jax.value_and_grad(population))(5.)
+    step = 1e-4
+    difference = (population(5. + step) - population(5. - step)) / (2 * step)
+    # Both calls integrate the same equation at rtol 1e-9. The bound allows a change of accepted steps.
+    np.testing.assert_allclose(value, population(5.), atol=1e-8)
+    # The central difference has O(step²) truncation error near 4e-8. A change of accepted steps can add rtol / step.
+    np.testing.assert_allclose(derivative, difference, atol=1e-5)
+    assert abs(float(derivative)) > 1e-2
 
 
 def test_undeclared_retained_matrix_is_checked_without_a_tolerance():
@@ -151,14 +207,51 @@ def test_exact_vacuum_response_matches_stationary_response():
 
 
 @pytest.mark.optional_backend
-def test_fit_rechecks_dimension_when_tracing_cannot_prove_conservation():
-    """A traced energy basis cannot silently expand a fit beyond its requested dimension limit."""
+def test_traced_thermal_absorption_keeps_the_eager_stationary_route():
+    """A raising loss channel rules out weak-probe sectors under tracing, as in plain evaluation."""
     pytest.importorskip("dynamiqs")
-    chip = pair(backend="dynamiqs")
+    from quchip import RWA, VNA, Capacitive, PortNetwork, Resonator
+
+    q = DuffingTransmon(freq=5., anharmonicity=-.25, levels=3, label="q", T1=2000., T2=1500.,
+                        thermal_occupation=.05)
+    r = Resonator(freq=6., levels=3, label="r")
+    network = PortNetwork()
+    network.port("r", target=r, rate=.05)
+    chip = Chip([q, r], [Capacitive(q, r, g=.06)], port_network=network, approximation=RWA(), backend="dynamiqs")
+
+    def reflection(x):
+        result = VNA(chip.with_params({"q.freq": x})).sweep(6.002)
+        assert result.diagnostics[0]["solver"] == "stationary_resolvent"
+        return jnp.abs(result.matrix[0, 0]) ** 2
+
+    value, derivative = jax.jit(jax.value_and_grad(reflection))(5.)
+    step = 1e-4
+    difference = (reflection(5. + step) - reflection(5. - step)) / (2 * step)
+    # Both calls solve the same 81 x 81 Liouvillian, so only round-off differs.
+    np.testing.assert_allclose(value, reflection(5.), atol=1e-12)
+    # The central difference has O(step²) truncation error near 1e-10 and solver round-off divided by the step.
+    np.testing.assert_allclose(derivative, difference, atol=2e-9)
+    assert abs(float(derivative)) > 1e-2
+
+
+@pytest.mark.optional_backend
+def test_fit_rechecks_dimension_when_tracing_cannot_prove_conservation():
+    """Opaque traced matrix support cannot expand a fit beyond its requested dimension limit."""
+    pytest.importorskip("dynamiqs")
+
+    class MatrixExchange(Exchange):
+        def interaction(self, a, b, p):
+            lowering = np.diag(np.sqrt(np.arange(1, 3)), 1)
+            return self.g * (np.kron(lowering.T, lowering) + np.kron(lowering, lowering.T))
+
+    q, r = pair().devices
+    chip = Chip([q, r], [MatrixExchange(q, r, g=.04, label="qr")], approximation=Exact(), backend="dynamiqs")
+    assert chip.analysis._dressed_dimension(1) == 2
     with pytest.raises(ValueError, match="dimension 9, exceeding max_hilbert_dim=2"):
         fit_a_dress(chip, constraints={"q": {"freq": 4.95, "anharmonicity": None},
-                                      "r": {"freq": None, "anharmonicity": None}},
-                     vary={"q": ["freq"]}, max_hilbert_dim=2)
+                                      "r": {"freq": None, "anharmonicity": None},
+                                      "qr": {"coupling_strength": None}},
+                     vary={"qr": ["g"]}, max_hilbert_dim=2)
 
 
 def test_opaque_traced_operator_requires_declared_changes():

@@ -72,8 +72,10 @@ qualify under `Exact()` too. Unknown or nonconserving operators use the full
 space. No excitation cutoff is inserted.
 
 `max_hilbert_dim` limits the largest matrix used by each fit target. The limit
-is checked again after rebinding or tracing. Traced local energy bases can
-make an undeclared operator's conservation unknown. Keep a sufficient limit
+is checked again after rebinding or tracing. Traced parameters of a local
+Hamiltonian that is not diagonal by construction, such as a
+`ChargeBasisTransmon`, give a traced energy basis. Conservation of an
+undeclared operator on that device is then unknown. Keep a sufficient limit
 for the full fallback, or supply a valid structural operator declaration.
 `evaluator="full"` retains the complete device model even when it uses sectors.
 `evaluator="local"` remains an explicit neighborhood approximation.

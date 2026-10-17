@@ -884,7 +884,8 @@ class BaseDevice(StateVersioned, Registrable, ABC, registry_root=True):
                 _, basis, matrices = cached
             else:
                 basis = resolve_device_basis(self, basis="native")
-                if not contains_tracer(basis.energy_vectors):
+                # A traced record would keep its trace alive in the cache.
+                if not contains_tracer((basis.energies, basis.energy_vectors)):
                     self._pauli_cache = (key, basis, matrices)
         assert basis is not None
         matrix = matrices.get(name)

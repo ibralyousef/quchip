@@ -1679,9 +1679,16 @@ Reducing an excitation-conserving model records each retained channel's total le
 change in `EffectiveTerms.excitation_changes`. A projected surviving operator keeps
 its authored operator's change. Ports follow the same rule: a port on a surviving mode
 keeps the change of its target's operator, built at compile time. A transformed port
-operator declares the change of the port it replaces. Band decomposition treats every
+operator declares the change of the port it replaces. Each retained `Bath` operator
+keeps the change of its authored operator. Band decomposition treats every
 other total change as a structural zero, so this check gives the same answer for
-concrete values and under `jax.grad` or `jax.jit`.
+concrete values and under `jax.grad` or `jax.jit`. An operator that crosses an
+earlier map without declared level changes uses the entries of its retained matrix.
+
+A surviving operator outside the SW generator's proven support keeps its authored
+coordinates. The projection records those unchanged tensor factors, and
+serialization keeps them. Operators within the generator's support retain their
+complete induced components and require compatible frame phases.
 
 Consider an external default port on a declared harmonic Fock mode. The complete
 `c_eff` matrix becomes that port's joint operator on every survivor, in their
@@ -1961,6 +1968,19 @@ This energy-origin-independent threshold treats unresolved gaps as tied.
 It cannot define a unique eigenvector derivative at degeneracy.
 Resolved small gaps retain their inverse-gap response, which can be large.
 Higher derivatives require nondegenerate eigensystems and stable phase pivots.
+
+When authored algebra proves that a local Hamiltonian is diagonal, the
+coordinate axes are its energy vectors. Plain evaluation sorts the diagonal
+energies, and equal energies keep their authored order. Concrete device values
+keep this sort, also inside a trace. Under JAX tracing, quchip keeps the
+authored order, so the energy vectors stay concrete. Proofs that read the
+energy vectors, such as excitation sectors and frame checks, then work as in
+plain evaluation. Execution raises an error if traced energies leave the
+authored order, or if a dropped level falls below a kept level. Plain
+evaluation would then select or label the levels differently. For example, a
+`DuffingTransmon` with enough levels that its spectrum turns over raises this
+error. Use fewer levels, or truncate the eigenbasis below the turnover. Other
+local Hamiltonians use the differentiable eigensolve above.
 
 Numerical outputs can remain differentiable while concrete input validation is
 skipped under tracing. A finite derivative alone does not establish accuracy.

@@ -928,7 +928,7 @@ class Chip:
             raise TypeError(f"Expected a Bath, got {type(bath).__name__}: {bath!r}")
         if bath._retained is not None:
             size = int(np.prod(self.authored_dims))
-            if any(op.shape != (size, size) for _, *operators in bath._retained.values() for op in operators):
+            if any(op.shape != (size, size) for _, *operators, _ in bath._retained.values() for op in operators):
                 raise ValueError("Retained bath operators do not match this chip's authored dimensions.")
         unknown = [lbl for lbl in bath.resolve_targets(self) if lbl not in self._device_map]
         if unknown:

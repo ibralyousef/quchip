@@ -156,19 +156,13 @@ def _resolve_system(chip: "Chip", backend: Backend) -> _SystemResolution:
     hamiltonians: list[Operator] = []
     dims: list[int] = []
     for device in chip.devices:
-        authored = device.unresolved_hamiltonian()
         policy = chip.resolve_basis(device)
         levels = device.resolved_dimension(chip.basis) if policy == "eigen" else None
         # A constant local model stays concrete even when another component is traced.
         with jax.ensure_compile_time_eval():
+            authored = device.unresolved_hamiltonian()
             matrix = materialize_array(authored)
-            record = resolve_local_basis(matrix, basis=policy, levels=levels)
-        from quchip.declarative.expr import PhysicsExpr
-        from quchip.utils.values import copy_value
-
-        record = replace(record, authored_hamiltonian=(
-            authored if isinstance(authored, PhysicsExpr) else copy_value(authored, readonly=True)
-        ))
+            record = resolve_local_basis(matrix, basis=policy, levels=levels, authored_hamiltonian=authored)
         bases[device.label] = record
         dims.append(record.resolved_dim)
         if record.kind == "native":
@@ -659,7 +653,9 @@ def _collect_collapse_terms(
                     common = all(maybe_concrete_scalar(f) == maybe_concrete_scalar(frequencies[0])
                                  and maybe_concrete_scalar(f) is not None for f in frequencies)
                     frame_weights: tuple[tuple[int, ...], ...]
-                    if compact is not None and common and weights is not None and len(weights) <= 1:
+                    # One total change has one phase in a common frame. A larger structural
+                    # bound needs the decomposition, which drops bands that are exactly zero.
+                    if common and weights is not None and len(weights) <= 1:
                         frame_weights = ((next(iter(weights), 0),),)
                         frequencies = (frequencies[0],)
                     else:
@@ -722,13 +718,15 @@ def _concrete_port_resolution(
         if traced:
             concrete_records: dict[str, BasisRecord] = {}
             for device in chip.devices:
-                matrix = materialize_array(device.unresolved_hamiltonian())
+                authored = device.unresolved_hamiltonian()
+                matrix = materialize_array(authored)
                 policy = chip.resolve_basis(device)
                 levels = device.resolved_dimension(chip.basis) if policy == "eigen" else None
                 concrete_records[device.label] = resolve_local_basis(
                     matrix,
                     basis=policy,
                     levels=levels,
+                    authored_hamiltonian=authored,
                 )
             records = concrete_records
         operator = _project_on_support(

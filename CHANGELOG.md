@@ -8,6 +8,15 @@ This file records notable user-visible changes to quchip.
 
 #### Changes and migration
 
+- Devices whose Hamiltonian is diagonal by construction, such as `Resonator`,
+  `DuffingTransmon` or `KerrCavity`, keep their levels in authored order when
+  `jax.jit` or `jax.grad` traces their parameters. Previously, a traced
+  eigensolve sorted the levels by energy, as plain evaluation does. A call now
+  raises an error when traced values put the levels out of energy order, or put
+  a dropped level below a kept one. For example, a `DuffingTransmon` whose
+  spectrum turns over within its levels raises. Use fewer levels or an
+  eigenbasis truncation below the turnover, or evaluate without JAX
+  transformations. ([#138](https://github.com/quchip/quchip/pull/138))
 - Static-coupling `DroppedTerm` records describe the entry with the largest
   `|V|²/ΔE`, where `ΔE = |E_col - E_row|` uses the isolated energies.
   `amplitude` is that entry's `|V|`, and `frequency` is its `ΔE` in any
@@ -86,19 +95,22 @@ This file records notable user-visible changes to quchip.
 #### New features
 
 - Deterministic pulse simulations on QuTiP and dynamiqs evolve in an invariant
-  excitation space when quchip can prove one. The proof covers the initial
-  state and every retained Hamiltonian, control, collapse operator and
-  no-jump product. A batch proves one space for the initial states of all its
-  points. A closed one-excitation evolution of a ring of 24 three-level
-  devices uses 24 coordinates, or 25 when decay adds the vacuum, instead of
-  3²⁴. Transverse drives and thermal raising can require the full space, and
-  stochastic solvers keep it. When the dense operators of a proven space do
-  not fit in memory, the solve uses sparse operators in the full space. Local
-  observables, measurements and saved-state replay stay compact.
-  `Chip.compact_state()` prepares bare or conserving dressed states without
-  allocating the product space. Full-space operator assembly and state exports
-  check available memory first. quchip applies no excitation cutoff.
-  ([#125](https://github.com/quchip/quchip/pull/125))
+  excitation space when quchip can prove one. The proof covers the initial state
+  and every retained Hamiltonian, control, collapse operator and no-jump
+  product. A batch proves one space for the initial states of all its points. A
+  closed one-excitation evolution of a ring of 24 three-level devices uses 24
+  coordinates, or 25 when decay adds the vacuum, instead of 3²⁴. Transverse
+  drives and thermal raising can require the full space, and stochastic solvers
+  keep it. When the dense operators of a proven space do not fit in memory, the
+  solve uses sparse operators in the full space. Local observables, measurements
+  and saved-state replay stay compact. `Chip.compact_state()` prepares bare or
+  conserving dressed states without allocating the product space. Full-space
+  operator assembly and state exports check available memory first. Under JAX
+  tracing, the proof holds for traced coupling strengths and for traced
+  parameters of diagonal device Hamiltonians, such as a `DuffingTransmon`
+  frequency. quchip applies no excitation cutoff.
+  ([#125](https://github.com/quchip/quchip/pull/125),
+  [#138](https://github.com/quchip/quchip/pull/138))
 - `VNA.sweep(..., when={q: 1})` computes weak-probe scattering from a frozen
   dressed reference with zero or one excitation. The response includes all
   declared loss channels and coherence recycling. Diagnostics report reference
@@ -148,6 +160,18 @@ This file records notable user-visible changes to quchip.
 
 #### Fixes
 
+- `jax.grad` and `jax.jit` with a traced device frequency pass the
+  collapse-channel frame check after `eliminate()` and for a collective `Bath`
+  in a common frame, also on a reduced chip. Previously, they raised a
+  `ValueError`. `jax.jit` of the rate of a collective `Bath` on
+  `EigenbasisDevice` targets also passes the check. After `eliminate()`, a
+  traced coupling also passes the check on the port of a surviving mode in
+  per-device frames. Traced `VNA.sweep()` calls keep the mode-space route of
+  plain evaluation, also on reduced chips, and `when=` no longer raises.
+  ([#126](https://github.com/quchip/quchip/issues/126),
+  [#127](https://github.com/quchip/quchip/issues/127),
+  [#144](https://github.com/quchip/quchip/issues/144),
+  [#138](https://github.com/quchip/quchip/pull/138))
 - Local eigenvector derivatives retain resolved small-gap responses. Their
   cutoff now uses matrix dimension and floating-point precision instead of
   `1e-9` of the spectral span. Degenerate eigenvector derivatives remain undefined.
