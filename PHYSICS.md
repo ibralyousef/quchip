@@ -1627,8 +1627,10 @@ zz(a, b) = E(1,1) − E(1,0) − E(0,1) + E(0,0)        (≡ Chip.dispersive_shi
 The complete retained Hamiltonian and its pair exchange are read through the symmetrically
 [Löwdin-orthonormalized][lowdin] subspace projection `S^(−1/2) (W E W†) S^(−1/2)`, where `W` is the
 overlap block and `S = W W†`. This [des Cloizeaux effective Hamiltonian][des-cloizeaux] has a spectrum equal to the
-labeled energies exactly. Its basis is not the canonical SW rotation, so off-diagonal reads agree
-with `method="sw"` only through 2nd order.
+labeled energies exactly. It uses the [canonical Schrieffer–Wolff (direct) rotation][bravyi] evaluated to all
+orders, provided the kept/dressed overlap block `W` is nonsingular.
+`method="sw"` truncates the corresponding effective Hamiltonian at second order, so
+off-diagonal reads agree only through that order.
 
 The engine checks conservation from the static operators in the isolated energy
 bases. A filter that keeps only zero-total bands proves conservation for ordinary

@@ -319,6 +319,13 @@ This file records notable user-visible changes to quchip.
 
 #### Documentation and examples
 
+- `PHYSICS.md` §10.4 identifies the Löwdin map of
+  `eliminate(..., method="exact")` with the canonical Schrieffer–Wolff
+  rotation to all orders, provided the kept/dressed overlap block is
+  nonsingular. Off-diagonal reads differ from `method="sw"` because SW
+  truncates at second order.
+  ([#129](https://github.com/quchip/quchip/issues/129),
+  [#143](https://github.com/quchip/quchip/pull/143))
 - Correct dispersive signs, readout rate definitions, VNA phase notation, and
   reduction limits. Document device and bath models, convergence requirements,
   and parametric control. Add primary references for the physical conventions.
