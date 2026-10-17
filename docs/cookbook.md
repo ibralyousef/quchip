@@ -83,6 +83,17 @@ for the full fallback, or supply a valid structural operator declaration.
 `drive_matrix_elements()` also uses the sectors of its two selected states.
 Eligible deterministic pulses also use exact invariant excitation spaces.
 
+## Probe a static model with counter-rotating terms
+
+`VNA(chip).sweep(frequencies)` supports pump-free models that are static in
+the lab frame, including capacitive couplings under `Exact()`. It solves one
+stationary state per chip parameter point, then evaluates the weak response
+at each probe frequency. The declared loss channels and approximation stay
+unchanged. Counter-rotating terms move the stationary state out of the vacuum,
+so this sweep uses the full Liouvillian, of size D² × D² for Hilbert-space
+dimension D. Fixed pumps, `measure()` and `finite_power()` still require a tone
+frame in which the model is stationary.
+
 ## Compare conditional readout responses
 
 For a chip with a port network, use a dressed reference label:

@@ -192,6 +192,14 @@ This file records notable user-visible changes to quchip.
 
 #### Fixes
 
+- Pump-free `VNA.sweep()` computes models that are static in the lab frame but
+  dynamic in the probe frame, e.g. capacitive couplings under `Exact()`.
+  Previously, it raised. It solves one lab-frame stationary state per chip point
+  and a shifted Liouvillian at each probe frequency, and `T` is zero away from
+  DC. Other pump-free stationary sweeps also use this route, so their residual
+  and condition-number diagnostics describe the lab-frame generator.
+  ([#148](https://github.com/quchip/quchip/issues/148),
+  [#155](https://github.com/quchip/quchip/pull/155))
 - On a chip reduced by `eliminate()` or `active_patch()`,
   `drive_matrix_elements()` passes each drive operator through the retained
   coordinate maps, as pulses do. Previously, it used the authored operator and

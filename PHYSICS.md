@@ -989,11 +989,11 @@ cable delay adds `exp(-j 2π f τ)` for each traversal.
 
 `Chip.steadystate()` solves `L(rho_ss) = 0` together with `Tr(rho_ss) = 1`.
 It requires a static resolved Hamiltonian and a unique normalized stationary
-state. `VNA.sweep()` adds continuous-wave port terms in their stationary tone
-frames and returns the complete scattering matrix between the selected
-planes. At each frequency, the stationary route solves one pumped operating
-point with one shifted-Liouvillian factorization for all input columns. The
-passive-linear route uses one multi-right-hand-side mode-space solve.
+state. `VNA.sweep()` returns the complete scattering matrix between the selected
+planes. With fixed pumps, it adds continuous-wave port terms in their stationary
+tone frames. At each frequency, this route solves one pumped operating point
+with one shifted-Liouvillian factorization for all input columns. The passive-linear
+route uses one multi-right-hand-side mode-space solve.
 Small-signal scattering differentiates the output mean around the fixed-tone
 state,
 
@@ -1007,6 +1007,22 @@ Around a phase-sensitive operating point, the full response is
 `result.t(output, input)` selects one entry. The stationary route gets `S` and `T`
 from the same shifted-Liouvillian factorization. The passive-linear route reports
 zero for `T`.
+
+For a pump-free model that is static in the lab frame, the general route solves
+the lab-frame stationary state once per chip parameter point. It retains the
+declared approximation, including counter-rotating terms under `Exact()`.
+For input operator `K_i = sum_k conj(S_ki) L_k`, its normal response satisfies
+
+```text
+(L + i 2π f) X_i = [K_i^dagger, rho_ss],    Tr(X_i) = 0.
+```
+
+The output adds `Tr(L_j X_i)` to direct scattering. Reference-plane transfers
+and output mixing use the physical probe frequency `f`. The conjugate input
+oscillates at `-f`, so it does not enter the same-carrier `T` at nonzero `f`.
+At DC, both input quadratures share one carrier and `T` retains their conjugate
+response. Fixed-pump calculations retain their stationary-frame `S` and `T`.
+This weak-probe route does not provide a periodic finite-power stationary state.
 
 The direct term comes from the resolved scalar `S`. The system term comes from
 the stationary response of `L` under the same coherent-input Hamiltonian.

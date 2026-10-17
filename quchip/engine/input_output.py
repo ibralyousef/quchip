@@ -15,16 +15,21 @@ from quchip.engine.ir import CanonicalOperator, EngineResult, StaticTerm
 from quchip.engine.reference import cw_transfer
 
 
-def resolve_stationary_engine(
-    chip: Any,
-    port_frequencies: tuple[tuple[str, Any], ...],
-) -> EngineResult:
-    """Resolve port-tone frequencies into one static engine description."""
+def reject_retained_mode_responses(chip: Any) -> None:
+    """Reject a stationary field calculation that would omit retained multiport mode responses."""
     if chip.port_network is not None and chip.port_network._mode_responses:
         raise NotImplementedError(
             "Retained multiport mode responses support vacuum VNA.sweep() with no pumps or solver options. "
             "Keep the boundary mode for finite-power or noisy field measurements."
         )
+
+
+def resolve_stationary_engine(
+    chip: Any,
+    port_frequencies: tuple[tuple[str, Any], ...],
+) -> EngineResult:
+    """Resolve port-tone frequencies into one static engine description."""
+    reject_retained_mode_responses(chip)
     if not port_frequencies:
         raise ValueError("Stationary port analysis requires at least one tone frequency.")
 
