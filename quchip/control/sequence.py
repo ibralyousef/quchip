@@ -1177,7 +1177,9 @@ class QuantumSequence:
             grid != actual_tlist for grid in point_tlists
         )
         if parameter_axes or different_intervals or self._auto_frames_differ(expanded, actual_tlist, approximation):
-            problems: list[Any] = []
+            # Every point proves its exact space from the union of all initial states.
+            all_states = [overrides.get((None, "initial_state"), initial_state) for _, overrides in expanded]
+            builders: list[Any] = []
             for (coord, overrides), point_tlist in zip(expanded, point_tlists):
                 parameter_bindings = {
                     field: value
@@ -1193,8 +1195,9 @@ class QuantumSequence:
 
                 variant = self.with_params(parameter_bindings)
                 drive_ops = variant._materialize_drive_ops(entry_overrides)
-                problems.append(
-                    build_solve_problem(
+                builders.append(
+                    functools.partial(
+                        build_solve_problem,
                         variant._chip,
                         drive_ops,
                         point_tlist.bounds if isinstance(point_tlist, AutomaticTimeGrid) else point_tlist,
@@ -1205,9 +1208,15 @@ class QuantumSequence:
                         approximation=approximation,
                         states=states,
                         dissipation=dissipation,
+                        _initial_states=all_states,
                     )
                 )
                 params_store[coord] = self._point_params(axes, coord)
+
+            problems = [build() for build in builders]
+            if len({tuple(problem.engine_result.dims) for problem in problems}) > 1:
+                # The points proved different exact spaces. One product space keeps the batch homogeneous.
+                problems = [build(_product_space=True) for build in builders]
 
             from quchip.engine.ir import SolveBatch
 
@@ -1234,6 +1243,7 @@ class QuantumSequence:
             approximation=approximation,
             states=states,
             dissipation=dissipation,
+            initial_states=[overrides.get((None, "initial_state"), initial_state) for _, overrides in expanded],
         )
         template = compile_hamiltonian_template(
             self._chip,
@@ -1364,7 +1374,8 @@ class QuantumSequence:
             configured string shorthand give product states in the resolved local bases. QuTiP
             ``Qobj`` and dynamiqs ``QArray`` kets or density matrices use resolved solver
             coordinates. Arrays, symbolic expressions, and callables are authored-space kets
-            projected onto kept levels.
+            projected onto kept levels. A ``CompactState`` reuses captured excitation
+            coordinates and requires the same local energy bases.
         backend : object or {"qutip", "dynamiqs"}, optional
             Per-call backend override.
         partition : bool, default=True

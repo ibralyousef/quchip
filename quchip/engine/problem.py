@@ -101,6 +101,8 @@ def prepare_solve_problem_context(
     states: StateStorage | None = None,
     dissipation: bool = True,
     run_args: dict | None = None,
+    initial_states: list[Any] | None = None,
+    _product_space: bool = False,
 ) -> SolveProblemContext:
     """Resolve the frame and keep authored observables and state specifications.
 
@@ -123,13 +125,37 @@ def prepare_solve_problem_context(
 
     if e_ops is not None and not isinstance(e_ops, dict):
         raise TypeError("e_ops must be dict or None")
-    base_result = resolve_for_operations(
-        chip,
-        drive_ops or [],
-        frame=frame,
-        approximation=approximation,
-        solve_window=(tlist_arr[0], tlist_arr[-1]),
-    )
+    from math import prod
+    from quchip.engine.assembly import _resolve_system, _prepare_engine_assembly
+    from quchip.engine.frames import plan_for_operations
+    from quchip.engine.pulse_space import plan_pulse_space
+    from quchip.approximations import require_approximation
+
+    strategy = chip.approximation if approximation is None else require_approximation(approximation)
+    resolution = _resolve_system(chip, backend)
+    space, reason = (None, "Trajectory solvers use the product space.")
+    if _product_space:
+        reason = "Batch points prove different exact spaces."
+    elif solver in (None, "sesolve", "mesolve"):
+        space, reason = plan_pulse_space(chip, drive_ops or [], initial_states or [None], resolution,
+                                        strategy, dissipation)
+    if space is None:
+        base_result = resolve_for_operations(
+            chip, drive_ops or [], frame=frame, approximation=strategy,
+            solve_window=(tlist_arr[0], tlist_arr[-1]),
+        )
+    else:
+        spec = plan_for_operations(chip, chip.frame if frame is None else frame, drive_ops or [],
+                                   approximation=strategy, solve_window=(tlist_arr[0], tlist_arr[-1]),
+                                   _resolution=resolution)
+        resolution, resolved_frame = _prepare_engine_assembly(chip, spec, strategy, resolution=resolution)
+        base_result = build_engine_result(chip, [], resolved_frame=resolved_frame, approximation=strategy,
+                                          _local_resolution=replace(resolution, space=space))
+    base_result = replace(base_result, metadata={**base_result.metadata, "excitation_reduction": {
+        "exact": space is not None, "reason": reason,
+        "full_dimension": prod(resolution.dims), "dimension": prod(base_result.dims),
+        "totals": None if space is None else space.totals,
+    }})
     return SolveProblemContext(
         chip=chip,
         tlist=tlist if isinstance(tlist, tuple) and solver in ("jssesolve", "dssesolve") else tlist_arr,
@@ -255,13 +281,14 @@ def build_solve_batch_from_results(
         raise ValueError(
             f"initial_states length {len(initial_states)} does not match batch_size {batch_size}"
         )
+    _require_product_state(context, ref)
     # Materialize the shared default only when at least one point omits its state.
     ground = (
-        default_initial_state(context.chip, ref, context.tlist[0])
+        _initial_state(context.chip, None, ref, context.tlist[0])
         if any(state_spec is None for state_spec in initial_states) else None
     )
     states = tuple(
-        ground if state_spec is None else materialize_state_spec(context.chip, state_spec, result.bases)
+        ground if state_spec is None else _initial_state(context.chip, state_spec, result, context.tlist[0])
         for state_spec, result in zip(initial_states, engine_results)
     )
 
@@ -289,6 +316,34 @@ def build_solve_batch_from_results(
     return SolveBatch(chip=context.chip, problems=tuple(problems))
 
 
+def _initial_state(chip, spec, result, start):
+    if result.excitation_space is not None:
+        from quchip.results.compact import materialize_compact
+        return materialize_compact(chip, spec, result.excitation_space)
+    from quchip.results.compact import CompactState, _compatible_values
+    if isinstance(spec, CompactState):
+        backend = chip.backend
+        values = _compatible_values(spec, tuple(d.label for d in chip.devices), result.dims, result.bases, backend)
+        native = backend.from_array(values, dims=[[spec.space.size],
+                                    [1] if spec.values.shape[-1] == 1 else [spec.space.size]])
+        spec = spec.space.lift(native, backend)
+    if spec is None:
+        return default_initial_state(chip, result, start)
+    return materialize_state_spec(chip, spec, result.bases)
+
+
+def _require_product_state(context, result):
+    """Raise before a dissipative product-space solve evolves a density matrix that cannot fit."""
+    dissipative = context.dissipation and bool(result.slh.collapse_terms)
+    if result.excitation_space is None and dissipative and context.solver in (None, "mesolve"):
+        from math import prod
+        from quchip.backend._memory import require_memory
+
+        dimension = prod(result.dims)
+        require_memory(16 * dimension**2, task=f"The product-space density matrix at dimension {dimension}",
+                       remedy="Use a model and initial state with a smaller proven invariant space.")
+
+
 def build_solve_problem(
     chip: Chip,
     drive_ops: list[ControlOp],
@@ -303,6 +358,8 @@ def build_solve_problem(
     states: StateStorage | None = None,
     dissipation: bool = True,
     run_args: dict | None = None,
+    _initial_states: list[Any] | None = None,
+    _product_space: bool = False,
 ) -> SolveProblem:
     """Resolve, assemble, and package a frozen :class:`SolveProblem`.
 
@@ -326,24 +383,28 @@ def build_solve_problem(
         frame=frame,
         states=states,
         dissipation=dissipation,
+        initial_states=[initial_state] if _initial_states is None else _initial_states,
+        _product_space=_product_space,
     )
+    return _problem_from_context(context, drive_ops, initial_state)
+
+
+def _problem_from_context(context, drive_ops, initial_state):
+    """Instantiate one solve request on a prepared context."""
     engine_result = build_engine_result(
-        chip,
+        context.chip,
         drive_ops,
         resolved_frame=context.resolved_frame,
         approximation=context.approximation,
         _base_result=context._base_result,
     )
     engine_result = replace(engine_result, dissipation=context.dissipation)
+    _require_product_state(context, engine_result)
     e_ops_solver, e_ops_meta = _prepare_context_eops(context, engine_result)
     problem = SolveProblem(
         chip=context.chip,
         engine_result=engine_result,
-        initial_state=(
-            default_initial_state(context.chip, engine_result, context.tlist[0])
-            if initial_state is None
-            else materialize_state_spec(context.chip, initial_state, engine_result.bases)
-        ),
+        initial_state=_initial_state(context.chip, initial_state, engine_result, context.tlist[0]),
         tlist=context.tlist,
         e_ops=e_ops_solver,
         e_ops_meta=e_ops_meta,

@@ -387,6 +387,13 @@ def simulate(
     >>> result = simulate(chip, list(seq.scheduled_ops), tlist, e_ops={q: q.number_operator()})
     >>> populations = result.expect(q)
     """
+    from quchip.engine.problem import _problem_from_context, prepare_solve_problem_context
+
+    # The partition probe and the joint solve share one prepared context.
+    context = prepare_solve_problem_context(
+        chip, tlist, drive_ops=drive_ops, approximation=approximation, initial_states=[initial_state],
+        solver=solver, options=options, run_args=run_args, e_ops=e_ops, states=states, dissipation=dissipation,
+    )
     if partition and solver in (None, "sesolve", "mesolve"):
         from quchip.engine.partitioned import maybe_simulate_partitioned
 
@@ -396,20 +403,12 @@ def simulate(
             approximation=approximation,
             states=states,
             dissipation=dissipation,
+            context=context,
         )
         if partitioned is not None:
             return partitioned
 
-    problem = build_problem(
-        chip, drive_ops, tlist,
-        solver=solver,
-        options=options, run_args=run_args,
-        e_ops=e_ops,
-        initial_state=initial_state,
-        approximation=approximation,
-        states=states,
-        dissipation=dissipation,
-    )
+    problem = _problem_from_context(context, drive_ops, initial_state)
     try:
         return solve_problem(problem)
     except Exception as e:

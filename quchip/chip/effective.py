@@ -30,7 +30,8 @@ def authored_excitation_changes(
     coefficients do not change it, including at zero. Constant leaves are
     checked in the captured energy bases at compile time. Unknown matrix
     support or traced energy vectors return ``None``. No small-entry
-    threshold supplies a conservation proof.
+    threshold supplies a conservation proof. A product on a truncated energy
+    basis is checked as one complete matrix.
 
     Parameters
     ----------
@@ -62,7 +63,12 @@ def authored_excitation_changes(
             if node.kind in ("scale", "embed"):
                 operand = node.args[1] if node.kind == "scale" else node.args[0]
                 return changes(operand, operand.labels)
-            if node.kind in ("add", "sub", "tensor", "matmul"):
+            # A product on a truncated energy basis also passes through discarded
+            # levels, so only its complete matrix gives its retained changes.
+            truncated = node.kind == "matmul" and any(
+                bases[label].resolved_dim < bases[label].native_dim for label in node.labels
+            )
+            if node.kind in ("add", "sub", "tensor", "matmul") and not truncated:
                 left, right = (changes(arg, arg.labels) for arg in node.args)
                 if left is None or right is None:
                     return None

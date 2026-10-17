@@ -8,6 +8,18 @@ This file records notable user-visible changes to quchip.
 
 #### Changes and migration
 
+- An explicit `thermal_occupation=0` keeps a zero-rate absorption channel.
+  Previously, a concrete zero dropped it. Dynamics and gradients do not
+  change, but each emission channel of that device gains a zero-rate partner,
+  and dissipative pulse solves of the chip use the full product space. Omit
+  `thermal_occupation` for a vacuum-only model.
+  ([#125](https://github.com/quchip/quchip/pull/125))
+- An eligible `SolveProblem` stores its initial state, operators and
+  `engine_result.dims` in compact excitation coordinates, and
+  `EngineResult.dress()` returns compact eigenvectors. Results keep physical
+  `dims`. Rebuild a problem with `build_problem(..., initial_state=...)`
+  instead of replacing `initial_state` with a product-space state.
+  ([#125](https://github.com/quchip/quchip/pull/125))
 - Custom `RWA(keep_bands=...)` selections must contain every adjoint band.
   Add each tuple's negation to preserve Hermiticity. Asymmetric selections
   now raise instead of producing non-Hermitian Hamiltonians.
@@ -50,6 +62,20 @@ This file records notable user-visible changes to quchip.
 
 #### New features
 
+- Deterministic pulse simulations on QuTiP and dynamiqs evolve in an invariant
+  excitation space when quchip can prove one. The proof covers the initial
+  state and every retained Hamiltonian, control, collapse operator and
+  no-jump product. A batch proves one space for the initial states of all its
+  points. A closed one-excitation evolution of a ring of 24 three-level
+  devices uses 24 coordinates, or 25 when decay adds the vacuum, instead of
+  3²⁴. Transverse drives and thermal raising can require the full space, and
+  stochastic solvers keep it. When the dense operators of a proven space do
+  not fit in memory, the solve uses sparse operators in the full space. Local
+  observables, measurements and saved-state replay stay compact.
+  `Chip.compact_state()` prepares bare or conserving dressed states without
+  allocating the product space. Full-space operator assembly and state exports
+  check available memory first. quchip applies no excitation cutoff.
+  ([#125](https://github.com/quchip/quchip/pull/125))
 - `VNA.sweep(..., when={q: 1})` computes weak-probe scattering from a frozen
   dressed reference with zero or one excitation. The response includes all
   declared loss channels and coherence recycling. Diagnostics report reference
