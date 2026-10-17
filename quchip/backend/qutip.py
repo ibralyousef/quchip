@@ -60,7 +60,7 @@ from quchip.engine.ir import (
     evaluate_signal_program,
     signal_window_bounds,
 )
-from quchip.utils.jax_utils import maybe_concrete_scalar
+from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar
 
 
 @dataclass(frozen=True)
@@ -383,6 +383,7 @@ def _assemble_qobjevo(static_rhs: Qobj | None, op_signal_pairs: Any, sample_tlis
     terms: list[Any] = [] if static_rhs is None else [static_rhs]
     groups: dict[tuple, tuple[Qobj, Any, list[Any]]] = {}
     for op, signal in op_signal_pairs:
+        QuTiPBackend._validate_input(signal)
         key = _qobj_key(op)
         for band in decompose_carrier_bands(signal):
             freq = maybe_concrete_scalar(band.freq)
@@ -753,6 +754,12 @@ class QuTiPBackend(Backend):
     def array_module(self) -> Any:
         return np
 
+    @staticmethod
+    def _validate_input(value: Any) -> None:
+        """Reject traced values when lowering to QuTiP's concrete representation."""
+        if contains_tracer(value):
+            raise ValueError("JAX tracing requires backend='dynamiqs'. This calculation uses 'qutip'.")
+
     def to_array(self, op: Operator) -> Any:
         if isinstance(op, Qobj):
             return np.asarray(op.full(), dtype=complex)
@@ -809,11 +816,20 @@ class QuTiPBackend(Backend):
         return self._cached_op("identity", n, qutip.qeye)
 
     def from_array(self, data: Any, dims: list[list[int]] | None = None) -> Operator:
+        self._validate_input(data)
         if isinstance(data, Qobj):
             return data if dims is None or data.dims == dims else Qobj(data.data, dims=dims)
         if hasattr(data, "to_jax"):
             data = np.asarray(data.to_jax(), dtype=complex)
         return Qobj(data, dims=dims)
+
+    def linear_combination(self, terms: Sequence[tuple[Any, Operator]]) -> Operator:
+        self._validate_input(terms)
+        return super().linear_combination(terms)
+
+    def _collapse_operators(self, engine_result: Any) -> list[Operator]:
+        self._validate_input([term.rate for term in engine_result.collapse_terms])
+        return super()._collapse_operators(engine_result)
 
     def to_canonical_operator(self, op: Operator) -> Any:
         from quchip.engine.ir import CanonicalOperator

@@ -188,6 +188,13 @@ This file records notable user-visible changes to quchip.
 
 #### Fixes
 
+- QuTiP calculations that receive traced JAX values, e.g. under `jax.grad`,
+  raise a `ValueError` that names `backend='dynamiqs'`. Previously, they
+  failed inside operator arithmetic with `TypeError` or
+  `ConcretizationTypeError`. The compact weak-probe VNA route applies the
+  same check to port rates and phases.
+  ([#128](https://github.com/quchip/quchip/issues/128),
+  [#142](https://github.com/quchip/quchip/pull/142))
 - `jax.grad` and `jax.jit` with a traced device frequency pass the
   collapse-channel frame check after `eliminate()` and for a collective `Bath`
   in a common frame, also on a reduced chip. Previously, they raised a

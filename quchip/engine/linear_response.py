@@ -432,8 +432,8 @@ def _port_coupling_vector(port: Port, chip: Any, mode_index: dict[str, int], bac
     else:
         raise _UnsupportedLinearModel
     return (
-        xp.exp(1j * xp.asarray(port.phase))
-        * xp.sqrt(xp.asarray(port.rate_value(chip)))
+        xp.exp(1j * xp.asarray(_scalar_value(port.phase, backend)))
+        * xp.sqrt(xp.asarray(_scalar_value(port.rate_value(chip), backend)))
         * vector
     )
 
@@ -519,12 +519,17 @@ def _scalar_value(
     *,
     bindings: dict[str, Any] | None = None,
 ) -> Any:
-    if not isinstance(expression, PhysicsExpr):
-        return expression
-    allowed = {"literal", "parameter", "function", "add", "sub", "mul", "scale", "pow"}
-    if any(node.labels or node.kind not in allowed for node in _walk_expr(expression)):
-        raise _UnsupportedLinearModel
-    return materialize_expr(expression, backend, bindings=bindings)
+    value = expression
+    if isinstance(expression, PhysicsExpr):
+        allowed = {"literal", "parameter", "function", "add", "sub", "mul", "scale", "pow"}
+        if any(node.labels or node.kind not in allowed for node in _walk_expr(expression)):
+            raise _UnsupportedLinearModel
+        value = materialize_expr(expression, backend, bindings=bindings)
+    # Compact response arrays consume scalars without constructing native operators.
+    validate = getattr(backend, "_validate_input", None)
+    if validate is not None:
+        validate(value)
+    return value
 
 
 def _add_entry(array: Any, row: int, column: int | None, value: Any) -> Any:
