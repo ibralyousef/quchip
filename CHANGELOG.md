@@ -188,6 +188,12 @@ This file records notable user-visible changes to quchip.
 
 #### Fixes
 
+- On a chip reduced by `eliminate()` or `active_patch()`,
+  `drive_matrix_elements()` passes each drive operator through the retained
+  coordinate maps, as pulses do. Previously, it used the authored operator and
+  missed the dressing by removed devices, e.g. 0.125% at g/Δ = 0.05.
+  ([#146](https://github.com/quchip/quchip/issues/146),
+  [#150](https://github.com/quchip/quchip/pull/150))
 - QuTiP calculations that receive traced JAX values, e.g. under `jax.grad`,
   raise a `ValueError` that names `backend='dynamiqs'`. Previously, they
   failed inside operator arithmetic with `TypeError` or
