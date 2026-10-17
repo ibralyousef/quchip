@@ -955,11 +955,11 @@ class _Interaction:
         return self.retained or not approximation.filters_terms or approximation.keeps_operator_band(weights)
 
 
-def _interaction_contributions(chip: "Chip"):
+def _interaction_contributions(chip: "Chip", effective_terms: Sequence[EffectiveTerms] | None = None):
     for coupling in chip.couplings:
         yield _Interaction(coupling.label, (coupling.device_a_label, coupling.device_b_label),
                            coupling.interaction_hamiltonian)
-    for terms in chip.effective_terms:
+    for terms in chip.effective_terms if effective_terms is None else effective_terms:
         yield _Interaction(terms.label, terms.labels, terms.expression, retained=True)
 
 
@@ -971,9 +971,10 @@ class _ResolvedInteraction:
     operator: Any
 
 
-def _resolved_interactions(chip: "Chip", resolution: _SystemResolution, backend: Backend):
+def _resolved_interactions(chip: "Chip", resolution: _SystemResolution, backend: Backend,
+                           effective_terms: Sequence[EffectiveTerms] | None = None):
     """Project local interactions once, before choosing a global or sector representation."""
-    for contribution in _interaction_contributions(chip):
+    for contribution in _interaction_contributions(chip, effective_terms):
         support = tuple(chip.device_index(label) for label in contribution.labels)
         authored = contribution.expression()
         operator = _project_on_support(chip, authored, support, resolution.bases, backend)
@@ -993,12 +994,14 @@ def _energy_operator(chip: "Chip", operator: Any, support: tuple[int, ...],
 
 
 def _resolved_energy_interactions(chip: "Chip", resolution: _SystemResolution, approximation: Approximation,
-                                  advisories: list[str] | None = None):
+                                  advisories: list[str] | None = None,
+                                  effective_terms: Sequence[EffectiveTerms] | None = None):
     """Yield kept static operators on their local supports in energy coordinates, in GHz.
 
+    ``effective_terms`` selects the retained contributions. ``None`` reads all of the chip's.
     Approximation advisories go to ``advisories`` when it is given, and to ``warnings.warn`` otherwise.
     """
-    for resolved in _resolved_interactions(chip, resolution, chip.backend):
+    for resolved in _resolved_interactions(chip, resolution, chip.backend, effective_terms):
         contribution, support = resolved.contribution, resolved.support
         operator = _energy_operator(chip, resolved.operator, support, resolution.bases, chip.backend)
         if approximation.filters_terms and not contribution.retained:

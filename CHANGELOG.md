@@ -138,8 +138,13 @@ This file records notable user-visible changes to quchip.
 - `eliminate(chip, device, local=True)` computes the SW reduction on a local
   patch. It retains the full reduction's Hamiltonian, channels, and map.
   `chi` describes only the patch. Both `active_patch()` entry points forward
-  `local`. Baths and networks that cross the patch boundary remain unsupported.
-  ([#112](https://github.com/quchip/quchip/pull/112))
+  `local`. Ports on a shared feedline enter each patch as independent copies,
+  and the reduced chip keeps the complete feedline. The removed mode's
+  reference section includes spectator dressing from interactions outside the
+  patch, as with `local=False`. Chips with baths require `local=False`.
+  ([#112](https://github.com/quchip/quchip/pull/112),
+  [#130](https://github.com/quchip/quchip/issues/130),
+  [#139](https://github.com/quchip/quchip/pull/139))
 - Local elimination stores single-device corrections and transformed channels
   on their own supports. Ordered maps preserve operator transport without
   forcing later patches to include every earlier patch. Noisy channels can

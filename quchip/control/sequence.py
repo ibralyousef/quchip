@@ -1511,8 +1511,8 @@ class QuantumSequence:
         method : {"sw", "exact"}, default="sw"
             Reduction method forwarded to each elimination.
         local : bool, default=False
-            Forwarded to each elimination. Each step then reads only the
-            patch around the eliminated device.
+            Forwarded to each elimination. Each step then computes its
+            generator on the patch around the eliminated device.
         """
         from quchip.chip.transformations import active_patch as _active_patch
 

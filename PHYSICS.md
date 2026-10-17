@@ -1445,7 +1445,7 @@ with `H = omega*n - K*n*(n-1)` has `K[i,i] = -2*K`.
 Sources: [`quchip/chip/transformations/`](quchip/chip/transformations/), [`quchip/analysis/dispersive_readout.py`](quchip/analysis/dispersive_readout.py)
 
 `eliminate(chip, target, method="sw"|"exact")` performs model reduction dispatched on the target. A
-device target removes a far-detuned mode. With `local=True`, it reads only a patch around the mode
+device target removes a far-detuned mode. With `local=True`, its generator reads a patch around the mode
 (§10.7). Both routes keep their complete calculated Hamiltonian and
 each transformed channel from the removed mode and couplings. `chip.effective_terms` carries the
 matrix correction beyond the reported Lamb shifts and mediated exchange, including higher-level
@@ -1813,8 +1813,8 @@ Exact reduction uses the same Löwdin embedding as its Hamiltonian and removed-c
 
 ### 10.7 Local reduction (`local=True`)
 
-`eliminate(chip, device, local=True)` reduces a device from a patch around it and never resolves the
-full chip. The core is the device and every device that shares a coupling, an effective Hamiltonian or
+`eliminate(chip, device, local=True)` reduces a device from a patch without assembling the
+full product space. The core is the device and every device that shares a coupling, an effective Hamiltonian or
 a port with it. The SW generator changes levels only on the core.
 Its coefficients can depend on other patch devices. Its denominators use `E = diag H`, so they also
 read each term whose diagonal part depends on a core level. The patch therefore holds:
@@ -1822,11 +1822,15 @@ read each term whose diagonal part depends on a core level. The patch therefore 
 - the core,
 - the far device of each coupling whose diagonal part depends on a core level, such as a `CrossKerr`
   edge,
-- the full support of each port pair whose series composition generates a Hamiltonian on a core
-  device,
 - the full support of each effective Hamiltonian that touches the core and whose diagonal part depends
   on a core level,
 - every device that the operators of the device's ports act on in retained coordinates.
+
+The reduction excludes network-generated Hamiltonians (§10.5).
+Devices linked to the core only through a feedline therefore do not enter the patch.
+The numerical sub-chip holds independent copies of its local ports, with their operators and rates.
+The full chip keeps the field wiring and reference sections and regenerates its network terms from
+the transformed ports. A collective port still keeps its full operator support during transport.
 
 The far-device rule reads the structure of a coupling, not its values. It splits the coupling into
 operator products and drops their scalar coefficients, so no parameter values can cancel a product, as
@@ -1848,10 +1852,19 @@ denominators, so the second-order reduction leaves it unchanged.
 With this patch, the full-chip generator is the patch generator times the identity on the other
 devices. A coupling from the patch to other devices keeps the mode's level, so it adds nothing to
 `P [S, V] P`. In exact arithmetic, the retained Hamiltonian, transformed channels, and captured map
-equal those of the full-chip reduction. The numerical omission described below limits this equivalence. Every numerical step reads the patch as a sub-chip, so its cost
+equal those of the full-chip reduction. The numerical omission described below limits this equivalence. These steps read the patch as a sub-chip, so their cost
 follows the patch's product space and the supports of the channels that it carries. Devices and
 couplings outside the patch stay unchanged. `chi` comes from the patch spectrum, so it omits dressing
 by devices outside the patch.
+
+The removed mode's scattering section needs a separate set of intermediate states (§10.5).
+Its pole and weight include interactions that preserve the mode's occupation, even outside the generator patch.
+The local route assembles the states that one kept interaction can connect to vacuum or the mode's first excitation.
+All local Hamiltonian terms contribute their diagonal energies on those states, including spectator shifts.
+State selection uses local dimensions and proved excitation conservation, so it also retains zero-valued couplings under tracing.
+The calculation uses the full route's SW energy and weight formulas without a full product-space matrix.
+For a conserving model, remote interactions cannot excite vacuum, so this set remains local to the removed mode.
+Nonconserving interactions can add spectator excitations. The cost then follows their combined state count and each term's local support.
 
 The correction is split in the energy coordinates of the patch survivors. The part on one survivor is
 the normalized partial trace onto it, minus the mean, and the first survivor's part also holds the
@@ -1885,8 +1898,7 @@ only when you read it.
 `local=True` implements `method="sw"` only. The exact route uses the whole-chip
 eigensystem, resolved into excitation sectors when possible. Its dressed states
 are not local. The local route does not transform baths yet, so a chip with baths
-raises `NotImplementedError`. A port network that links a patch port to a port outside the patch also
-raises, because cutting it would change the SLH dynamics. Coupling and effective-terms targets do not
+raises `NotImplementedError`. Coupling and effective-terms targets do not
 accept `local=True`. `active_patch()` and `QuantumSequence.active_patch()` forward `local`.
 
 ## 11. Parametric Edge Control
