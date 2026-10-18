@@ -365,7 +365,7 @@ A label above the cutoff raises, and so does a supplied state with more than
 `1e-20` of its weight above the cutoff. quchip treats a smaller residue as
 basis-conversion round-off and drops it without renormalization. Pulse solves
 evolve the truncated model. Their default initial state is the truncated
-model's vacuum-assigned eigenvector. `result.check_truncation()[ExcitationCutoff(K)]`
+model's vacuum-assigned eigenvector. `check_truncation(result)[ExcitationCutoff(K)]`
 gives the maximum sampled population in the sectors that one step can move
 above the cutoff. This value is a warning heuristic, not an error bound.
 
@@ -439,7 +439,7 @@ calibration.
 | Field versus occupation | `abs(⟨a⟩)²` is the coherent part; `⟨a†a⟩` includes incoherent photons. |
 | Jump rate versus output flux | `jump_rate()` returns `⟨L†L⟩`; dephasing and absorption jumps are not emitted photons. |
 | A dressed label near an avoided crossing | Inspect `assignment_overlaps` or `state_components()`. Lowering the overlap threshold does not improve the assignment. |
-| A small boundary population | Call `result.check_truncation()` explicitly, then increase local levels and compare the observable. The check covers only available samples. |
+| A small boundary population | Call `check_truncation(result)` explicitly, then increase local levels and compare the observable. The check covers only available samples. |
 | A smooth trace | Refine the output grid separately from the solver tolerances. |
 | An exact reduction near a crossing | Follow `validity["<mode>_labeling"]["margin"]` along the sweep. A failed check raises `EliminationError` with the label and its weight. |
 | The origin of a mediated shift | `result.pathways({"q": 1})` lists the virtual states of an SW reduction. The amounts sum to the second-order part of the element. |
