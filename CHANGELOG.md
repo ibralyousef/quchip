@@ -818,6 +818,11 @@ This file records notable user-visible changes to quchip.
 - `PHYSICS.md` §4.2 describes result frames and dressed label targets, §6.5
   the sector routes of `steadystate()` and the output statistics, §6.6 the
   route record, and §9 the dressed meaning of level labels. ([#205](https://github.com/quchip/quchip/pull/205))
+- `PHYSICS.md` opens with a short orientation and a table of its main
+  conventions, and uses one symbol for each quantity. It corrects statements
+  in §1, §6.4, §8, §11 and §13 that no longer matched the code, among them the
+  default frame. On docs.quchip.org, its source links now point to GitHub, and
+  table rows render whole. ([#212](https://github.com/quchip/quchip/pull/212))
 
 - The `effective_params` docstring of `EliminationResult` states what
   `lamb_shift` and `freq_after` mean under each method. `method="sw"` reports
@@ -825,9 +830,8 @@ This file records notable user-visible changes to quchip.
   dressed transition, which includes couplings that stay on the chip.
   ([#211](https://github.com/quchip/quchip/pull/211))
 - `PHYSICS.md` lists `VNA.resonances()` among the workflows that raise under a
-  cutoff, names the fallback basis of the sector preconditioner, and corrects
-  two stale source references. The README no longer describes the removed
-  quchip.org walkthrough.
+  cutoff and corrects two stale source references. The README no longer
+  describes the removed quchip.org walkthrough.
   ([#211](https://github.com/quchip/quchip/pull/211))
 
 #### Development
