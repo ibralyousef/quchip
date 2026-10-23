@@ -649,19 +649,21 @@ def _collect_collapse_terms(
                                                           backend, resolution.bases)
                     common = all(maybe_concrete_scalar(f) == maybe_concrete_scalar(frequencies[0])
                                  and maybe_concrete_scalar(f) is not None for f in frequencies)
+                    devices = tuple(labels[index] for index in check_support)
                     frame_weights: tuple[tuple[int, ...], ...]
                     # One total change has one phase in a common frame. A larger structural
                     # bound needs the decomposition, which drops bands that are exactly zero.
                     if common and weights is not None and len(weights) <= 1:
                         frame_weights = ((next(iter(weights), 0),),)
                         frequencies = (frequencies[0],)
+                        devices = devices[:1]
                     else:
                         if local is None:
                             local = _project_on_support(chip, operator, support, resolution.bases, backend)
                         frame_weights = tuple(_authored_bands(
                             chip, operator, local, check_support, resolution.bases, backend))
                     kind = "Effective channel" if retained_coordinates else "Collapse channel"
-                    _common_band_frame_frequency(frame_weights, frequencies,
+                    _common_band_frame_frequency(frame_weights, frequencies, devices=devices,
                                                  source=f"{kind} {source!r}/{channel!r}")
             if len(support) > 1 and not _is_concrete_zero(resolved_rate):
                 resolved_support = tuple(labels[index] for index in support)
@@ -865,10 +867,40 @@ def _port_frame_frequency(
     if not bands:
         raise ValueError(f"Port {port.label!r} requires a nonzero coupling operator.")
 
-    return _common_band_frame_frequency(tuple(bands), frequencies, source=f"Port {port.label!r}")
+    return _common_band_frame_frequency(tuple(bands), frequencies, devices=labels, source=f"Port {port.label!r}")
 
 
-def _common_band_frame_frequency(bands: tuple[Any, ...], frequencies: tuple[Any, ...], *, source: str) -> Any:
+def _frame_frequency_text(frequency: Any) -> str:
+    """Format one frame frequency for an error message, without converting a tracer."""
+    concrete = maybe_concrete_scalar(frequency)
+    return "a traced frequency" if concrete is None else f"{concrete:.6g} GHz"
+
+
+def _band_phase_error(source: str, bands: tuple[Any, ...], frequencies: tuple[Any, ...],
+                      devices: tuple[str, ...]) -> ValueError:
+    """Name the devices of a static collapse operator whose bands beat, and the frames that can remove it."""
+    involved = [index for index in range(len(devices)) if any(int(band[index]) for band in bands)]
+    texts = [_frame_frequency_text(frequencies[index]) for index in involved]
+    rates = texts[0] if len(texts) == 1 else ", ".join(texts[:-1]) + f" and {texts[-1]}"
+    if len({sum(int(change) for change in band) for band in bands}) == 1:
+        advice = (
+            'Use frame="lab" or a common frame for these devices. frame="auto" also works when it gives them '
+            "one frequency, as it does for an undriven exchange-coupled cluster."
+        )
+    else:
+        advice = (
+            "The bands change the total excitation number by different amounts, so no nonzero common frame "
+            'gives them one phase. Use frame="lab".'
+        )
+    return ValueError(
+        f"{source} has operator bands with different phases in the selected frame. "
+        f"The bands act on devices {[devices[index] for index in involved]}, which have frame frequencies {rates}. "
+        f"{advice} Time-dependent collapse operators are not supported."
+    )
+
+
+def _common_band_frame_frequency(bands: tuple[Any, ...], frequencies: tuple[Any, ...], *, source: str,
+                                 devices: tuple[str, ...]) -> Any:
     """Require one removable global phase for a static collapse operator."""
     if not bands:
         return 0.0
@@ -899,11 +931,7 @@ def _common_band_frame_frequency(bands: tuple[Any, ...], frequencies: tuple[Any,
         or not np.allclose(coefficients, reference[1], atol=1e-10, rtol=1e-10)
         for constant, coefficients in signatures[1:]
     ):
-        raise ValueError(
-            f"{source} has operator bands with different phases in the selected frame. "
-            "Use a common frame compatible with the operator, or the lab frame; "
-            "time-dependent collapse operators are not supported."
-        )
+        raise _band_phase_error(source, bands, frequencies, devices)
     frequency: Any = reference[0]
     has_term = frequency != 0.0
     for coefficient, (_, representative) in zip(reference[1], traced_groups, strict=True):
@@ -1455,13 +1483,22 @@ def _resolve_drives(
                 f"Devices: {list(chip.device_map.keys())}; couplings: {list(chip.coupling_map.keys())}."
             )
 
+        line_label = drive_op.drive_label
         if equipment is None:
-            raise ValueError("Chip has no control equipment configured.")
-        drive = next((d for d in equipment.lines if d.label == drive_op.drive_label), None)
-        if drive is None:
             raise ValueError(
-                f"No drive with label '{drive_op.drive_label}' found in equipment. "
-                f"Available: {[d.label for d in equipment.lines]}"
+                f"Drive '{line_label}' targets '{label}', but the chip has no wired lines. "
+                f"Call chip.wire({line_label}) before solving."
+            )
+        drive = next((d for d in equipment.lines if d.label == line_label), None)
+        if drive is None:
+            wired = [d.label for d in equipment.lines]
+            call = ", ".join([*wired, str(line_label)])
+            replaced = "the wired lines"
+            if equipment.signal_chain:
+                replaced, call = "the wired lines and the signal chain", f"{call}, signal_chain=[...]"
+            raise ValueError(
+                f"Drive '{line_label}' targets '{label}', but the chip does not wire it. Wired lines: {wired}. "
+                f"chip.wire() replaces {replaced}, so pass them all, e.g. chip.wire({call}), before solving."
             )
 
         if drive.target_label is None:
