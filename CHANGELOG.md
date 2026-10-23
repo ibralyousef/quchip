@@ -10,6 +10,54 @@ This file records notable user-visible changes to quchip.
 
 #### Changes and migration
 
+- A pulse scheduled without `freq` on a charge, phase, or two-photon line takes
+  a carrier at the line's device and warns with the chosen value. Charge and
+  phase lines use `chip.freq(device)`, the dressed `0 -> 1` frequency, and a
+  two-photon line uses twice it. Previously, such a pulse had no carrier, so a
+  charge drive stayed about 5 GHz below a transmon and left it in `|0>`: a
+  20 ns Gaussian π pulse from `chip.rotation_amplitude()` gave `P1 = 5e-11`
+  without a warning, and now gives `0.99`. The new default is `freq="auto"`,
+  and its warning comes once per line in each sequence. Flux and coupling
+  drives, custom drives, and coherent inputs keep a baseband pulse. A custom
+  drive can set the class attribute `carrier_harmonic` to take an automatic
+  carrier. To keep a previous pulse without a carrier, pass `freq=None`.
+  `freq=0.0` stays a carrier at zero frequency. `QuantumSequence.charge()`
+  takes the same default and warning, and `charge(freq=None)` now gives a
+  pulse without a carrier, as `schedule(freq=None)` does. Previously,
+  `charge(freq=None)` used `chip.freq(target)`. If you passed `freq=None` to
+  `charge()` for that carrier, omit `freq`, or pass `freq=chip.freq(target)`
+  to keep it without the warning.
+  ([#213](https://github.com/quchip/quchip/pull/213))
+- A time-domain solve on a chip without a frame uses the rotating frame and
+  warns with that choice. `Chip(frame=None)` is the new default, and static
+  calculations keep the lab frame: `chip.resolve()`, `chip.hamiltonian()`,
+  dressed analysis and steady states. Previously, `Chip()` set
+  `frame="lab"`, so a solve resolved each device's phase at its transition
+  frequency. A transmon with `T1` and a resonator, 15 states, driven for
+  20 ns and solved for 100 ns with automatic sampling, took 2.8 s and
+  1.76 GB. It now takes 0.43 s and 0.33 GB, and its `P1` error at QuTiP's
+  default tolerances falls from 1.0e-4 to 3.5e-6. Expectation values do not
+  depend on the frame. Stored states and trajectory measurement records are
+  now in the rotating frame, and `result.state(..., frame="lab")` converts a
+  state. A ket `initial_state` is an integration-frame vector at `tlist[0]`,
+  so when `tlist[0]` is not zero it is now a vector of the frame that the
+  warning names. When a collapse or port operator does not fit the rotating
+  frame, the solve uses the frame that `frame="auto"` plans and warns with
+  its frequencies. Examples are a reduced chip whose eliminated bus carries
+  each transmon's jump onto the other, and two readouts on one feedline.
+  When the planned frame does not fit either, the solve uses the lab frame.
+  A batch checks every point and solves all of them in the first of these
+  frames that fits each point. In the planned frame, each point gets its own
+  plan, as with `frame="auto"`, and each point starts in the same physical
+  state as its own solve. When a device has no reliably assigned dressed
+  `0 -> 1` frequency, as in a resonant pair of identical devices, the solve
+  raises, names the devices, and asks for a frame such as
+  `Chip(frame="lab")`. `chip.frame` is `None` on a chip without a frame.
+  `chip.frame_info()` returns the frequencies of the frame that a solve
+  without pulses would use and warns with that choice and its reason, or
+  raises as the solve does. To keep the previous behavior, pass
+  `Chip(frame="lab")`. A saved chip keeps its saved frame.
+  ([#214](https://github.com/quchip/quchip/pull/214))
 - `eliminate(..., method="sw")` keys the exchange `pathways` by occupation
   tuples in the source chip's device order, as `analyze_static_zz()` does.
   Previously, the keys were flat product indices, such as `1` and `17` for
@@ -637,6 +685,51 @@ This file records notable user-visible changes to quchip.
   or an installed psutil, every check accepted every request.
   ([#200](https://github.com/quchip/quchip/issues/200),
   [#205](https://github.com/quchip/quchip/pull/205))
+- A solve with `dissipation=False` no longer checks the collapse channels
+  that it leaves out against its frame. Previously, such a channel raised
+  when it did not fit the frame: a collective decay of two detuned devices
+  refused `frame="rotating"` even without dissipation. On a chip without a
+  frame, these solves and `subspace_propagator()` now use the rotating frame
+  instead of a fallback. Ports still need to fit the frame, because drives
+  through a port and the Hamiltonian of a cascade stay in the solve.
+  ([#214](https://github.com/quchip/quchip/pull/214))
+
+- Dressed label queries, such as `dispersive_shift()`, `freq(..., when=...)`,
+  `static_zz()` and `kerr_matrix()`, warn when the couplings mix a label with
+  states beyond the levels of a truncated device. The check counts coupling
+  steps for dispersive, nondegenerate couplings. It warns at second and fourth
+  order, and up to the order at which the excitations of the label first
+  interact, such as sixth order for ZZ through two couplers in series. Under
+  `Exact()`, steps that create excitations also count. Diagonal couplings,
+  such as `CrossKerr`, and couplings that the approximation removes do not.
+  Silence is not a convergence check. The warning names the device and the
+  `levels` that remove it. Values do not change. Previously, a two-level
+  `Resonator` gave a dispersive shift of +9.98 MHz with no warning, against
+  -0.99 MHz with three levels. A `Qubit` is not a truncation and never warns.
+  ([#211](https://github.com/quchip/quchip/pull/211))
+- After an earlier `eliminate(..., method="exact")` step,
+  `effective_params[...]["purcell_rate"]` and `["kappa"]` count the removed
+  mode's own loss channels. Previously, both read 0.0, because the channel acted
+  on several devices in the retained coordinates. On every route, they now
+  count only the channels that the mode declares, as `PHYSICS.md` states.
+  Previously, `local=False` also counted a retained channel that acted on the
+  mode alone. The retained channels did not change.
+  ([#211](https://github.com/quchip/quchip/pull/211))
+- Chips with a port network, sequences that hold them, `SimulationResult`,
+  `SParameterResult` and `ResonanceResult` pickle and load. Previously,
+  `pickle.dumps` raised on each of them. A loaded chip rebuilds its caches on
+  demand.
+  ([#211](https://github.com/quchip/quchip/pull/211))
+- Error messages name the cause and the fix in five cases. `fit_a_dress()` says
+  when it read a coupling's declared strength as a dressed `cross_kerr` target.
+  A solve that meets an unwired line names `chip.wire(...)`. `matrix()` without
+  `t` names the time-dependent terms and their rotation frequencies. A carried
+  collapse channel or a feedline exposure that a frame cannot compose names
+  its devices and the frames that work, such as `frame="auto"`.
+  ([#211](https://github.com/quchip/quchip/pull/211))
+- `Chip.describe()` prints `T1`, `T2` and `thermal_occupation` once for each
+  device. Previously, a device that declares them printed them twice.
+  ([#211](https://github.com/quchip/quchip/pull/211))
 
 #### Performance
 
@@ -781,6 +874,21 @@ This file records notable user-visible changes to quchip.
 - `PHYSICS.md` §4.2 describes result frames and dressed label targets, §6.5
   the sector routes of `steadystate()` and the output statistics, §6.6 the
   route record, and §9 the dressed meaning of level labels. ([#205](https://github.com/quchip/quchip/pull/205))
+- `PHYSICS.md` opens with a short orientation and a table of its main
+  conventions, and uses one symbol for each quantity. It corrects statements
+  in §1, §6.4, §8, §11 and §13 that no longer matched the code, among them the
+  default frame. On docs.quchip.org, its source links now point to GitHub, and
+  table rows render whole. ([#212](https://github.com/quchip/quchip/pull/212))
+
+- The `effective_params` docstring of `EliminationResult` states what
+  `lamb_shift` and `freq_after` mean under each method. `method="sw"` reports
+  the shift through the removed mode. `method="exact"` reports the labeled
+  dressed transition, which includes couplings that stay on the chip.
+  ([#211](https://github.com/quchip/quchip/pull/211))
+- `PHYSICS.md` lists `VNA.resonances()` among the workflows that raise under a
+  cutoff and corrects two stale source references. The README no longer
+  describes the removed quchip.org walkthrough.
+  ([#211](https://github.com/quchip/quchip/pull/211))
 
 #### Development
 

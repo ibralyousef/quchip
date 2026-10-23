@@ -352,3 +352,170 @@ def test_cached_qutip_kerr_values_remain_accessible_inside_jit():
     chip = Chip([q, r], [Capacitive(q, r, g=0.08)], backend="qutip")
     expected = float(chip.dispersive_shift("q", "r"))
     assert jax.jit(lambda scale: chip.dispersive_shift("q", "r") * scale)(2.0) == pytest.approx(2 * expected)
+
+
+def _readout_pair(readout_levels: int, readout_type=Resonator) -> tuple[Chip, DuffingTransmon, Resonator]:
+    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
+    r = readout_type(freq=7.0, levels=readout_levels, label="r")
+    return Chip([q, r], [Capacitive(q, r, g=0.105)]), q, r
+
+
+def _two_level_readout_pull() -> float:
+    """Return the cross-Kerr of a three-level transmon and a two-level readout under RWA."""
+    one = np.linalg.eigvalsh([[5.0, 0.105], [0.105, 7.0]])
+    two = np.linalg.eigvalsh([[9.8, np.sqrt(2) * 0.105], [np.sqrt(2) * 0.105, 12.0]])
+    # |1,0> is the lower one-excitation state and |1,1> is the upper two-excitation state.
+    return two[1] - one[0] - one[1]
+
+
+@pytest.mark.unit
+def test_two_level_readout_warns_on_two_excitation_queries_and_keeps_the_truncated_value() -> None:
+    """A two-excitation query on a two-level readout warns once and returns the truncated-model value."""
+    import jax
+
+    chip, q, r = _readout_pair(2)
+    with pytest.warns(UserWarning, match=r"second order.*'r' keeps 2 levels.*levels=3 or more on 'r'") as record:
+        shift = chip.dispersive_shift(q, r)
+    assert len([w for w in record if "keeps 2 levels" in str(w.message)]) == 1
+    assert float(shift) == pytest.approx(_two_level_readout_pull(), abs=1e-12)
+    with pytest.warns(UserWarning, match=r"'r' keeps 2 levels"):
+        pulled = chip.freq(r, when={q: 1})
+    assert float(pulled - chip.freq(r)) == pytest.approx(_two_level_readout_pull(), abs=1e-12)
+    with pytest.warns(UserWarning, match=r"'r' keeps 2 levels") as record:
+        matrix = chip.kerr_matrix()
+    assert len([w for w in record if "keeps 2 levels" in str(w.message)]) == 1
+    assert float(matrix[q, r]) == pytest.approx(_two_level_readout_pull(), abs=1e-12)
+    with pytest.warns(UserWarning, match=r"'r' keeps 2 levels"):
+        traced = jax.jit(lambda scale: chip.dispersive_shift(q, r) * scale)(2.0)
+    assert float(traced) == pytest.approx(2 * _two_level_readout_pull(), abs=1e-12)
+    q1 = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q1")
+    q2 = DuffingTransmon(freq=5.3, anharmonicity=-0.2, levels=3, label="q2")
+    bus = Resonator(freq=6.5, levels=2, label="bus")
+    bus_chip = Chip([q1, q2, bus], [Capacitive(q1, bus, g=0.05), Capacitive(q2, bus, g=0.05)])
+    with pytest.warns(UserWarning, match=r"device 'bus'.*fourth order.*'bus' keeps 2 levels"):
+        bus_chip.static_zz(q1, q2)
+    q2 = DuffingTransmon(freq=5.3, anharmonicity=-0.2, levels=2, label="q2")
+    bus = Resonator(freq=6.5, levels=3, label="bus")
+    bus_chip = Chip([q1, q2, bus], [Capacitive(q1, bus, g=0.05), Capacitive(q2, bus, g=0.05)])
+    with pytest.warns(UserWarning, match=r"fourth order.*'q2' keeps 2 levels.*levels=3 or more on 'q2'"):
+        bus_chip.static_zz(q1, q2)
+
+
+def _coupler_chain(qubit_levels: int) -> tuple[Chip, DuffingTransmon, DuffingTransmon]:
+    """Return two transmons that interact through two couplers in series, so their ZZ starts at sixth order."""
+    q1 = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=qubit_levels, label="q1")
+    c1 = Resonator(freq=6.4, levels=3, label="c1")
+    c2 = Resonator(freq=6.8, levels=3, label="c2")
+    q2 = DuffingTransmon(freq=5.3, anharmonicity=-0.2, levels=qubit_levels, label="q2")
+    couplings = [Capacitive(q1, c1, g=0.1), Capacitive(c1, c2, g=0.1), Capacitive(c2, q2, g=0.1)]
+    return Chip([q1, c1, c2, q2], couplings), q1, q2
+
+
+@pytest.mark.unit
+def test_truncation_warning_follows_counter_rotating_steps_and_long_interaction_paths() -> None:
+    """Exact() reaches a missing level by pair creation, and distant excitations widen the checked orders."""
+    from quchip import Exact
+
+    def exact_pair(qubit_levels: int) -> Chip:
+        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=qubit_levels, label="q")
+        r = Resonator(freq=7.0, levels=5, label="r")
+        return Chip([q, r], [Capacitive(q, r, g=0.105)], approximation=Exact())
+
+    with pytest.warns(UserWarning, match=r"second order.*'q' keeps 2 levels.*levels=3 or more on 'q'"):
+        truncated = exact_pair(2).freq("q")
+    # Pair creation couples |1,0> directly to the missing |2,1>, which moves f01 by about 1.9 MHz.
+    assert float(truncated - exact_pair(3).freq("q")) == pytest.approx(1.865e-3, abs=1e-5)
+    # The ZZ of two couplers in series starts at sixth order, the order at which the missing level 2 of a
+    # two-level transmon enters. That level changes the ZZ by a factor of two.
+    chain, q1, q2 = _coupler_chain(2)
+    with pytest.warns(UserWarning, match=r"sixth order.*'q1' keeps 2 levels.*levels=3 or more on 'q1'"):
+        truncated = chain.static_zz(q1, q2)
+    full, q1, q2 = _coupler_chain(3)
+    assert float(truncated) / float(full.static_zz(q1, q2)) == pytest.approx(0.465, abs=0.01)
+
+
+@pytest.mark.unit
+def test_truncation_warning_reads_the_kept_bands_of_couplings_and_port_pairs() -> None:
+    """A coupling that RWA removes links nothing, and a port pair that creates excitations counts."""
+    from quchip import Coupling, Exact, PortNetwork, RWA
+
+    def pairs(a, b, backend):
+        lower = backend.tensor(a.lowering_operator(), b.lowering_operator())
+        return lower + backend.tensor(backend.dag(a.lowering_operator()), backend.dag(b.lowering_operator()))
+
+    def pair_chip(approximation: RWA | Exact) -> Chip:
+        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
+        r = Resonator(freq=7.0, levels=2, label="r")
+        return Chip([q, r], [Coupling(q, r, g=0.05, interaction=pairs)], approximation=approximation)
+
+    with pytest.warns(UserWarning, match="vanishes entirely under RWA") as record:
+        frequency = pair_chip(RWA()).freq("q", when={"r": 1})
+    assert float(frequency) == pytest.approx(5.0, abs=1e-12)
+    assert not [w for w in record if "keeps 2 levels" in str(w.message)]
+    with pytest.warns(UserWarning, match=r"second order.*'r' keeps 2 levels"):
+        pair_chip(Exact()).freq("q", when={"r": 1})
+
+    def cascade(levels: int) -> Chip:
+        a = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=levels, label="a")
+        b = Resonator(freq=7.0, levels=3, label="b")
+        line = PortNetwork(label="line")
+        # The generated pair L_b^dagger L_a = 0.01 b^dagger a^dagger creates an excitation on each device.
+        up = line.port("a_out", target=a, rate=0.01, operator="a_dag")
+        down = line.port("b_in", target=b, rate=0.01)
+        line.cascade(up, down)
+        line.expose("probe", input=up, output=down)
+        return Chip([a, b], port_network=line, approximation=Exact())
+
+    with pytest.warns(UserWarning, match=r"second order.*'a' keeps 2 levels.*levels=3 or more on 'a'"):
+        truncated = cascade(2).freq("a")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        full = cascade(3).freq("a")
+    # The pair term has strength g = rate / (4 pi) in GHz, and the missing |2,1> lies f_a + f_b + alpha_a
+    # = 11.8 GHz above |1,0>, so the two-level transition is too high by 2 g^2 / 11.8 at second order.
+    assert float(truncated - full) == pytest.approx(2 * (0.01 / (4 * np.pi)) ** 2 / 11.8, rel=1e-3)
+
+
+@pytest.mark.unit
+def test_converged_or_single_excitation_queries_do_not_warn_about_truncation() -> None:
+    """Queries that reach no missing level of a truncated device within two coupling steps stay silent."""
+    from quchip import CrossKerr, Exact, Qubit
+
+    def filtered_readout(filter_levels: int) -> tuple[Chip, DuffingTransmon, Resonator]:
+        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
+        r = Resonator(freq=7.0, levels=4, label="r")
+        f = Resonator(freq=7.02, levels=filter_levels, label="f")
+        return Chip([q, r, f], [Capacitive(q, r, g=0.105), Capacitive(r, f, g=0.0077)]), q, r
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        chip, q, r = _readout_pair(3)
+        chip.dispersive_shift(q, r)
+        chip.freq(r, when={q: 1})
+        two_level, q, r = _readout_pair(2)
+        two_level.freq(q)
+        two_level.freq()
+        qubit = Qubit(freq=5.0, label="q")
+        r = Resonator(freq=7.0, levels=3, label="r")
+        Chip([qubit, r], [Capacitive(qubit, r, g=0.105)]).dispersive_shift(qubit, r)
+        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
+        r = Resonator(freq=7.0, levels=3, label="r")
+        spectator = Resonator(freq=8.0, levels=2, label="spectator")
+        Chip([q, r, spectator], [Capacitive(q, r, g=0.105)]).dispersive_shift(q, r)
+        # A two-level filter behind the readout misses only states three steps away, at sixth order.
+        two_level, q, r = filtered_readout(2)
+        truncated = two_level.freq(r, when={q: 1})
+        # A diagonal coupling moves no excitation, so the missing level 2 of r never mixes in.
+        q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
+        r = Resonator(freq=7.0, levels=2, label="r")
+        diagonal = Chip([q, r], [CrossKerr(q, r, chi=-0.001)])
+        assert float(diagonal.freq(q, when={r: 1})) == pytest.approx(4.999, abs=1e-12)
+        # Under Exact(), a missing level 3 of a three-level transmon needs pair creation and one more step.
+        q1 = DuffingTransmon(freq=5.326, anharmonicity=-0.261, levels=3, label="q1")
+        q2 = DuffingTransmon(freq=5.192, anharmonicity=-0.263, levels=3, label="q2")
+        bus = Resonator(freq=6.3, levels=3, label="bus")
+        exact = Chip([q1, q2, bus], [Capacitive(q1, bus, g=0.03), Capacitive(q2, bus, g=0.03)],
+                     approximation=Exact())
+        exact.freq(q1, when={q2: 1})
+    three_level, q, r = filtered_readout(3)
+    assert float(truncated) == pytest.approx(float(three_level.freq(r, when={q: 1})), abs=1e-7)

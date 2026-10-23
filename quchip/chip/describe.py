@@ -92,7 +92,10 @@ def describe_chip(chip: "Chip") -> str:
 
     title = "Chip" if chip.label is None else f"Chip {chip.label!r}"
     lines += _section(title, "═")
-    frame = chip.frame if isinstance(chip.frame, str) else format_value(chip.frame)
+    if chip.frame is None:
+        frame = "None (lab for statics, rotating for solves)"
+    else:
+        frame = chip.frame if isinstance(chip.frame, str) else format_value(chip.frame)
     lines.append(f"Frame    : {frame}")
     if frame == "auto":
         from quchip.engine.frames import plan_frame
@@ -121,10 +124,11 @@ def describe_chip(chip: "Chip") -> str:
         params = _declared_param_line(dev)
         detail = f"{params}   levels = {dim}" if params else f"levels = {dim}"
         lines.append(f"    {detail}")
+        declared = parameter_fields(type(dev))
         noise = [
             _param_text(name, getattr(dev, name), unit)
             for name, unit in (("T1", "ns"), ("T2", "ns"), ("thermal_occupation", None))
-            if getattr(dev, name) is not None
+            if name not in declared and getattr(dev, name, None) is not None
         ]
         if noise:
             lines.append(f"    {'   '.join(noise)}")
