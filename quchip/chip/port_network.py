@@ -2567,7 +2567,9 @@ class PortNetwork:
                     f"{source!r} at {carrier:.6g} GHz" for source, carrier in zip(sources, carriers, strict=True)
                 )
                 reason = f"their channels rotate at different frequencies: {rates}."
-            raise ValueError(
+            from quchip.engine.frames import IncompatibleFrameError
+
+            raise IncompatibleFrameError(
                 f"PortNetwork cannot statically compose {boundary} from ports {list(sources)} on devices "
                 f"{devices}. In the selected frame, {reason} Use frame=\"lab\". When the ports change the "
                 "total excitation number by the same amount, as lowering ports do, a common frame for these "

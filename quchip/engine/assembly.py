@@ -610,8 +610,15 @@ def _collect_collapse_terms(
     resolved_frame: "ResolvedFrame",
     backend: Backend,
     resolution: _SystemResolution,
+    *,
+    check_frames: bool = True,
 ) -> tuple[tuple[CollapseTerm, ...], tuple[tuple[str, ...], ...]]:
-    """Canonicalize every collapse channel and attach accessible-port metadata."""
+    """Canonicalize every collapse channel and attach accessible-port metadata.
+
+    ``check_frames=False`` skips the frame check of channels that a solve
+    without dissipation leaves out. Ports keep their check, because the port
+    network composes their frame frequencies.
+    """
     labels = tuple(device.label for device in chip.devices)
     terms: list[CollapseTerm] = []
     supports: list[tuple[str, ...]] = []
@@ -641,7 +648,8 @@ def _collect_collapse_terms(
             # retained-coordinate effective channels.
             # Support-free channels (baths) already span the whole chip.
             check_support = support or tuple(range(len(labels)))
-            if (retained_coordinates or len(check_support) > 1) and not _is_concrete_zero(resolved_rate):
+            if (check_frames and (retained_coordinates or len(check_support) > 1)
+                    and not _is_concrete_zero(resolved_rate)):
                 frequencies = tuple(resolved_frame.frequencies[labels[index]] for index in check_support)
                 if not all(maybe_concrete_scalar(frequency) == 0.0 for frequency in frequencies):
                     from quchip.engine.excitation import authored_excitation_changes
@@ -879,6 +887,8 @@ def _frame_frequency_text(frequency: Any) -> str:
 def _band_phase_error(source: str, bands: tuple[Any, ...], frequencies: tuple[Any, ...],
                       devices: tuple[str, ...]) -> ValueError:
     """Name the devices of a static collapse operator whose bands beat, and the frames that can remove it."""
+    from quchip.engine.frames import IncompatibleFrameError
+
     involved = [index for index in range(len(devices)) if any(int(band[index]) for band in bands)]
     texts = [_frame_frequency_text(frequencies[index]) for index in involved]
     rates = texts[0] if len(texts) == 1 else ", ".join(texts[:-1]) + f" and {texts[-1]}"
@@ -892,7 +902,7 @@ def _band_phase_error(source: str, bands: tuple[Any, ...], frequencies: tuple[An
             "The bands change the total excitation number by different amounts, so no nonzero common frame "
             'gives them one phase. Use frame="lab".'
         )
-    return ValueError(
+    return IncompatibleFrameError(
         f"{source} has operator bands with different phases in the selected frame. "
         f"The bands act on devices {[devices[index] for index in involved]}, which have frame frequencies {rates}. "
         f"{advice} Time-dependent collapse operators are not supported."
@@ -2105,6 +2115,7 @@ def compile_hamiltonian_template(
     _local_resolution: _SystemResolution | None = None,
     _base_result: EngineResult | None = None,
     _advisories: list[str] | None = None,
+    _check_collapse_frames: bool = True,
 ) -> HamiltonianTemplate:
     """Compile the invariant Hamiltonian skeleton (H₀, couplings, pre-embedded drive bands).
 
@@ -2210,6 +2221,7 @@ def compile_hamiltonian_template(
         resolved_frame,
         backend,
         resolution,
+        check_frames=_check_collapse_frames,
     )
     slh = ResolvedSLH.from_terms(
         static_terms=static_terms,
@@ -2355,6 +2367,7 @@ def build_engine_result(
     _local_resolution: _SystemResolution | None = None,
     _base_result: EngineResult | None = None,
     _advisories: list[str] | None = None,
+    _check_collapse_frames: bool = True,
 ) -> EngineResult:
     """Compile the template and instantiate one engine-result variant.
 
@@ -2388,6 +2401,7 @@ def build_engine_result(
         _local_resolution=_local_resolution,
         _base_result=_base_result,
         _advisories=_advisories,
+        _check_collapse_frames=_check_collapse_frames,
     )
     return instantiate_engine_result(template, drive_ops, chip)
 
