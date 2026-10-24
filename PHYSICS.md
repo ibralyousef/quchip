@@ -938,6 +938,18 @@ phase sets the axis of the target's conditional rotation, so the pulse names
 the target as its frame with `frame=`. Baseband pulses have no carrier and
 follow no frame.
 
+A pulse whose frame is its line's target takes kθ instead of θ, where k is the
+drive's `carrier_harmonic`. With `U = exp(iθ n)` on the target, the co-rotating
+term `ε exp(iφ) a†^k + h.c.` goes to the same term with phase `φ + kθ`, so a
+`TwoPhotonDrive` pump after `vz(cavity, θ)` takes 2θ. This equivalence holds
+for the co-rotating Hamiltonian under `RWA()`. Under `Exact()` the
+counter-rotating partner does not transform the same way, and transmon
+operators with higher excitation-number bands also break it. Drives without a
+declared `carrier_harmonic`, coherent inputs, and pulses in another device's
+frame keep the θ shift. Such a pulse can need more, for example a two-photon
+pump made by doubling another device's reference; add the missing phase
+explicitly.
+
 A pulse's `detuning` δ offsets its carrier from `freq`, referenced to the pulse
 start `t0`. The delivered complex signal, whose real part drives the line
 (§6.2), is
@@ -2989,6 +3001,18 @@ backend-native operator types, or device-specific noise models beyond asking
 each device for its collapse operators. Devices, couplings and drives supply
 the domain-specific physics, and the engine handles their shared frame and RWA
 bookkeeping.
+
+Backends keep every carrier analytic. dynamiqs evaluates each envelope
+exactly. QuTiP interpolates each windowed envelope linearly on samples, with
+exact nodes at the window edges and at the envelope's own features. Linear
+interpolation with step `h` is off by at most `h² max|f''| / 8`, so QuTiP
+samples each window with `h = sqrt(8 rtol max|f| / max|f''|)`, with `rtol` the
+solver's (default `1e-6`) and `max|f''|` estimated from second differences of
+the samples. The rate is never below 40 points/ns. For a Gaussian,
+`max|f''| / max|f| = 1/σ²`, so `h = σ sqrt(8 rtol)`. A window that would need
+more than 100,000 samples, such as a 12 ns Gaussian at `rtol = 1e-10`, uses
+the exact envelope as a Python callable instead, and quchip warns. Under JAX
+tracing of the times, QuTiP also uses the callable.
 
 ## 13. JAX traceability boundaries
 
