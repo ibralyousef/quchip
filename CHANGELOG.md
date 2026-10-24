@@ -1039,6 +1039,10 @@ upgrade.
   [#89](https://github.com/quchip/quchip/pull/89))
 - Source archives leave out `AGENTS.md`, the repository instructions for
   coding agents. ([#121](https://github.com/quchip/quchip/pull/121))
+- The package version comes from the git tag through setuptools-scm. An
+  install of a commit after a release reports a development version, such as
+  `0.5.1.dev3+g1234abc`, instead of the last release.
+  ([#121](https://github.com/quchip/quchip/pull/121))
 - `tools/theme_figures.py` renders a PDF or dark PNG only when its light SVG
   changed. `--force` renders every figure.
   ([#88](https://github.com/quchip/quchip/pull/88))
