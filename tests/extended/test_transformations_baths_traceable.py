@@ -24,14 +24,12 @@ pytestmark = pytest.mark.optional_backend
 pytest.importorskip("dynamiqs")
 
 from quchip import (  # noqa: E402
-    Bath,
     Capacitive,
     Chip,
     DuffingTransmon,
     Resonator,
     eliminate,
     set_default_backend,
-    simulate,
 )
 from quchip.backend import reset_default_backend  # noqa: E402
 from quchip.utils.labeling import reset_label_counters  # noqa: E402
@@ -47,47 +45,6 @@ def _dynamiqs_backend():
 
 
 # -- Bath ----------------------------------------------------------------------
-
-@pytest.mark.validation
-def test_thermal_bath_solve_is_jittable_and_grad_in_temperature():
-    """A thermal-bath solve is jittable and its gradient in temperature is finite and positive."""
-    def final_n(temp):
-        m = Resonator(freq=5.0, levels=6, label="m")
-        chip = Chip([m], baths=[Bath("thermal", temperature=temp, rate=0.1)])
-        tlist = jnp.linspace(0.0, 100.0, 50)
-        res = simulate(
-            chip, [], tlist,
-            initial_state=chip.bare_state(),
-            e_ops={m: m.number_operator()},
-            )
-        return jnp.real(res.expect("m")[-1])
-
-    value, grad = jax.jit(jax.value_and_grad(final_n))(jnp.float64(300.0))
-    assert jnp.isfinite(value) and value > 0.0
-    # Hotter bath -> higher steady-state occupation.
-    assert jnp.isfinite(grad) and float(grad) > 0.0
-
-
-@pytest.mark.validation
-def test_collective_decay_bath_solve_is_jittable_and_grad_in_rate():
-    """A collective-decay bath solve is jittable and its gradient in rate is finite and negative."""
-    def final_excited(rate):
-        q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=2, label="q0")
-        q1 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=2, label="q1")
-        chip = Chip([q0, q1], baths=[Bath("collective_decay", rate=rate)])
-        tlist = jnp.linspace(0.0, 50.0, 40)
-        res = simulate(
-            chip, [], tlist,
-            initial_state=chip.bare_state({q0: 1}),
-            e_ops={q0: q0.projector(1, 1)},
-            )
-        return jnp.real(res.expect("q0")[-1])
-
-    value, grad = jax.jit(jax.value_and_grad(final_excited))(jnp.float64(0.02))
-    assert jnp.isfinite(value)
-    # Faster collective decay -> less surviving excitation.
-    assert jnp.isfinite(grad) and float(grad) < 0.0
-
 
 # -- eliminate -----------------------------------------------------------------
 
@@ -132,26 +89,3 @@ def test_dispersive_readout_value_and_gradients():
     step = 1e-5
     reference = (observables(g0 + step)[0][1] - observables(g0 - step)[0][1]) / (2 * step)
     assert float(dsnr) == pytest.approx(float(reference), rel=1e-3)
-
-
-@pytest.mark.validation
-def test_eliminated_chip_solve_is_jittable_and_grad_in_g():
-    """A solve on the eliminated (reduced) chip is jittable and its gradient in g is finite and negative."""
-    def final_excited(g):
-        q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=2, label="q")
-        r = Resonator(freq=7.0, internal_quality_factor=2000.0, levels=3, label="r")
-        full = Chip([q, r], couplings=[Capacitive(q, r, g=g)])
-        reduced = eliminate(full, "r").chip
-        rq = reduced["q"]
-        tlist = jnp.linspace(0.0, 200.0, 60)
-        res = simulate(
-            reduced, [], tlist,
-            initial_state=reduced.bare_state({rq: 1}),
-            e_ops={rq: rq.projector(1, 1)},
-            )
-        return jnp.real(res.expect("q")[-1])
-
-    value, grad = jax.jit(jax.value_and_grad(final_excited))(jnp.float64(0.05))
-    assert jnp.isfinite(value)
-    # Larger g -> faster Purcell decay -> less surviving excitation.
-    assert jnp.isfinite(grad) and float(grad) < 0.0

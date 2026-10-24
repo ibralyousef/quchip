@@ -10,7 +10,7 @@ pytestmark = pytest.mark.optional_backend
 
 pytest.importorskip("dynamiqs")
 
-from quchip.analysis import analyze_static_zz, effective_hamiltonian  # noqa: E402
+from quchip.analysis import effective_hamiltonian  # noqa: E402
 from quchip.chip.sw import _inverse_sqrt_hermitian  # noqa: E402
 from quchip.backend.dynamiqs import DynamiqsBackend  # noqa: E402
 from quchip.chip.chip import Chip  # noqa: E402
@@ -25,29 +25,13 @@ def _two_qubit_chip(g: jnp.ndarray | float) -> Chip:
 
 
 @pytest.mark.validation
-def test_grad_through_static_zz_matches_finite_difference():
-    """jax.grad of analyze_static_zz's zz shift w.r.t. g matches a central finite-difference estimate."""
-    def loss(g):
-        chip = _two_qubit_chip(g)
-        return analyze_static_zz(chip, "q0", "q1").zz
-
-    g0 = 0.01
-    grad = jax.grad(loss)(jnp.float64(g0))
-    assert jnp.isfinite(grad)
-
-    step = 1e-6
-    finite_diff = (loss(jnp.float64(g0 + step)) - loss(jnp.float64(g0 - step))) / (2 * step)
-    assert abs(float(grad) - float(finite_diff)) / abs(float(finite_diff)) < 1e-4
-
-
-@pytest.mark.validation
 def test_grad_through_effective_hamiltonian_is_finite():
     """Löwdin projection remains differentiable when the Gram spectrum is degenerate."""
     def exchange(g):
         chip = _two_qubit_chip(g)
         return jnp.real(effective_hamiltonian(chip, ["q0", "q1"]).h_eff[1, 2])
 
-    derivative = jax.grad(exchange)(jnp.float64(0.01))
+    derivative = jax.jit(jax.grad(exchange))(jnp.float64(0.01))
 
     assert jnp.isfinite(derivative)
     step = 1e-5

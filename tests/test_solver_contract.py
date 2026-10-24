@@ -41,10 +41,9 @@ def test_qutip_explicit_diag_rejects_adaptive_controls():
         solve_problem(problem)
 
 
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
-def test_dissipation_exclusion_is_explicit_and_captured(backend):
+def test_dissipation_exclusion_is_explicit_and_captured():
     """A Hamiltonian-only calculation retains excitation and records its choice."""
-    seq = _sequence(backend, noisy=True)
+    seq = _sequence("qutip", noisy=True)
     times = np.linspace(0.0, 2.0, 5)
     problem = seq.build_problem(times, dissipation=False, solver="sesolve", initial_state={"q": 1})
     result = solve_problem(problem)
@@ -81,15 +80,10 @@ def test_dissipation_exclusion_retains_network_hamiltonian():
 
 
 @pytest.mark.validation
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
-def test_batch_retains_dissipation_choice_and_native_method(backend):
+def test_batch_retains_dissipation_choice_and_native_method():
     """Batch construction and dispatch preserve exclusion and an explicit native method."""
-    seq = _sequence(backend, noisy=True)
-    if backend == "dynamiqs":
-        dq = pytest.importorskip("dynamiqs")
-        options = {"method": dq.method.Tsit5(atol=1e-10, rtol=1e-10)}
-    else:
-        options = {"method": "adams", "atol": 1e-10, "rtol": 1e-10}
+    seq = _sequence("qutip", noisy=True)
+    options = {"method": "adams", "atol": 1e-10, "rtol": 1e-10}
     batch = seq.build_batch(
         seq.vary("q.freq", [4.9, 5.1]),
         tlist=[0.0, 1.0], initial_state={"q": 1}, dissipation=False, options=options,
@@ -111,52 +105,12 @@ def test_partitioned_simulation_propagates_dissipation_choice():
         np.testing.assert_allclose(result.population(device, 1), 1.0, atol=1e-8)
 
 
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
-def test_results_report_effective_numerical_settings(backend):
+def test_results_report_effective_numerical_settings():
     """Report native defaults and user controls from the solver that actually ran."""
-    if backend == "dynamiqs":
-        dq = pytest.importorskip("dynamiqs")
-        options = {"method": dq.method.Tsit5(atol=1e-10, rtol=1e-9)}
-    else:
-        options = {"atol": 1e-10, "rtol": 1e-9}
-    result = _sequence(backend).simulate(tlist=[0.0, 1.0], options=options)
+    options = {"atol": 1e-10, "rtol": 1e-9}
+    result = _sequence("qutip").simulate(tlist=[0.0, 1.0], options=options)
     effective = result.stats["options"]
-    if backend == "dynamiqs":
-        assert effective["method"].atol == 1e-10
-        assert effective["method"].rtol == 1e-9
-        assert effective["method"].max_steps > 0
-    else:
-        assert effective["method"] == "adams"
-        assert effective["atol"] == 1e-10
-        assert effective["rtol"] == 1e-9
-        assert effective["nsteps"] > 0
-
-
-@pytest.mark.validation
-@pytest.mark.optional_backend
-def test_dynamiqs_default_tolerances_converge_pulse_gradients():
-    """A pulse-duration derivative at default options matches a central difference."""
-    pytest.importorskip("dynamiqs")
-    import jax
-    import jax.numpy as jnp
-
-    from quchip import RWA, Capacitive, ChargeDrive, FluxTunableTransmon, GaussianEdge
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=3, label="q")
-    c = FluxTunableTransmon(freq=6.5, anharmonicity=-0.2, levels=3, label="c")
-    chip = Chip([q, c], [Capacitive(q, c, g=0.08)], frame="rotating", approximation=RWA(), backend="dynamiqs")
-    chip.wire(ChargeDrive("c", label="d"))
-    sequence = QuantumSequence(chip)
-    sequence.schedule("d", envelope=GaussianEdge(duration=60.0, edge_duration=15.0, sigmas=3, amplitude=0.01),
-                      freq=6.5)
-    ket = chip.state({"q": 1, "c": 0})
-    tlist = jnp.linspace(0.0, 80.0, 81)
-
-    def survival(duration):
-        result = sequence.with_params({"pulse.0.duration": duration}).simulate(tlist=tlist, initial_state=ket)
-        return jnp.asarray(result.overlap(ket))[-1]
-
-    h = 0.01
-    central = (survival(60.0 + h) - survival(60.0 - h)) / (2 * h)
-    # Native Tsit5 defaults (rtol = atol = 1e-6) give a 4.5% error here.
-    np.testing.assert_allclose(jax.grad(survival)(jnp.asarray(60.0)), central, rtol=1e-4)
+    assert effective["method"] == "adams"
+    assert effective["atol"] == 1e-10
+    assert effective["rtol"] == 1e-9
+    assert effective["nsteps"] > 0

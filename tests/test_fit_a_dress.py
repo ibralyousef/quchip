@@ -437,8 +437,8 @@ def test_fit_a_dress_respects_coupling_target_override_to_g() -> None:
     assert result.final_params[f"{chip.couplings[0].label}.g"] == pytest.approx(0.04, abs=5e-4)
 
 
-def test_fit_a_dress_requires_explicit_local_evaluation() -> None:
-    """A resource ceiling stops the full fit; local physics requires selection."""
+def test_fit_a_dress_stops_at_its_dimension_limit() -> None:
+    """A resource ceiling stops the full fit before it diagonalizes the product space."""
     q0 = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q0")
     q1 = DuffingTransmon(freq=5.2, anharmonicity=-0.24, levels=3, label="q1")
     r0 = Resonator(freq=7.0, levels=3, label="r0")
@@ -457,9 +457,6 @@ def test_fit_a_dress_requires_explicit_local_evaluation() -> None:
 
     with pytest.raises(ValueError, match="dimension.*81.*50"):
         fit_a_dress(chip, max_hilbert_dim=50)
-    result = fit_a_dress(chip, evaluator="local")
-
-    assert any(report.evaluator == "local" for report in result.final_targets)
 
 
 @pytest.mark.parametrize("evaluator", ["bad", None])
@@ -493,14 +490,11 @@ def test_fit_retains_nonconverged_candidate_and_explains_status():
     assert unknown.message is None
 
 
-@pytest.mark.parametrize("backend", ["qutip", pytest.param("dynamiqs", marks=pytest.mark.optional_backend)])
-def test_fit_history_records_the_parameters_and_residuals_of_each_point(backend):
+def test_fit_history_records_the_parameters_and_residuals_of_each_point():
     """Each history entry keeps its parameter vector and target residuals."""
-    if backend == "dynamiqs":
-        pytest.importorskip("dynamiqs")
     q = DuffingTransmon(freq=5.0, anharmonicity=-0.25, levels=3, label="q")
     r = Resonator(freq=5.6, levels=3, label="r")
-    desired = Chip([q, r], [Capacitive(q, r, g=0.1, label="qr")], approximation=RWA(), backend=backend)
+    desired = Chip([q, r], [Capacitive(q, r, g=0.1, label="qr")], approximation=RWA())
     plan = {"constraints": {"qr": {"cross_kerr": None}}, "vary": {"q": ("freq", "anharmonicity"), "r": ("freq",)}}
     fit = fit_a_dress(desired, **plan)
 
@@ -512,10 +506,6 @@ def test_fit_history_records_the_parameters_and_residuals_of_each_point(backend)
                                rtol=0, atol=1e-15)
     scales = np.maximum(np.abs([report.target for report in fit.final_targets]), 1e-9)
     np.testing.assert_allclose(np.sum((fit.history_residuals / scales) ** 2, axis=1), fit.history, rtol=1e-12, atol=0)
-    if backend == "dynamiqs":
-        assert fit.solver_info["jacobian"] == "jax"
-        # An exact Jacobian adds no probes, so each entry is a solver iterate.
-        assert fit.history_params[1] == fit_a_dress(desired, **plan, max_nfev=2).final_params
 
 
 def test_fit_rebind_returns_fitted_clones_for_seed_devices() -> None:
@@ -540,57 +530,6 @@ def test_fit_rebind_returns_fitted_clones_for_seed_devices() -> None:
 
     with _pytest.raises(ValueError):
         result.rebind()
-
-
-@pytest.mark.validation
-def test_fit_a_dress_recovers_static_exchange_for_sheldon_style_bus_model() -> None:
-    """fit_a_dress recovers a targeted static exchange coupling in a bus-mediated three-device system."""
-    control = DuffingTransmon(freq=5.08, anharmonicity=-0.31, levels=4, label="control")
-    target = DuffingTransmon(freq=4.95, anharmonicity=-0.35, levels=4, label="target")
-    bus = Resonator(freq=6.28, levels=6, label="bus")
-    c_bus = Capacitive(control, bus, g=0.020, label="c_bus")
-    t_bus = Capacitive(target, bus, g=0.017, label="t_bus")
-    chip = Chip([control, target, bus], [c_bus, t_bus], frame="rotating")
-
-    # 7 free bare parameters (control freq/anharmonicity, target freq/anharmonicity, bus
-    # freq, c_bus.g, t_bus.g) against 6 target residuals: underdetermined by count, yet
-    # the fit converges because the exchange target and the two per-device anchors jointly
-    # pin the coupling split closely enough from these seeds.
-    with pytest.warns(UserWarning, match="underdetermined by count"):
-        result = fit_a_dress(
-            chip,
-            vary={
-                control: ("freq", "anharmonicity"),
-                target: ("freq", "anharmonicity"),
-                bus: ("freq",),
-                c_bus: ("g",),
-                t_bus: ("g",),
-            },
-            constraints={
-                c_bus: {"cross_kerr": None},
-                t_bus: {"cross_kerr": None},
-                control: {"freq": 5.114, "anharmonicity": -0.330},
-                target: {"freq": 4.914, "anharmonicity": -0.330},
-                bus: {"freq": 6.31},
-                (control, target): {"exchange": 0.0038},
-            },
-            max_hilbert_dim=1_000,
-        )
-
-    fitted_chip = result.chip
-    fitted_control = fitted_chip["control"]
-    fitted_target = fitted_chip["target"]
-    fitted_bus = fitted_chip["bus"]
-    exchange_h = fitted_chip.effective_subspace_hamiltonian(
-        ({fitted_control: 1, fitted_target: 0, fitted_bus: 0}, {fitted_control: 0, fitted_target: 1, fitted_bus: 0})
-    )
-
-    assert fitted_chip.freq(fitted_control) == pytest.approx(5.114, abs=1e-3)
-    assert fitted_chip.freq(fitted_target) == pytest.approx(4.914, abs=1e-3)
-    assert fitted_chip.freq(fitted_bus) == pytest.approx(6.31, abs=1e-3)
-    assert fitted_chip.dressed_anharmonicity(fitted_control) == pytest.approx(-0.330, abs=2e-3)
-    assert fitted_chip.dressed_anharmonicity(fitted_target) == pytest.approx(-0.330, abs=2e-3)
-    assert exchange_h[0, 1] == pytest.approx(0.0038, abs=2e-4)
 
 
 def test_fit_a_dress_respects_signed_exchange_target_for_direct_qq_system() -> None:

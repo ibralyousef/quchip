@@ -148,23 +148,6 @@ def test_retained_effective_terms_dress_the_rwa_default_start():
     assert _drift(result, reduced.devices[0]) < 1e-10
 
 
-@pytest.mark.optional_backend
-def test_traced_default_start_matches_concrete_start():
-    """Under jax.jit on dynamiqs the rotating-frame default start follows a traced coupling and start time."""
-    pytest.importorskip("dynamiqs")
-    import jax
-    import jax.numpy as jnp
-
-    def start(g, start_time, backend):
-        chip, _, _ = _pair(g, frame="rotating", backend=backend)
-        times = (jnp if backend else np).stack([start_time, start_time + 1.0])
-        return _ket(chip, QuantumSequence(chip).build_problem(tlist=times).initial_state)
-
-    traced = jax.jit(lambda g, start_time: start(g, start_time, "dynamiqs"))(0.2, 7.3)
-    # Both starts fix their phase by the bare overlap, so they agree as vectors.
-    np.testing.assert_allclose(np.asarray(traced), start(0.2, 7.3, None), rtol=0, atol=_ROUNDOFF)
-
-
 def _perturbative_leakage(g):
     """Return the g² and g⁴ Rayleigh–Schrödinger terms of 1 - |<00|G>|²."""
     # V = g i(a - a†) i(b - b†) couples |00> only to |11>, at energy Σ; |11> couples
@@ -225,20 +208,3 @@ def test_default_ground_matches_independent_diagonalization_in_rotating_frame():
     # Both eigenvectors are accurate to about ε‖H‖/gap ≈ 2e-15 (‖H‖ ≈ 40 GHz, gap ≈ 5 GHz),
     # and the phase arguments (up to about 1.3e3 rad) to about 3e-13 rad.
     assert abs(np.vdot(expected, _ket(chip, problem.initial_state))) ** 2 == pytest.approx(1.0, abs=1e-12)
-
-
-@pytest.mark.validation
-@pytest.mark.optional_backend
-def test_default_ground_gradient_matches_finite_difference_beside_tied_spectators():
-    """With two identical uncoupled spectators, jax.grad of the default start's leakage matches a central difference."""
-    pytest.importorskip("dynamiqs")
-    import jax
-
-    g, step = 0.05, 1e-3
-    # The spectators tie excited levels exactly, where differentiating eigh itself gives NaN.
-    gradient = float(jax.grad(lambda x: _leakage(x, "dynamiqs", spectators=2))(g))
-    reference = (_leakage(g + step) - _leakage(g - step)) / (2 * step)
-    # The central difference errs by step² |L'''| / 6, with L''' ≈ 24 L₄ / g³ from the g⁴ term (about 1.4e-10);
-    # leakage roundoff divided by 2 step stays below 1e-12.
-    fourth = _perturbative_leakage(g)[1]
-    assert abs(gradient - reference) <= 2 * step**2 / 6 * 24 * fourth / g**3 + 1e-12

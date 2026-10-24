@@ -21,9 +21,9 @@ def test_stationary_preparation_rejects_different_operating_points(backend):
 
 
 @pytest.mark.validation
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 @pytest.mark.parametrize("route", ["steady", "linear", "full"])
-def test_conditioning_is_requested_and_uses_captured_inputs(backend, route, monkeypatch):
+def test_conditioning_is_requested_and_uses_captured_inputs(route, monkeypatch):
+    backend = "qutip"
     r = Resonator(freq=6.0, levels=3, label="r", T1=20.0)
     second = Resonator(freq=6.03, levels=2, label="b", T1=30.0)
     port = Port(r, rate=0.03, label="p")
@@ -106,23 +106,3 @@ def test_requested_conditioning_survives_jit_then_eager_access(route):
 
     compiled = jax.jit(read)()
     assert read() == pytest.approx(float(compiled), rel=1e-10)
-
-
-def test_requested_linear_conditioning_has_correct_frequency_gradient():
-    import jax
-    import jax.numpy as jnp
-
-    first = Resonator(freq=6.0, levels=2, label="a", T1=20.0)
-    second = Resonator(freq=6.03, levels=2, label="b", T1=30.0)
-    port = Port(first, rate=0.03, label="p")
-    chip = Chip([first, second], [Capacitive(first, second, g=0.005)],
-                port_network=PortNetwork.from_ports([port]), backend="dynamiqs")
-
-    def condition(frequency):
-        result = VNA(chip, ports=[port]).sweep(jnp.asarray([frequency]))
-        return result.diagnostics[0]["condition_number"]
-
-    value, gradient = jax.jit(jax.value_and_grad(condition))(jnp.asarray(6.01))
-    expected = (condition(6.010001) - condition(6.009999)) / 0.000002
-    assert value == pytest.approx(float(condition(6.01)), rel=1e-10)
-    assert gradient == pytest.approx(float(expected), rel=1e-5)

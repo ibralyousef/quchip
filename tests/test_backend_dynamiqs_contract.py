@@ -259,8 +259,7 @@ def test_backend_operator_factories_match_dynamiqs(dynamiqs_backend, layout) -> 
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("offsets", [(), (-1, 0, 2), (5,), (-5,)])
-@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize(("offsets", "batched"), [((), True), ((-1, 0, 2), False), ((5,), True), ((-5,), False)])
 def test_sparse_operator_payloads_preserve_values_and_gradients(dynamiqs_backend, offsets, batched) -> None:
     """Empty and nonempty sparse operators retain their dimensions, batches and traced payloads."""
     import dynamiqs as dq
@@ -376,6 +375,7 @@ def test_matmul_matches_operator_arithmetic(dynamiqs_backend) -> None:
         npt.assert_allclose(np.asarray(ours), np.asarray(reference), rtol=0, atol=1e-14)
 
 
+@pytest.mark.validation
 def test_batch_over_a_carrier_that_includes_zero_matches_qutip(dynamiqs_backend) -> None:
     """A freq axis through 0.0 changes the simplified signal tree at that point; dynamiqs still stacks it."""
     from quchip import ChargeDrive, DuffingTransmon, Gaussian, QuantumSequence, RWA

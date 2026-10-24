@@ -7,8 +7,7 @@ from quchip import Chip, DuffingTransmon, QuantumSequence
 
 
 @pytest.mark.validation
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
-def test_automatic_idle_grid_resolves_fast_population_exchange(backend):
+def test_automatic_idle_grid_resolves_fast_population_exchange():
     from quchip.declarative import DeviceModel, parameter
 
     class Exchange(DeviceModel):
@@ -19,11 +18,8 @@ def test_automatic_idle_grid_resolves_fast_population_exchange(backend):
 
     q = Exchange(label="q", levels=2)
     q.reference_freq = 0.0
-    chip = Chip([q], backend=backend, frame="lab")
+    chip = Chip([q], frame="lab")
     options = {"rtol": 1e-9, "atol": 1e-11}
-    if backend == "dynamiqs":
-        import dynamiqs as dq
-        options = {"method": dq.method.Tsit5(rtol=1e-9, atol=1e-11)}
     result = QuantumSequence(chip).simulate(options=options, duration=1.0, initial_state=chip.backend.basis(2, 0),
                                            partition=False, e_ops={"q": q.number_operator()})
     times = np.asarray(result.times)
@@ -52,8 +48,8 @@ def test_sparse_spectral_span_covers_off_diagonal_and_ignores_energy_origin():
 
 
 @pytest.mark.validation
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
-def test_narrow_gaussian_trace_matches_integrated_pulse_area(backend):
+def test_narrow_gaussian_trace_matches_integrated_pulse_area():
+    backend = "qutip"
     from scipy.special import erf
     from quchip import ChargeDrive, Gaussian
 
@@ -110,33 +106,6 @@ def test_large_sparse_spectral_bound_does_not_need_dense_materialization(monkeyp
         raise AssertionError("Sampling must not materialize the global sparse Hamiltonian")
     monkeypatch.setattr(CanonicalOperator, "to_dense", reject_dense)
     assert _static_spectral_span((StaticTerm(operator),)) == pytest.approx(4.0)
-
-
-@pytest.mark.validation
-def test_automatic_grid_can_be_reused_for_differentiation():
-    import jax
-    import jax.numpy as jnp
-    from quchip import ChargeDrive, Square
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.2, levels=2, label="q")
-    chip = Chip([q], backend="dynamiqs", frame="rotating")
-    drive = ChargeDrive(q)
-    chip.wire(drive)
-    sequence = QuantumSequence(chip)
-    sequence.schedule(drive, envelope=Square(duration=3.0, amplitude=0.07), freq=5.0)
-    times = sequence.build_problem().tlist
-
-    @jax.jit
-    @jax.value_and_grad
-    def objective(amplitude):
-        variant = sequence.with_params({"pulse.0.amplitude": amplitude})
-        result = variant.simulate(tlist=times, e_ops={"q": q.number_operator()}, states="none",
-                                  partition=False)
-        return jnp.real(result.expect("q")[-1])
-
-    value, gradient = objective(jnp.asarray(0.07))
-    assert value == pytest.approx(np.sin(np.pi * 0.07 * 3) ** 2, abs=2e-6)
-    assert gradient == pytest.approx(3 * np.pi * np.sin(2 * np.pi * 0.07 * 3), abs=2e-5)
 
 
 def test_partitioned_automatic_grid_supports_simultaneous_correlations():

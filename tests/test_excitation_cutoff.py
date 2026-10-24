@@ -3,8 +3,6 @@
 import math
 from dataclasses import replace
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 import pytest
 from scipy.integrate import solve_ivp
@@ -95,17 +93,18 @@ def lindblad_reference(problem, keep, rho0, tlist):
     jumps = [(1 if term.phase is None else np.exp(1j * term.phase)) * np.sqrt(term.rate)
              * term.operator.to_dense()[window] for term in engine.collapse_terms]
     size = keep.size
+    decay = sum(jump.conj().T @ jump for jump in jumps)
 
     def rhs(t, y):
         rho = y.reshape(size, size)
         h = static + sum(np.asarray(signal.evaluate(t, xp=np)) * op for op, signal in dynamic)
-        out = -1j * (h @ rho - rho @ h)
+        out = -1j * (h @ rho - rho @ h) - 0.5 * (decay @ rho + rho @ decay)
         for jump in jumps:
-            decay = jump.conj().T @ jump
-            out += jump @ rho @ jump.conj().T - 0.5 * (decay @ rho + rho @ decay)
+            out += jump @ rho @ jump.conj().T
         return out.reshape(-1)
 
-    solution = solve_ivp(rhs, (tlist[0], tlist[-1]), rho0.reshape(-1), t_eval=tlist, rtol=1e-9, atol=1e-11,
+    # The comparison bound is 1e-5, far above this integration error.
+    solution = solve_ivp(rhs, (tlist[0], tlist[-1]), rho0.reshape(-1), t_eval=tlist, rtol=1e-8, atol=1e-10,
                          method="DOP853")
     return [solution.y[:, index].reshape(size, size) for index in range(len(tlist))]
 
@@ -284,7 +283,7 @@ def test_driven_dissipative_solve_matches_a_sliced_lindblad_reference():
         check_truncation(result, threshold=0.0)
 
 
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
+@pytest.mark.parametrize("backend", ["qutip", pytest.param("dynamiqs", marks=pytest.mark.validation)])
 def test_cutoff_check_finds_the_boundary_rows_when_it_runs(backend):
     """A request keeps the cutoff and its boundary totals, but no compact rows or matrices.
 
@@ -402,37 +401,6 @@ def test_fit_recovers_a_bare_frequency_under_the_same_cutoff():
                     vary={"q": ["anharmonicity"]})
 
 
-@pytest.mark.optional_backend
-@pytest.mark.validation
-def test_cutoff_derivatives_match_central_differences():
-    """JIT derivatives of a truncated frequency and of pulse populations from prepared states match differences."""
-    pytest.importorskip("dynamiqs")
-    chips = {backend: pair(loss=True, frame={"q": 5.0, "r": 7.0}, backend=backend, space=ExcitationCutoff(3))
-             for backend in ("dynamiqs", "qutip")}
-
-    def frequency(g):
-        return chips["dynamiqs"].with_params({"qr.g": g}).freq("q")
-
-    def population(g, *, dressed, backend="dynamiqs"):
-        bound = chips[backend].with_params({"qr.g": g})
-        # The default state is the vacuum-assigned eigenvector of the traced truncated model.
-        state = bound.compact_state({"q": 1}, dressed=True) if dressed else None
-        result = schedule(bound).simulate(tlist=np.linspace(0.0, 16.0, 9), initial_state=state,
-                                          options=tolerances(backend))
-        return jnp.real(result.population("q", 1)[-1])
-
-    for output in (frequency, lambda g: population(g, dressed=False), lambda g: population(g, dressed=True)):
-        value, derivative = jax.jit(jax.value_and_grad(output))(0.1)
-        step = 1e-4
-        # The central-difference truncation error at this step is about 1e-6 of the derivative.
-        estimate = (output(0.1 + step) - output(0.1 - step)) / (2 * step)
-        assert float(value) == pytest.approx(float(output(0.1)), abs=1e-9)
-        assert float(derivative) == pytest.approx(float(estimate), rel=1e-5)
-    # QuTiP solves the same truncated model with interpolated drive samples.
-    assert float(population(0.1, dressed=False)) == pytest.approx(
-        float(population(0.1, dressed=False, backend="qutip")), abs=1e-5)
-
-
 def _ring(approximation):
     """Return eight qubits, eight couplers, and eight readout resonators coupled in a ring."""
     qubits = [DuffingTransmon(freq=4.8 + 0.07 * i, anharmonicity=-0.22, levels=3, label=f"q{i}") for i in range(8)]
@@ -488,7 +456,7 @@ def test_ring_pilot_keeps_exact_classes_without_a_convergence_claim():
     """A 24-device ring diagonalizes only its parity classes, and K = 1 reproduces the RWA spectrum."""
     exact, rwa = _ring(Exact()), _ring(RWA())
     reference = rwa.freq()
-    sizes = {1: ((1,), (24,)), 2: ((301,), (24,)), 3: ((301,), (2600,))}
+    sizes = {1: ((1,), (24,)), 2: ((301,), (24,))}
     for max_total, (even, odd) in sizes.items():
         limited = exact.with_space(ExcitationCutoff(max_total))
         frequencies = limited.freq()

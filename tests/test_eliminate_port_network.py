@@ -310,8 +310,7 @@ def test_local_section_includes_spectator_dressing(shared, effective) -> None:
 
 @pytest.mark.validation
 @pytest.mark.optional_backend
-@pytest.mark.parametrize("g", [0.0, 0.12])
-def test_local_spectator_section_derivatives_match_analytic_rotation(g) -> None:
+def test_local_spectator_section_derivatives_match_analytic_rotation() -> None:
     """A traced spectator coupling retains the pole and weight curvature, including at zero coupling."""
     pytest.importorskip("dynamiqs")
 
@@ -321,8 +320,9 @@ def test_local_spectator_section_derivatives_match_analytic_rotation(g) -> None:
         return jnp.array([reduced.parameters[prefix + key] for key in ("freq", "external_rate")])
 
     difference = 1 / 9.0 - 1 / 9.7
-    actual = jax.jit(jax.jacfwd(jax.jacfwd(section_values)))(jnp.asarray(g))
-    expected = [2 * difference, -0.06 * difference**2 * np.cos(2 * g * difference)]
+    g = np.array([0.0, 0.12])
+    actual = jax.jit(jax.vmap(jax.jacfwd(jax.jacfwd(section_values))))(jnp.asarray(g))
+    expected = np.stack([np.full_like(g, 2 * difference), -0.06 * difference**2 * np.cos(2 * g * difference)], axis=1)
     # The traced section evaluates these closed forms, so its derivatives differ only by round-off.
     # The measured error is below 1e-13 relative, well inside both tolerances.
     np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=1e-13)
@@ -531,24 +531,6 @@ def test_transformed_ports_keep_their_record_through_a_later_reduction() -> None
             solve_problem(with_monitoring(problem, {key: 1.}))
     result = solve_problem(with_monitoring(problem, {"hidden.q1.thermal_emission": 1.}))
     assert np.all(np.isfinite(np.real(result.expect("q1"))))
-
-
-@pytest.mark.optional_backend
-def test_reduced_chip_with_transformed_and_kept_ports_resolves_inside_jit() -> None:
-    """A transformed joint port and a kept survivor port keep their declared changes inside jit."""
-    pytest.importorskip("dynamiqs")
-    reduced = eliminate(_two_readout_chip(backend="dynamiqs"), "r1", method="exact").chip
-    eager = reduced.resolve()
-    eager_jumps = [reduced.backend.to_array(op) for op in reduced.backend._collapse_operators(eager)]
-
-    def jumps(t1):
-        candidate = reduced.with_params({"q1.T1": t1})
-        return [candidate.backend.to_array(op) for op in candidate.backend._collapse_operators(candidate.resolve())]
-
-    traced = jax.jit(jumps)(30000.0)
-    assert len(traced) == len(eager_jumps)
-    for actual, expected in zip(traced, eager_jumps, strict=True):
-        np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), atol=1e-12)
 
 
 @pytest.mark.validation

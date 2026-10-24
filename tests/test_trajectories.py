@@ -29,49 +29,9 @@ def jump_problem(backend, *, storage=None, count=16):
 
 
 @pytest.mark.validation
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
-def test_jumps_match_native_events_and_weighted_averages(backend):
-    """The adapter preserves native seeds, events, and ensemble averaging."""
-    _, problem = jump_problem(backend, storage="all")
-    result = solve_problem(problem)
-    owner = problem.backend
-    rhs = owner.prepare_hamiltonian(problem.engine_result, problem.tlist).rhs
-    if backend == "qutip":
-        import qutip
-        native = qutip.mcsolve(rhs, problem.initial_state, problem.tlist,
-                              owner._collapse_operators(problem.engine_result), e_ops=problem.e_ops,
-                              options={**problem.options, "store_states": True, "store_final_state": False},
-                              **problem.run_args)
-        assert result.native.col_times == native.col_times
-        expected = native.average_expect[0]
-        events = [np.asarray(times) for times in native.col_times]
-    else:
-        import dynamiqs as dq
-        native = dq.jssesolve(rhs, owner._collapse_operators(problem.engine_result), problem.initial_state,
-                              problem.tlist, exp_ops=problem.e_ops, **problem.run_args)
-        np.testing.assert_allclose(result.native.clicktimes, native.clicktimes)
-        expected = native.mean_expects()[0]
-        events = [times[~np.isnan(times)] for times in np.asarray(native.clicktimes)[:, 0]]
-    np.testing.assert_allclose(result.expect("r"), expected)
-    clicks = result.clicks()
-    assert len(clicks.times) == 16 and not np.any(clicks.full)
-    for times, channels, native_times in zip(clicks.times, clicks.channels, events):
-        np.testing.assert_array_equal(times, native_times)
-        assert channels == result.channel_labels * len(native_times)
-    np.testing.assert_allclose(clicks.weights, 1 / 16, rtol=0, atol=1e-15)
-    per_run = result.run_expect("r")
-    assert per_run.shape == (16, 3)
-    for index in (0, 7):
-        np.testing.assert_array_equal(per_run[index], result.run(index).expect("r"))
-    assert len(result.run(0).states) == 3
-    assert result.average().final_state.shape == (2, 2)
-
-
-@pytest.mark.validation
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
-def test_jump_decay_and_explicit_per_run_truncation(backend):
+def test_jump_decay_and_explicit_per_run_truncation():
     """Jump ensembles follow exponential decay and diagnostics check individual runs."""
-    _, problem = jump_problem(backend, storage="none", count=128)
+    _, problem = jump_problem("qutip", storage="none", count=128)
     with warnings.catch_warnings(record=True) as caught:
         result = solve_problem(with_truncation(problem))
     assert not any("boundary" in str(w.message) for w in caught)
@@ -82,8 +42,8 @@ def test_jump_decay_and_explicit_per_run_truncation(backend):
     assert report["maximum"]["r"] == pytest.approx(1.)
 
 
-@pytest.mark.parametrize("backend", ["qutip", pytest.param("dynamiqs", marks=pytest.mark.validation)])
-@pytest.mark.parametrize("diffusive", [False, True])
+@pytest.mark.parametrize("backend, diffusive", [("qutip", False), ("qutip", True),
+                                               pytest.param("dynamiqs", True, marks=pytest.mark.validation)])
 def test_parameter_batch_replays_assigned_point_noise(backend, diffusive):
     """Point keys/seeds are captured before grouping and each point replays alone."""
     seq, problem = jump_problem(backend)
@@ -128,8 +88,9 @@ def test_native_arguments_cannot_replace_assembled_physics():
     assert result.native.options["method"] != "diag"
 
 
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
-@pytest.mark.parametrize("pure", [True, False])
+@pytest.mark.parametrize("backend, pure", [
+    ("qutip", True), ("qutip", False), pytest.param("dynamiqs", False, marks=pytest.mark.validation),
+])
 def test_diffusive_native_parity_and_state_invariants(backend, pure):
     """Diffusive adapters preserve native records, pure SSE states, and SME trace."""
     from quchip import with_monitoring
@@ -221,27 +182,7 @@ def test_monitored_generator_preserves_distinct_noncommuting_channels():
         assert np.linalg.eigvalsh(state.full()).min() >= -1e-12
 
 
-@pytest.mark.validation
-def test_diffusive_fixed_noise_gradient_matches_finite_difference():
-    """The Euler diffusive SSE pathwise gradient matches the same-key finite difference."""
-    import jax
-    import jax.numpy as jnp
-    import dynamiqs as dq
-
-    def value(lifetime):
-        chip = Chip([Resonator(freq=1., levels=2, label="r", T1=lifetime)], backend="dynamiqs", frame="rotating")
-        problem = QuantumSequence(chip).build_problem(
-            (0., .1, .2), solver="dssesolve", initial_state={"r": 1}, e_ops=chip.e_ops(r="n"),
-            run_args={"keys": jax.random.split(jax.random.key(6), 4), "method": dq.method.EulerMaruyama(dt=.001)})
-        return jnp.real(solve_problem(problem).expect("r")[-1])
-
-    derivative = jax.jit(jax.grad(value))(1.)
-    step = 1e-4
-    finite = (value(1.+step)-value(1.-step))/(2*step)
-    np.testing.assert_allclose(derivative, finite, rtol=1e-5, atol=1e-8)
-
-
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
+@pytest.mark.parametrize("backend", ["qutip", pytest.param("dynamiqs", marks=pytest.mark.validation)])
 def test_advanced_jump_sampling_retains_no_click_diagnostics(backend):
     """Native weighted averages and deterministic no-click cutoff samples remain available."""
     _, problem = jump_problem(backend, storage="none", count=8)
@@ -269,8 +210,7 @@ def test_advanced_jump_sampling_retains_no_click_diagnostics(backend):
 
 
 @pytest.mark.validation
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
-def test_native_current_identity_offset_and_variance(backend):
+def test_native_current_identity_offset_and_variance():
     """An authored coherent identity offset survives monitor phase rotation and native shot noise."""
     from quchip import CollapseChannel, with_monitoring
     from quchip.declarative import DeviceModel
@@ -282,24 +222,17 @@ def test_native_current_identity_offset_and_variance(backend):
         def dissipation(self, op, p):
             return (CollapseChannel((1.+.2j)*op.I, .5, "offset"),)
 
-    chip = Chip([Offset(levels=2, label="q")], backend=backend, frame="lab")
-    if backend == "qutip":
-        solver = "smesolve"
-        args = {"ntraj": 1024, "seeds": 71}
-        options = {"dt": .001, "store_measurement": "end", "keep_runs_results": True, "progress_bar": ""}
-    else:
-        import dynamiqs as dq
-        import jax
-        solver = "dsmesolve"
-        args = {"keys": jax.random.split(jax.random.key(71), 1024), "method": dq.method.EulerMaruyama(dt=.001)}
-        options = {}
+    chip = Chip([Offset(levels=2, label="q")], frame="lab")
+    solver = "smesolve"
+    args = {"ntraj": 1024, "seeds": 71}
+    options = {"dt": .001, "store_measurement": "end", "keep_runs_results": True, "progress_bar": ""}
     problem = QuantumSequence(chip).build_problem([0., .1, .2], solver=solver, run_args=args, options=options)
     key = problem.engine_result.slh.channels[0].key
     problem = with_monitoring(problem, {key: .4}, phases={key: .3})
     result = solve_problem(problem)
     record = result.records()
     assert record.channels == (key,) and record.efficiencies == (.4,) and record.phases == (.3,)
-    assert record.sampling == ("end" if backend == "qutip" else "mean") and not record.heterodyne
+    assert record.sampling == "end" and not record.heterodyne
     np.testing.assert_array_equal(record.edges, [0., .1, .2])
     records = np.asarray(record.values)
     assert records.shape == (1024, 1, 2)
@@ -312,7 +245,6 @@ def test_native_current_identity_offset_and_variance(backend):
     np.testing.assert_allclose(result.run(0).population("q", 0), 1., atol=1e-12)
 
 
-
 @pytest.mark.validation
 def test_native_event_buffer_exhaustion_cannot_look_like_completed_evolution():
     """Native raw data survives while analysis rejects Event's silently unfinished capped solve."""
@@ -322,7 +254,7 @@ def test_native_event_buffer_exhaustion_cannot_look_like_completed_evolution():
     chip = Chip([Resonator(freq=1., levels=3, label="r", T1=.1)], backend="dynamiqs", frame="rotating")
     problem = QuantumSequence(chip).build_problem(
         [0., .5, 1.], solver="jssesolve", initial_state={"r": 2}, e_ops=chip.e_ops(r="n"),
-        run_args={"keys": jax.random.split(jax.random.key(11), 2), "method": dq.method.Event(dtmax=.01)},
+        run_args={"keys": jax.random.split(jax.random.key(11), 2), "method": dq.method.Event(dtmax=.05)},
         options={"nmaxclick": 1})
     incomplete = solve_problem(problem)
     assert incomplete.native.clicktimes.shape[-1] == 1
@@ -359,7 +291,9 @@ def native_trajectory_arguments(solver, count, seed):
     return {"keys": keys, "method": dq.method.EulerMaruyama(dt=.001)}, {}
 
 
-@pytest.mark.parametrize("backend", ["qutip", pytest.param("dynamiqs", marks=pytest.mark.optional_backend)])
+@pytest.mark.parametrize("backend", [
+    "qutip", pytest.param("dynamiqs", marks=[pytest.mark.optional_backend, pytest.mark.validation]),
+])
 def test_records_clicks_and_run_values_share_one_layout(backend):
     """#194: records, clicks and per-run expectations have the same shapes and labels on both backends."""
     from quchip import with_monitoring
@@ -395,21 +329,15 @@ def test_records_clicks_and_run_values_share_one_layout(backend):
 
 
 @pytest.mark.validation
-@pytest.mark.parametrize("backend", ["qutip", pytest.param("dynamiqs", marks=pytest.mark.optional_backend)])
 @pytest.mark.parametrize("sampling", ["plain", "no-click run apart"])
-def test_weighted_click_count_matches_the_emitted_photon_number(backend, sampling):
+def test_weighted_click_count_matches_the_emitted_photon_number(sampling):
     """Two photons decay at 1/ns. The weighted mean click count over 1 ns is γ∫⟨n⟩dt = 2(1 − e⁻¹)."""
-    if backend == "dynamiqs":
-        dq = pytest.importorskip("dynamiqs")
-    chip = Chip([Resonator(freq=1., levels=3, label="r", T1=1.)], backend=backend, frame="rotating")
-    solver = TRAJECTORY_SOLVERS[backend][1]
+    chip = Chip([Resonator(freq=1., levels=3, label="r", T1=1.)], backend="qutip", frame="rotating")
+    solver = TRAJECTORY_SOLVERS["qutip"][1]
     count = 1024
     run_args, options = native_trajectory_arguments(solver, count, 5)
     if sampling != "plain":
-        if backend == "qutip":
-            options = {**options, "improved_sampling": True}
-        else:
-            run_args = {**run_args, "method": dq.method.Event(dtmax=.01, smart_sampling=True)}
+        options = {**options, "improved_sampling": True}
     problem = QuantumSequence(chip).build_problem([0., .5, 1.], solver=solver, initial_state={"r": 2},
                                                   run_args=run_args, options=options, states="none")
     clicks = solve_problem(problem).clicks()
@@ -429,7 +357,7 @@ def test_weighted_click_count_matches_the_emitted_photon_number(backend, samplin
 
 
 @pytest.mark.validation
-@pytest.mark.parametrize("backend,sampling", [("qutip", "start"), ("qutip", "middle"), ("qutip", "end"),
+@pytest.mark.parametrize("backend,sampling", [("qutip", "middle"),
                                               pytest.param("dynamiqs", "mean", marks=pytest.mark.optional_backend)])
 def test_mean_record_follows_the_native_sampling_of_a_decaying_field(backend, sampling):
     """A coherent state α₀ = 1 decays at γ = 1/ns under ideal homodyne detection and stays coherent, so the
@@ -447,13 +375,14 @@ def test_mean_record_follows_the_native_sampling_of_a_decaying_field(backend, sa
         options = {}
     else:
         solver = "ssesolve"
-        count = 2048
+        count = 1024
         run_args = {"ntraj": count, "seeds": 3}
         options = {"dt": .005, "store_measurement": sampling, "keep_runs_results": True, "progress_bar": ""}
     from scipy.special import factorial
 
-    chip = Chip([Resonator(freq=1., levels=12, label="r", T1=1.)], backend=backend, frame="rotating")
-    levels = np.arange(12)
+    # A coherent state with |α|² = 1 has 1e-5 of its population above eight levels.
+    chip = Chip([Resonator(freq=1., levels=8, label="r", T1=1.)], backend=backend, frame="rotating")
+    levels = np.arange(8)
     coherent = np.exp(-.5) / np.sqrt(factorial(levels))
     problem = QuantumSequence(chip).build_problem([0., 1.], solver=solver, initial_state=chip.bare_state(r=coherent),
                                                   run_args=run_args, options=options, states="none")

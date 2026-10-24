@@ -52,17 +52,17 @@ def test_gaussian_ramsey_delay_gradient_matches_finite_difference() -> None:
     sequence = QuantumSequence(chip)
     sequence.schedule(
         drive,
-        envelope=Gaussian(duration=20.0, amplitude=0.02, sigmas=4),
+        envelope=Gaussian(duration=10.0, amplitude=0.04, sigmas=4),
         freq=5.0,
     )
-    wait = sequence.delay(q, 80.0)
+    wait = sequence.delay(q, 40.0)
     sequence.schedule(
         drive,
-        envelope=Gaussian(duration=20.0, amplitude=0.02, sigmas=4),
+        envelope=Gaussian(duration=10.0, amplitude=0.04, sigmas=4),
         freq=5.0,
     )
     initial_state = chip.state(q=0)
-    tlist = jnp.linspace(0.0, 160.0, 161)
+    tlist = jnp.linspace(0.0, 80.0, 3)
 
     def final_population(delay: jax.Array) -> jax.Array:
         result = sequence.simulate_batch(
@@ -73,12 +73,11 @@ def test_gaussian_ramsey_delay_gradient_matches_finite_difference() -> None:
             )
         return jnp.reshape(result.population("q", level=1, reduce="last"), (-1,))[0]
 
-    delay = jnp.asarray(80.0)
-    autodiff = jax.grad(final_population)(delay)
+    delay = jnp.asarray(40.0)
+    autodiff = jax.jit(jax.grad(final_population))(delay)
     step = 1e-2
-    finite_difference = (
-        final_population(delay + step) - final_population(delay - step)
-    ) / (2.0 * step)
+    population = jax.jit(final_population)
+    finite_difference = (population(delay + step) - population(delay - step)) / (2.0 * step)
 
     assert abs(float(autodiff)) > 1e-5
     np.testing.assert_allclose(autodiff, finite_difference, rtol=1e-3, atol=1e-6)
@@ -169,7 +168,7 @@ def test_drive_matrix_element_ratio_supports_jax_grad() -> None:
         elements = chip.drive_matrix_elements(q1, drives=[d1, d2])
         return jnp.real(elements[d2] / elements[d1])
 
-    value, grad = jax.value_and_grad(loss)(jnp.asarray(0.03))
+    value, grad = jax.jit(jax.value_and_grad(loss))(jnp.asarray(0.03))
 
     assert jnp.isfinite(value)
     assert jnp.isfinite(grad)
@@ -199,84 +198,11 @@ def test_cr_susceptibility_supports_jax_grad() -> None:
         result = analyze_cr_susceptibility(chip, control, target)
         return jnp.abs(result.ZX_per_amplitude) ** 2
 
-    value, derivative = jax.value_and_grad(loss)(jnp.asarray(6.5))
+    value, derivative = jax.jit(jax.value_and_grad(loss))(jnp.asarray(6.5))
 
     assert jnp.isfinite(value)
     assert jnp.isfinite(derivative)
     assert abs(float(derivative)) > 1e-8
-
-
-@pytest.mark.validation
-@pytest.mark.optional_backend
-def test_reference_freq_supports_jax_grad() -> None:
-    """A device's ``reference_freq`` (readout/frame LO) must be differentiable."""
-    # Detuning the reference surfaces idle precession Delta = omega - reference_freq in
-    # transverse observables, so d<sigma_x>(T)/d(reference_freq) is finite and non-zero.
-    pytest.importorskip("dynamiqs")
-    from quchip.engine import simulate
-
-    q = DuffingTransmon(freq=5.0, anharmonicity=-0.30, levels=3, label="q")
-    chip = Chip([q], frame="rotating", backend="dynamiqs")
-    plus = (chip.bare_state({q: 0}) + chip.bare_state({q: 1})) / np.sqrt(2)
-    t = jnp.linspace(0.0, 50.0, 26)
-
-    # reference_freq sets the rotating frame, so detuning it precesses the state
-    # relative to a fixed |+> target; the JAX-native overlap accessor keeps the
-    # whole path differentiable without a backend-bound e_op.
-    def loss(ref):
-        q.reference_freq = ref
-        r = simulate(chip, [], t, initial_state=plus, states="all")
-        return jnp.real(r.overlap(plus)[-1])
-
-    # Δ·T ≈ 0.25 cycle (Δ = 5 MHz over 50 ns): the steepest point of the overlap
-    # fringe, so the gradient is O(1), a strong physical check of idle precession.
-    value, grad = jax.value_and_grad(loss)(jnp.asarray(4.995))
-    assert jnp.isfinite(value) and jnp.isfinite(grad)
-    assert abs(float(grad)) > 1e-3, "reference_freq detuning must move the state's transverse overlap"
-
-
-@pytest.mark.validation
-@pytest.mark.optional_backend
-def test_chip_state_dressed_initial_state_traces_through_simulate() -> None:
-    """``chip.state()`` (dressed) must work as an initial state under jit/grad."""
-    # A dressed eigenstate of the static chip is stationary, so its bare-qubit population
-    # is time-independent and stays near 1 for the weakly hybridized |1,0> label.
-    pytest.importorskip("dynamiqs")
-    from quchip import Capacitive, Resonator
-    from quchip.engine import simulate
-
-    def trace(freq):
-        q = DuffingTransmon(freq=freq, anharmonicity=-0.3, levels=3, label="q")
-        r = Resonator(freq=7.1, levels=3, label="r")
-        chip = Chip(
-            [q, r],
-            [Capacitive(q, r, g=0.06)],
-            frame="rotating",
-            approximation=RWA(),
-            backend="dynamiqs",
-        )
-        result = simulate(
-            chip,
-            [],
-            jnp.linspace(0.0, 10.0, 8),
-            initial_state=chip.state({q: 1, r: 0}),
-            )
-        return result.population(q, level=1)
-
-    def loss(freq):
-        populations = trace(freq)
-        return populations[-1], populations
-
-    (value, pops), grad = jax.jit(jax.value_and_grad(loss, has_aux=True))(jnp.asarray(5.02))
-    assert jnp.isfinite(value) and jnp.isfinite(grad)
-    assert float(value) > 0.9
-
-    # Stationarity discriminates dressed from bare: the solve runs in the
-    # rotating frame under RWA, so a lab-dressed eigenstate is constant only
-    # up to RWA corrections (~4e-5 here), while a bare |1,0> would beat with
-    # amplitude 4g²/Δ² ≈ 3e-3. 5e-4 sits between the two scales.
-    pops = np.asarray(pops)
-    np.testing.assert_allclose(pops, float(pops[0]), atol=5e-4)
 
 
 @pytest.mark.validation

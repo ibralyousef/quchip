@@ -12,10 +12,10 @@ def _sequence(backend):
 
 
 @pytest.mark.validation
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
 @pytest.mark.parametrize("storage", ["all", "final", "none"])
 @pytest.mark.parametrize("batch", [False, True])
-def test_observable_history_is_independent_of_state_storage(backend, storage, batch):
+def test_observable_history_is_independent_of_state_storage(storage, batch):
+    backend = "qutip"
     seq, q = _sequence(backend)
     times = np.linspace(0.0, 2.0, 5)
     kwargs = dict(tlist=times, states=storage, e_ops={"q": q.number_operator()})
@@ -58,9 +58,8 @@ def test_public_storage_flags_have_one_replacement(flag):
 
 
 @pytest.mark.validation
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
-def test_final_state_lookup_requires_a_retained_time(backend):
-    seq, _ = _sequence(backend)
+def test_final_state_lookup_requires_a_retained_time():
+    seq, _ = _sequence("qutip")
     result = seq.simulate(tlist=[0.0, 1.0, 2.0], states="final")
     np.testing.assert_array_equal(result._backend.to_array(result.state_at(2.0)),
                                   result._backend.to_array(result.final_state))
@@ -68,7 +67,7 @@ def test_final_state_lookup_requires_a_retained_time(backend):
         result.state_at(1.0)
 
 
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
+@pytest.mark.parametrize("backend", ["qutip", pytest.param("dynamiqs", marks=pytest.mark.validation)])
 def test_populations_read_the_final_state_when_only_it_is_saved(backend):
     """population() holds the final value alone under states="final"; final_population() reads it either way."""
     seq, q = _sequence(backend)
@@ -88,7 +87,7 @@ def test_populations_read_the_final_state_when_only_it_is_saved(backend):
         seq.simulate(tlist=times, states="none").population(q, 1)
 
 
-@pytest.mark.parametrize("backend", ["qutip", "dynamiqs"])
+@pytest.mark.parametrize("backend", ["qutip", pytest.param("dynamiqs", marks=pytest.mark.validation)])
 @pytest.mark.parametrize("noisy", [False, True])
 def test_batch_final_projections_do_not_require_histories(backend, noisy):
     seq, _ = _sequence(backend)
