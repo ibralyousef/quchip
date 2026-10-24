@@ -18,7 +18,7 @@ gate and pole analysis of pulses and readout:
 - `ExcitationCutoff(max_total=K)` keeps the states with at most `K`
   excitations. On large conserving chips, finite-power VNA calls, output
   spectra and correlation functions choose `K` themselves, compare it with
-  `K + 1`, and warn which `K` they kept.
+  `K + 1`, and warn which cutoff they kept.
 - `eliminate_spectators(chip, keep)` reduces a chip to the kept devices, one
   Schrieffer–Wolff step at a time. With `local=True`, each step works on a
   patch around the removed device. Removed readouts keep their dressed VNA
@@ -37,8 +37,11 @@ gate and pole analysis of pulses and readout:
   static bias, in couplings, drives, observables and ports.
 
 A level label such as `{"q0": 1}` now names the dressed state in every
-workflow, also as an initial state. Changes and migration below describes this
-rule and every other change that can need action when you upgrade.
+workflow, also as an initial state. Pulse solves on a chip without a frame
+use the rotating frame, and a pulse without `freq` on a charge, phase or
+two-photon line takes a carrier at its device. Changes and migration below
+describes these rules and every other change that can need action when you
+upgrade.
 
 ### Changes since 0.4.0
 
@@ -53,6 +56,7 @@ rule and every other change that can need action when you upgrade.
   `external_port()` and `external_ports` for `exposure()` and `exposures`,
   and `NetworkPort` and `ComponentPort` for `FieldExposure` and `FieldSide`.
   The `check_truncation()` result methods stay until 0.6.
+  ([#219](https://github.com/quchip/quchip/pull/219))
 - Warnings are shorter, name the one action that sets or silences them, and
   point at the caller's line. The default-frame and automatic-carrier
   warnings have fixed text, so Python shows each once per line of code
@@ -61,6 +65,7 @@ rule and every other change that can need action when you upgrade.
   `chip.freq()` and frame references still raise for an ambiguous label
   (overlap below one half or a vanishing margin). Partitioned results no
   longer warn when they build the joint state; the memory guard stays.
+  ([#219](https://github.com/quchip/quchip/pull/219))
 - The dynamiqs `steadystate()` counts the Liouvillian nullity only up to
   `diagnostic_max_dimension` (default 16), as the QuTiP backend does. Above
   it, the singular value decomposition, which cost about ten times the solve,
@@ -69,9 +74,10 @@ rule and every other change that can need action when you upgrade.
   one an unreliable state. Pass a larger
   `diagnostic_max_dimension` to keep the check. A
   `D = 24` steady state takes about 0.05–0.1 s instead of 0.5–0.8 s.
+  ([#219](https://github.com/quchip/quchip/pull/219))
 - A QuTiP batch falls back to one process only when a worker process stops.
   Other pool errors, such as a pickling failure, now raise instead of
-  rerunning the batch.
+  rerunning the batch. ([#219](https://github.com/quchip/quchip/pull/219))
 - A pulse scheduled without `freq` on a charge, phase, or two-photon line takes
   a carrier at the line's device and warns. Charge and
   phase lines use `chip.freq(device)`, the dressed `0 -> 1` frequency, and a
@@ -313,7 +319,8 @@ rule and every other change that can need action when you upgrade.
   workers that the available memory holds, and each result records its count
   in `stats["workers"]`.
   ([#196](https://github.com/quchip/quchip/issues/196),
-  [#205](https://github.com/quchip/quchip/pull/205))
+  [#205](https://github.com/quchip/quchip/pull/205),
+  [#219](https://github.com/quchip/quchip/pull/219))
 
 #### New features
 
@@ -842,6 +849,7 @@ rule and every other change that can need action when you upgrade.
   and starts the noise comparison at the first agreeing pair, which keeps the
   same cutoff and skips the noise solves below it: 49 s instead of 55 s for a
   four-level transmon and a 20-level resonator at five frequencies.
+  ([#219](https://github.com/quchip/quchip/pull/219))
 - On QuTiP, exact excitation spaces and `ExcitationCutoff` solves store each
   compact operator as CSR instead of a dense matrix of the compact dimension.
   A dense backend, such as dynamiqs, checks each dense compact operator
@@ -1042,6 +1050,9 @@ rule and every other change that can need action when you upgrade.
   [#201](https://github.com/quchip/quchip/issues/201),
   [#204](https://github.com/quchip/quchip/issues/204),
   [#205](https://github.com/quchip/quchip/pull/205))
+- The local test run takes about 6 minutes instead of 24. Tests that repeat
+  checks made elsewhere are removed, and CI test steps take timeouts from
+  measured suite times. ([#220](https://github.com/quchip/quchip/pull/220))
 
 ## [0.4.0] - 2026-09-29 <a id="quchip-0-4-0"></a>
 
