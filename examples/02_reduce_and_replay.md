@@ -497,6 +497,8 @@ state without building the 3²⁴-state product space. Without
 `dressed=False`, the label names a dressed eigenstate. The one-excitation
 eigenstates of the identical ring extend around it, so that state would keep
 constant populations, and quchip warns about its small assignment overlap.
+For the same reason, the default rotating frame has no dressed frequency for
+each transmon, so the ring sets `frame="lab"`.
 
 ```python
 ring_size = 24
@@ -508,7 +510,7 @@ ring_couplings = [
     Capacitive(ring_qubits[index], ring_qubits[(index + 1) % ring_size], g=0.010, label=f"g{index}")
     for index in range(ring_size)
 ]
-ring = Chip(ring_qubits, ring_couplings, approximation=RWA())
+ring = Chip(ring_qubits, ring_couplings, frame="lab", approximation=RWA())
 
 ring_times = np.linspace(0.0, 100.0, 201)
 bare_start = ring.compact_state({"q0": 1}, dressed=False)

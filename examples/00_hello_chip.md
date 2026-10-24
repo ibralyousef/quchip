@@ -174,15 +174,14 @@ states. On the 0→1 transition, the charge operator Q of the line has the
 dressed matrix element ⟨1|Q|0⟩ ≈ −i. A real π pulse therefore aims at iY up
 to a global phase. `fidelity()` gives the average gate fidelity, which counts
 the leakage. A propagator describes the Hamiltonian alone, so the call
-leaves out the resonator loss. With `dissipation=False`, it does so without
-a warning.
+leaves out the resonator loss.
 
 ```python
 gates = {}
 for name, pulse in zip(("Short", "Long"), drive_pulses):
     gate_sequence = QuantumSequence(chip)
     _ = gate_sequence.schedule(qubit_line, envelope=pulse, freq=f01)
-    gates[name] = gate_sequence.subspace_propagator(qubit, dissipation=False)
+    gates[name] = gate_sequence.subspace_propagator(qubit)
 
 iy = np.array([[0, 1], [-1, 0]])
 for name, gate in gates.items():
@@ -344,8 +343,8 @@ print(f"RESULT readout={json.dumps(readout_receipt, sort_keys=True)}")
 Output:
 
 ```text
-RESULT drive={"final_p1": {"long": 0.9808175465941472, "short": 0.3268777388364312}, "peak_p2": {"long": 0.03849751009317295, "short": 0.5637322736940182}}
-RESULT readout={"conditional_resonator_frequencies_ghz": [6.801997782702374, 6.801428548310606], "final_iq_separation": 0.9021929173534362, "solver": "mesolve"}
+RESULT drive={"final_p1": {"long": 0.9808148840117945, "short": 0.3267935016823718}, "peak_p2": {"long": 0.03849846278076714, "short": 0.5637942301892077}}
+RESULT readout={"conditional_resonator_frequencies_ghz": [6.801997782702374, 6.801428548310606], "final_iq_separation": 0.902032482780983, "solver": "mesolve"}
 ```
 
 <!-- executed-output:end -->
