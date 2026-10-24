@@ -916,8 +916,8 @@ frequency of the line's device with the other devices in level zero (§3.5). In
 the rotating frame at `chip.freq(device)`, this carrier makes the drive's
 weight-`k` bands static. With an explicit `reference_freq`, the selected
 weight-`k` partner turns as `exp(2πi k (chip.freq(device) - reference_freq) t)`
-instead, and its Hermitian partner with the opposite sign. `ChargeDrive` and
-`PhaseDrive` set `k = 1`. `TwoPhotonDrive` sets `k = 2`, the zero-detuning
+instead, and its Hermitian partner with the opposite sign. `ChargeDrive`,
+`PhaseDrive` and the extension `ChargePhaseDrive` set `k = 1`. `TwoPhotonDrive` sets `k = 2`, the zero-detuning
 Kerr-cat pump of the static model, without pump-induced Stark shifts. quchip
 warns with the chosen carrier once per line in each sequence. Drives without a
 declared or inherited `carrier_harmonic`, such as flux and coupling drives, and
@@ -1047,7 +1047,21 @@ Re[s(t) * exp(-i 2π f_drive t)]
 
 and combines it with the operator bands. `Exact()` keeps both co-rotating and
 counter-rotating pieces. `RWA()` keeps the conventional partner for each
-excitation band and drops its counter-rotating partner.
+excitation band and drops its counter-rotating partner. The kept partner is
+the signal band whose frequency has the sign of the excitation change, for
+either sign of `f_drive`. Since `cos(-ωt + φ) = cos(ωt - φ)`, a carrier at
+`-f` drives the same transition as `+f` with the conjugate phase. A traced
+carrier keeps the same partner through a 0/1 weight on both bands.
+
+`ChargePhaseDrive` (in `quchip.extensions`) maps `I` to the charge operator
+and `Q` to the phase operator, `H = I Q_c + Q P`, where `s = I + iQ` is the
+delivered analytic signal, envelope and carrier together. With the Fock
+operators `Q_c = i(a - a†)` and `P = a + a†` this is `i(s* a - s a†)`: a positive
+carrier drives the resonant sideband at twice the rate of `ChargeDrive`, with
+the same phase convention, and the drive has no counter-rotating term. The
+other sideband cancels only where `<u|Q_c|l> = -i <u|P|l>` on every upward
+transition. Charge-basis transmons and fluxonia couple both sidebands with
+their own weights, and flux-tunable transmons generally do too.
 
 Weight-zero bands keep the complete real signal, including DC and oscillating
 longitudinal modulation, with no raising and lowering split. For longitudinal
@@ -1109,9 +1123,19 @@ sampling times, with `0` and `τ` added. The quadrature is traceable, and its
 accuracy depends on how well the sampling times resolve the envelope.
 
 `Chip.rotation_amplitude(transition, line, envelope, angle=π)` returns
-`A = θ / (2π |m| |a|)`, where `a` is the area at unit amplitude. It takes the
-amplitude at the device, so a line with signal-chain transforms or crosstalk
-raises. The result is a starting point for a calibration.
+`A = θ / (2π |Σ_l m_l H_l(f)| |a|)`, where `a` is the area at unit amplitude,
+`m_l` the dressed matrix element of line `l`, and `H_l(f)` the transfer of the
+signal chain from the scheduled line to line `l` at the dressed transition
+frequency `f`. A line without transforms has `H = 1` on itself alone. With
+`s_l = H_l s` and `s ∝ exp(-2πi f t)`, the resonant raising term of
+`Σ_l Re(s_l) D_l` is `(A/2) Σ_l H_l m_l`, without a conjugate on `H_l`. The
+method finds `H` by passing the tone `exp(-2πi f t)` through the chain: a gain
+`g` gives `g`, a delay `Δt` gives `exp(2πi f Δt)`, and crosstalk adds
+`β exp(iθ) exp(2πi f Δt)` on the victim line. Every transform that acts on
+the tone must declare `linear_time_invariant`, else the method raises.
+Differential delays between interfering paths, or dispersive filtering, can
+make the effective drive phase vary during the pulse, so the seed is rougher
+there. The result is a starting point for a calibration.
 
 ### 6.3 Exact excitation spaces in pulse solves
 

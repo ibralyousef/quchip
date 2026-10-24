@@ -279,6 +279,23 @@ This file records notable user-visible changes to quchip.
   in `stats["workers"]`.
   ([#196](https://github.com/quchip/quchip/issues/196),
   [#205](https://github.com/quchip/quchip/pull/205))
+- `pulse.<n>` parameter paths name the n-th scheduled pulse. Virtual-Z
+  shifts, delays and barriers no longer count, so `vz()` or `delay()` does not
+  move the paths of later pulses in `parameters`, `with_params()` and
+  `vary()`. Sequences without such entries keep their paths. In a sequence
+  with a `vz()`, `delay()` or `barrier()` before a pulse, renumber the paths:
+  after `vz()`, `delay()` and one pulse, `pulse.2.amplitude` is now
+  `pulse.0.amplitude`. ([#217](https://github.com/quchip/quchip/issues/217),
+  [#221](https://github.com/quchip/quchip/pull/221))
+- `ChargePhaseDrive` now drives a transition at a positive carrier, as
+  `ChargeDrive` does, and takes the automatic carrier `chip.freq(target)`.
+  Its Hamiltonian is `I·Q_c + Q·P` instead of `I·Q_c - Q·P`. On a Fock device
+  this is `i(s* a - s a†)`, the resonant sideband at twice the rate of
+  `ChargeDrive` with no counter-rotating term, so its π amplitude is half
+  that of `ChargeDrive`. Previously, a 20 ns Gaussian at ChargeDrive's π
+  amplitude and +5 GHz left a 5 GHz transmon in `|0>`, and only a negative
+  carrier drove it. To keep a previous schedule, negate `freq`.
+  ([#221](https://github.com/quchip/quchip/pull/221))
 
 #### New features
 
@@ -562,6 +579,25 @@ This file records notable user-visible changes to quchip.
   count that does not fit in memory raises `MemoryError`.
   ([#196](https://github.com/quchip/quchip/issues/196),
   [#205](https://github.com/quchip/quchip/pull/205))
+- quchip warnings have categories. `QuchipWarning`, a `UserWarning`, holds
+  `AutoChoiceWarning` for notices about automatic choices (frame, carrier,
+  cutoff, solver fallbacks) and `AccuracyWarning` for advice that a result can
+  be inaccurate (truncation, approximation, dressed labels, fits). One filter
+  such as `warnings.filterwarnings("ignore", category=AutoChoiceWarning)`
+  silences a group. Renamed APIs keep `DeprecationWarning`.
+  ([#221](https://github.com/quchip/quchip/pull/221))
+- `chip.rotation_amplitude()` works on lines with signal-chain transforms and
+  crosstalk. It passes a tone at the dressed transition frequency through the
+  chain and sums each reached line's matrix element times its transfer, so a
+  gain `g` divides the seed by `|g|` and delayed or crosstalk paths to one
+  device add as phasors. Previously, any transform on the line raised. A
+  transform must set the new class attribute
+  `SignalTransform.linear_time_invariant` to take part; `Gain`, `Delay`,
+  `Crosstalk`, `CrosstalkMatrix` and `CableLoss` set it, and a transform
+  without it still raises. `ControlEquipment.tone_transfer(line, frequency)`
+  returns the transfer to each line.
+  ([#218](https://github.com/quchip/quchip/issues/218),
+  [#221](https://github.com/quchip/quchip/pull/221))
 
 #### Fixes
 
@@ -803,6 +839,17 @@ This file records notable user-visible changes to quchip.
   more than 2,000,000 samples uses the exact envelope as a callable and warns.
   QuTiP outputs can move at the 1e-6 level.
   ([#216](https://github.com/quchip/quchip/pull/216))
+- `IQReadout.from_wiring()` no longer warns about the chip's frame. It reads
+  only the output wiring, which does not depend on the frame, so it resolves
+  the chip in the lab frame. ([#221](https://github.com/quchip/quchip/pull/221))
+- Under `RWA()`, a pulse with a negative carrier keeps the signal band that
+  co-rotates with its transition. Previously, `RWA()` picked the band by
+  position and kept the counter-rotating one, so a `ChargeDrive` π pulse at
+  `freq=-5.0` left a 5 GHz transmon in `|0>` (P1 = 0.99 under `Exact()`).
+  A carrier at `-f` now drives as at `+f` with the conjugate phase, also when
+  the carrier is traced, and the dropped-term record gives the partner at
+  `|f| + f_transition`. A zero carrier keeps its conventional half.
+  ([#221](https://github.com/quchip/quchip/pull/221))
 
 #### Performance
 
@@ -890,6 +937,14 @@ This file records notable user-visible changes to quchip.
   ([#191](https://github.com/quchip/quchip/issues/191),
   [#203](https://github.com/quchip/quchip/issues/203),
   [#205](https://github.com/quchip/quchip/pull/205))
+- `VNA.measure()` with an automatic cutoff starts each cutoff's noise solves
+  from the solutions at the previous cutoff, as its stationary solves already
+  did. The solves keep their equations and residual limit, so only the
+  solver path changes. On a 4-level transmon with a 20-level resonator, 5
+  probe frequencies and 5 noise offsets, the call takes 7.4 s instead of
+  11.4 s, with the same kept cutoff and noise spectra within 2e-13. The solutions are
+  kept only while they fit in memory.
+  ([#221](https://github.com/quchip/quchip/pull/221))
 
 #### Compatibility
 

@@ -22,6 +22,7 @@ from quchip.engine.excitation import sector_levels, sector_size
 from quchip.engine.sectors import _level_pairs
 from quchip.utils.constants import TWO_PI
 from quchip.utils.jax_utils import contains_tracer, maybe_concrete_scalar
+from quchip.utils.memory import dense_bytes, fits_memory
 
 
 class SectorProbeModel:
@@ -227,14 +228,18 @@ class SectorProbeModel:
         return tuple(float(np.sum(diagonal[offsets[n]:offsets[n + 1]])) for n in range(cutoff + 1))
 
     def quadrature_spectrum(self, cutoff: int, frequency: float, amplitudes: Any, state: np.ndarray,
-                            offsets: Any) -> tuple[np.ndarray, dict[str, Any]]:
-        """Return the normally ordered excess IQ spectrum of the selected ports.
+                            offsets: Any, starts: Any = None) -> tuple[np.ndarray, dict[str, Any], list[Any] | None]:
+        """Return the normally ordered excess IQ spectrum of the selected ports, and its resolvent solutions.
 
         It follows :func:`quchip.engine.field_statistics.quadrature_spectrum`
         for vacuum inputs. The source of output ``p`` is ``(L_p - <L_p>) rho``.
         The adjoint source at ``f`` needs the resolvent at ``-f``, so the solve
         covers every offset and its negative. Only an exact negative reuses a
-        point, so an exactly symmetric grid needs no extra solves.
+        point, so an exactly symmetric grid needs no extra solves. The third
+        value holds the solution ``Y`` of each port at each solved offset, as
+        square matrices, or ``None`` when they would not fit in memory with
+        room to spare. Passing it as ``starts`` on a larger cutoff starts each
+        solve there from it.
         """
         _, channels, _ = self.operators(cutoff)
         generator, drive = self.generator(cutoff), self.drive(frequency, amplitudes)
@@ -253,11 +258,18 @@ class SectorProbeModel:
         # values[f, r, p, 0] = Tr(L_r Y_p(f)) and values[f, r, p, 1] = Tr(L_r† Y_p(f)).
         solved_values = np.zeros((len(grid), count, count, 2), dtype=complex)
         iterations, residual, trace = 0, 0.0, 0.0
+        size = self.size(cutoff)
+        # The next cutoff solves beside the kept solutions, so they must fit with room to spare.
+        keep = fits_memory(4 * dense_bytes(len(grid) * count, size, size))
+        responses: list[Any] | None = [] if keep else None
         for p, index in enumerate(indices):
             lowering = channels[index]
             mean = lowering.multiply(state.T).sum()
             source = lowering @ state - mean * state
-            solved, steps, error, drift = generator.resolvent(frequency, drive, source, grid, observables)
+            solved, steps, error, drift, states = generator.resolvent(
+                frequency, drive, source, grid, observables, None if starts is None else starts[p], keep)
+            if responses is not None:
+                responses.append([vector.reshape(size, size) for vector in states])
             solved_values[:, :, p, :] = solved.reshape(len(grid), count, 2)
             iterations, residual, trace = max(iterations, steps), max(residual, error), max(trace, drift)
         values, reverse = solved_values[:len(offsets)], solved_values[mirror]
@@ -272,7 +284,8 @@ class SectorProbeModel:
                         # The regression source is minus the conditioned emission.
                         causal[:, 2 * r + a, 2 * p + b] = -(fb * direct + np.conj(fb) * adjoint) / 2
         excess = causal + np.conj(np.swapaxes(causal, -1, -2))
-        return excess, {"noise_iterations": iterations, "noise_residual": residual, "noise_trace_error": trace}
+        return excess, {"noise_iterations": iterations, "noise_residual": residual,
+                        "noise_trace_error": trace}, responses
 
     def correlation(self, cutoff: int, frequency: float, amplitudes: Any, state: np.ndarray, order: int,
                     output: str, input: str, delays: Any) -> tuple[np.ndarray, float, float]:

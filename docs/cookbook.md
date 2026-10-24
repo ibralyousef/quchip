@@ -213,6 +213,8 @@ fidelity = propagator.fidelity([[0, 1], [-1, 0]])
 
 `rotation_amplitude()` solves `θ = 2π |m| |A a|` for the dressed matrix
 element `m` of the line and the envelope area `A a`, with `θ = π` by default.
+On a line with gains, delays or crosstalk, `m` is the sum of each reached
+line's element times its transfer at the transition frequency.
 On an isolated transmon, the charge drive has `m = -i` on the 0 → 1
 transition. The dressed element here is `-0.99969i`, so a real π pulse aims
 at `iY`.
@@ -407,3 +409,22 @@ automatically. Use `dissipation=False` only for an intentional closed-system
 comparison. See {doc}`Backends and solvers <guides/choosing-a-backend>` for
 integration settings and {doc}`Gradients and parameter fitting <guides/differentiability>`
 for checks on derivatives.
+
+## Filter warnings
+
+quchip warnings are `QuchipWarning`s in two groups. `AutoChoiceWarning` tells
+you which frame, carrier, cutoff or fallback quchip chose for you. Pass the
+setting explicitly to remove it. `AccuracyWarning` tells you that a result can
+be inaccurate, for example because of a truncation, an approximation or a weak
+fit. Renamed APIs keep `DeprecationWarning`.
+
+```python
+import warnings
+
+from quchip import AutoChoiceWarning
+
+warnings.filterwarnings("ignore", category=AutoChoiceWarning)
+```
+
+This filter removes the notices about automatic choices and keeps the accuracy
+advice. Filter `QuchipWarning` to remove both groups.
