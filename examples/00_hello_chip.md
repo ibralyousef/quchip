@@ -171,7 +171,7 @@ The smaller peak P2 shows why the longer pulse comes closer to the target.
 and |1⟩, with the resonator empty. It returns the 2 × 2 matrix in the frame
 of the dressed frequencies and the leakage of each input out of these
 states. On the 0→1 transition, the charge operator Q of the line has the
-dressed matrix element ⟨1|Q|0⟩ ≈ −i. A real π pulse therefore aims at iY up
+dressed matrix element ⟨1|Q|0⟩ ≈ i. A real π pulse therefore aims at −iY up
 to a global phase. `fidelity()` gives the average gate fidelity, which counts
 the leakage. A propagator describes the Hamiltonian alone, so the call
 leaves out the resonator loss.
@@ -183,9 +183,9 @@ for name, pulse in zip(("Short", "Long"), drive_pulses):
     _ = gate_sequence.schedule(qubit_line, envelope=pulse, freq=f01)
     gates[name] = gate_sequence.subspace_propagator(qubit)
 
-iy = np.array([[0, 1], [-1, 0]])
+minus_iy = np.array([[0, -1], [1, 0]])
 for name, gate in gates.items():
-    print(f"{name}: fidelity to iY = {float(gate.fidelity(iy)):.3f}; "
+    print(f"{name}: fidelity to −iY = {float(gate.fidelity(minus_iy)):.3f}; "
           f"leakage from |0⟩ = {float(gate.leakage[0]):.1e}")
 ```
 
@@ -194,8 +194,8 @@ for name, gate in gates.items():
 Output:
 
 ```text
-Short: fidelity to iY = 0.422; leakage from |0⟩ = 5.8e-01
-Long: fidelity to iY = 0.988; leakage from |0⟩ = 4.3e-05
+Short: fidelity to −iY = 0.422; leakage from |0⟩ = 5.8e-01
+Long: fidelity to −iY = 0.988; leakage from |0⟩ = 4.3e-05
 ```
 
 <!-- executed-output:end -->
@@ -276,9 +276,9 @@ for level, color in enumerate(("#246FA8", "#C92F33")):
     for time in (100, 300, 900):
         point = path[np.searchsorted(readout_times, time)]
         iq_axis.plot(point.real, point.imag, "o", color=color, ms=5)
-        offset = {100: (-8, 6 if level == 0 else -14), 300: (10, 7 if level == 0 else -15), 900: (8, 6)}
+        offset = {100: (8, -14 if level == 0 else 6), 300: (-10, -15 if level == 0 else 7), 900: (-8, 6)}
         iq_axis.annotate(f"{time} ns", (point.real, point.imag), xytext=offset[time],
-                         textcoords="offset points", ha="right" if time == 100 else "left",
+                         textcoords="offset points", ha="left" if time == 100 else "right",
                          color=color, fontsize=9)
     start, end = path[90], path[96]
     iq_axis.annotate("", (end.real, end.imag), (start.real, start.imag),
@@ -286,10 +286,10 @@ for level, color in enumerate(("#246FA8", "#C92F33")):
 
 iq_axis.plot(0, 0, "+", color="#16181C", ms=8)
 iq_axis.set(xlabel=r"$\mathrm{Re}\,\alpha$", ylabel=r"$\mathrm{Im}\,\alpha$",
-            xlim=(1.15 * alpha.real.min(), 0.22), ylim=(1.2 * alpha.imag.min(), 1.2 * alpha.imag.max()))
+            xlim=(-0.22, 1.15 * alpha.real.max()), ylim=(1.2 * alpha.imag.min(), 1.2 * alpha.imag.max()))
 iq_axis.set_title("(b) Intracavity IQ in the drive frame")
 iq_axis.set_aspect("equal", adjustable="box")
-iq_axis.legend(fontsize=9, loc="upper right")
+iq_axis.legend(fontsize=9, loc="upper left")
 
 figure.savefig("../docs/images/hello_dispersive_readout_iq.svg")
 

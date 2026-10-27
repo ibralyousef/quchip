@@ -60,7 +60,7 @@ def test_executed_outputs_read_the_pulses_as_gates() -> None:
     gates = {
         name: (float(fidelity), float(leakage))
         for name, fidelity, leakage in re.findall(
-            r"^(Short|Long): fidelity to iY = (\S+); leakage from \|0⟩ = (\S+)$", output, re.MULTILINE,
+            r"^(Short|Long): fidelity to −iY = (\S+); leakage from \|0⟩ = (\S+)$", output, re.MULTILINE,
         )
     }
     assert gates.keys() == {"Short", "Long"}
