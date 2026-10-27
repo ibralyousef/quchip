@@ -39,9 +39,10 @@ gate and pole analysis of pulses and readout:
 A level label such as `{"q0": 1}` now names the dressed state in every
 workflow, also as an initial state. Pulse solves on a chip without a frame
 use the rotating frame, and a pulse without `freq` on a charge, phase or
-two-photon line takes a carrier at its device. Changes and migration below
-describes these rules and every other change that can need action when you
-upgrade.
+two-photon line takes a carrier at its device. Every built-in device uses the
+textbook charge sign `[φ, n] = +i`, so charge-drive matrix elements on Fock
+devices change sign. Changes and migration below describes these rules and
+every other change that can need action when you upgrade.
 
 ### Changes since 0.4.0
 
